@@ -1,11 +1,10 @@
 import { create, all } from 'mathjs';
-import { OrientationCalibrator } from './OrientationCalibrator.js';
 
 const math = create(all);
 
 /**
- * Système de Pedestrian Dead Reckoning (PDR) avancé
- * Implémente la détection de pas, crawling, ZUPT, et classification d'activité
+ * Système de Dead Reckoning Piéton (PDR) avancé avec détection d'activité et ZUPT
+ * Intégration AttitudeTracker pour orientation adaptative (plus d'OrientationCalibrator fixe)
  */
 export class PedestrianDeadReckoning {
   constructor(config = {}) {
@@ -63,13 +62,6 @@ export class PedestrianDeadReckoning {
     this.userHeight = 1.7; // mètres par défaut
     this.dynamicStepLength = this.config.defaultStepLength;
     
-    // Calibrateur d'orientation pour poche
-    this.orientationCalibrator = new OrientationCalibrator({
-      calibrationDuration: 2000, // 2 secondes
-      samplesRequired: 50,
-      gravityThreshold: 0.5
-    });
-    
     // Callbacks
     this.onStepDetected = null;
     this.onModeChanged = null;
@@ -79,6 +71,9 @@ export class PedestrianDeadReckoning {
     this.position = { x: 0, y: 0, z: 0 };
     this.orientation = { pitch: 0, roll: 0, yaw: 0 };
     this.velocity = { vx: 0, vy: 0, vz: 0 };
+
+    // Ajouté pour la nouvelle méthode detectSteps
+    this.accelerationHistory = [];
   }
 
   /**
@@ -91,33 +86,13 @@ export class PedestrianDeadReckoning {
   }
 
   /**
-   * Démarrage de la calibration d'orientation pour poche
-   */
-  startPocketCalibration() {
-    this.orientationCalibrator.startCalibration();
-  }
-
-  /**
-   * Traitement principal des données de capteurs
+   * Traitement principal des données de capteurs (SIMPLIFIÉ - plus d'OrientationCalibrator)
    */
   processSensorData(sensorData) {
     const { accelerometer, gyroscope, magnetometer, barometer } = sensorData;
     
-    // Phase de calibration si nécessaire
-    if (this.orientationCalibrator.isCalibrating) {
-      const calibrated = this.orientationCalibrator.addCalibrationSample(accelerometer, gyroscope);
-      if (calibrated) {
-        console.log('Calibration d\'orientation terminée');
-      }
-      return; // Ne pas traiter pendant la calibration
-    }
-    
-    // Transformation des données capteurs selon calibration
-    const transformedAcc = this.orientationCalibrator.transformAcceleration(accelerometer);
-    const transformedGyro = this.orientationCalibrator.transformGyroscope(gyroscope);
-    
-    // Ajout aux buffers avec données transformées
-    this.updateBuffers(transformedAcc, transformedGyro, magnetometer, barometer);
+    // Ajout aux buffers avec données brutes (transformation via AttitudeTracker dans LocalizationSDK)
+    this.updateBuffers(accelerometer, gyroscope, magnetometer, barometer);
     
     // Classification d'activité
     this.classifyActivity();
@@ -127,7 +102,7 @@ export class PedestrianDeadReckoning {
     
     // Détection de pas/crawling selon le mode
     if (this.currentMode === 'walking' || this.currentMode === 'running') {
-      this.detectSteps();
+      this.detectSteps(accelerometer);
     } else if (this.currentMode === 'crawling') {
       this.processCrawling();
     }
@@ -199,7 +174,7 @@ export class PedestrianDeadReckoning {
   }
 
   /**
-   * Classification d'activité adaptée pour usage en poche (sans dépendance à l'inclinaison)
+   * Classification d'activité adaptée pour usage en poche (AMÉLIORÉE)
    */
   classifyActivity() {
     if (this.accelerationBuffer.length < this.config.stepDetectionWindow) return;
@@ -219,86 +194,226 @@ export class PedestrianDeadReckoning {
       Math.sqrt(lastAcc.y * lastAcc.y + lastAcc.z * lastAcc.z)) * 180 / Math.PI;
     this.activityFeatures.deviceRoll = Math.atan2(lastAcc.y, lastAcc.z) * 180 / Math.PI;
     
-    // Fréquence des pics basée sur magnitude
+    // Fréquence des pics basée sur magnitude avec seuil adaptatif
     const peaks = this.detectPeaks(accMagnitudes);
     this.activityFeatures.stepFrequency = peaks.length / (this.config.stepDetectionWindow / this.currentSampleRate);
     this.activityFeatures.peakAmplitude = peaks.length > 0 ? Math.max(...peaks) : 0;
     
-    // Classification par arbre de décision MODIFIÉ pour poche
+    // *** CLASSIFICATION AMÉLIORÉE avec amplitude des pics ***
     const previousMode = this.currentMode;
+    const variance = this.activityFeatures.accelerationVariance;
+    const frequency = this.activityFeatures.stepFrequency;
+    const amplitude = this.activityFeatures.peakAmplitude;
     
-    // Nouveau modèle indifférent à l'angle du téléphone
-    if (this.activityFeatures.accelerationVariance < 0.3) {
-      // Stationnaire : variance très stricte
+    // Nouveau modèle avec seuils affinés
+    if (variance < 0.2) {
+      // Stationnaire : variance très stricte (réduit de 0.3 à 0.2)
       this.currentMode = 'stationary';
-    } else if (this.activityFeatures.accelerationVariance >= 0.3 && 
-               this.activityFeatures.accelerationVariance < 0.8 && 
-               this.activityFeatures.stepFrequency < 1.0) {
-      // Crawling : variance modérée + fréquence faible
+    } else if (amplitude < 0.3 && variance < 1.0 && frequency < 1.5) {
+      // Crawling : amplitude faible + variance modérée + fréquence faible
       this.currentMode = 'crawling';
-    } else if (this.activityFeatures.stepFrequency >= 1.0 && 
-               this.activityFeatures.stepFrequency < 2.5) {
-      // Walking : fréquence normale
-      this.currentMode = 'walking';
-    } else if (this.activityFeatures.stepFrequency >= 2.5) {
-      // Running : fréquence élevée
+    } else if (frequency >= 0.8 && frequency < 2.5) {
+      // Walking : fréquence normale (seuil baissé de 1.0 à 0.8)
+      if (amplitude > 1.5 && frequency > 2.0) {
+        // Détection fine de course par amplitude élevée + fréquence élevée
+        this.currentMode = 'running';
+      } else {
+        this.currentMode = 'walking';
+      }
+    } else if (frequency >= 2.5 || (amplitude > 1.2 && frequency > 2.0)) {
+      // Running : fréquence très élevée OU amplitude élevée + fréquence élevée
       this.currentMode = 'running';
     } else {
       // Mode par défaut si conditions ambiguës
       this.currentMode = 'walking';
     }
     
-    // Notification changement de mode
+    // Notification changement de mode avec plus d'infos
     if (previousMode !== this.currentMode && this.onModeChanged) {
+      console.log(`[MODE] ${previousMode} → ${this.currentMode} | Var:${variance.toFixed(3)}, Freq:${frequency.toFixed(2)}Hz, Amp:${amplitude.toFixed(2)}`);
       this.onModeChanged(this.currentMode, this.activityFeatures);
     }
   }
 
   /**
-   * Détection de pics pour les pas
+   * Détection robuste de pas avec seuil adaptatif (REFACTORISÉE)
    */
-  detectPeaks(data, threshold = null) {
-    if (!threshold) {
-      const mean = data.reduce((a, b) => a + b) / data.length;
-      const std = Math.sqrt(data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / data.length);
-      threshold = mean + std;
-    }
+  detectSteps(accelerometerData) {
+    // Ajouter les nouvelles données
+    this.accelerationHistory.push({
+      ...accelerometerData,
+      timestamp: Date.now()
+    });
+
+    // Garder historique de 3 secondes
+    const cutoffTime = Date.now() - 3000;
+    this.accelerationHistory = this.accelerationHistory.filter(
+      sample => sample.timestamp > cutoffTime
+    );
+
+    if (this.accelerationHistory.length < 20) return; // Pas assez de données
+
+    // *** NOUVEAU PIPELINE ADAPTATIF ***
     
-    const peaks = [];
-    for (let i = 1; i < data.length - 1; i++) {
-      if (data[i] > data[i - 1] && data[i] > data[i + 1] && data[i] > threshold) {
-        peaks.push(data[i]);
+    // 1. Calcul magnitude brute et suppression gravité
+    const recentSamples = this.accelerationHistory.slice(-50); // 2 secondes à 25Hz
+    const magnitudes = recentSamples.map(sample => {
+      const linearAcc = this.removeGravityComponent(sample);
+      return Math.sqrt(linearAcc.x**2 + linearAcc.y**2 + linearAcc.z**2);
+    });
+    
+    // 2. Filtrage passe-haut (supprimer composante quasi-statique)
+    const detrendedMagnitudes = this.applyDetrendingFilter(magnitudes);
+    
+    // 3. Détection de pics avec seuil adaptatif (utilise detectPeaks existant)
+    const peaks = this.detectPeaks(detrendedMagnitudes); // Pas de seuil = calcul auto
+    
+    const now = Date.now();
+    
+    // 4. Validation temporelle anti-rebond
+    const minStepInterval = this.currentMode === 'running' ? 250 : 400; // ms
+    
+    if (peaks.length > 0 && (now - this.lastStepTime) > minStepInterval) {
+      // Pas détecté validé
+      this.handleStepDetected(peaks[peaks.length - 1], magnitudes[magnitudes.length - 1]);
+      
+      // *** DEBUG: Log périodique avec nouvelles métriques ***
+      if (this.stepCount % 5 === 0) {
+        const adaptiveThreshold = this.getLastAdaptiveThreshold();
+        console.log(`[STEP] Pas ${this.stepCount}: peak=${peaks[peaks.length - 1].toFixed(2)}, seuil=${adaptiveThreshold.toFixed(2)}, mode=${this.currentMode}`);
       }
     }
+  }
+
+  /**
+   * Filtrage passe-haut par détrending (supprime moyenne glissante)
+   */
+  applyDetrendingFilter(magnitudes) {
+    if (magnitudes.length < 10) return magnitudes;
+    
+    // Calculer moyenne glissante sur ~1 seconde (25 échantillons)
+    const windowSize = Math.min(25, magnitudes.length);
+    const detrended = [];
+    
+    for (let i = 0; i < magnitudes.length; i++) {
+      // Fenêtre centrée autour de l'échantillon i
+      const start = Math.max(0, i - Math.floor(windowSize / 2));
+      const end = Math.min(magnitudes.length, start + windowSize);
+      
+      const window = magnitudes.slice(start, end);
+      const movingAverage = window.reduce((sum, val) => sum + val, 0) / window.length;
+      
+      // Soustraire la moyenne glissante (supprime composante lente)
+      detrended.push(Math.abs(magnitudes[i] - movingAverage));
+    }
+    
+    return detrended;
+  }
+
+  /**
+   * Obtenir le dernier seuil adaptatif calculé (pour debug)
+   */
+  getLastAdaptiveThreshold() {
+    return this._lastAdaptiveThreshold || 0.5;
+  }
+
+  /**
+   * Détection de pics avec seuil adaptatif amélioré
+   */
+  detectPeaks(data, threshold = null) {
+    if (data.length < 5) return [];
+    
+    // Si pas de seuil fourni, calcul automatique
+    if (!threshold) {
+      const mean = data.reduce((a, b) => a + b) / data.length;
+      const variance = data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / data.length;
+      const std = Math.sqrt(variance);
+      
+      // *** SEUIL ADAPTATIF SELON MODE ***
+      let k = 1.0; // Coefficient multiplicateur par défaut
+      switch (this.currentMode) {
+        case 'running':
+          k = 0.8; // Plus sensible pour la course
+          break;
+        case 'walking':
+          k = 1.0; // Standard pour la marche
+          break;
+        case 'crawling':
+          k = 1.5; // Moins sensible pour ramper
+          break;
+        default:
+          k = 1.2;
+      }
+      
+      threshold = mean + k * std;
+      
+      // Contraintes pour éviter les extrêmes
+      threshold = Math.max(0.1, Math.min(2.0, threshold));
+      this._lastAdaptiveThreshold = threshold; // Stockage pour debug
+    }
+    
+    // Détection de pics locaux
+    const peaks = [];
+    for (let i = 1; i < data.length - 1; i++) {
+      const current = data[i];
+      const prev = data[i - 1];
+      const next = data[i + 1];
+      
+      // Conditions pour un pic valide
+      const isLocalMaximum = current > prev && current > next;
+      const isAboveThreshold = current > threshold;
+      
+      if (isLocalMaximum && isAboveThreshold) {
+        peaks.push(current);
+      }
+    }
+    
     return peaks;
   }
 
   /**
-   * Détection de pas basée sur la magnitude (adaptée pour poche)
+   * Suppression de la composante gravité en temps réel (NOUVEAU - sans calibration poche)
    */
-  detectSteps() {
-    if (this.accelerationBuffer.length < this.config.stepDetectionWindow) return;
+  removeGravityComponent(acceleration) {
+    // *** NOUVELLE APPROCHE: Estimation dynamique de la gravité sans calibration fixe ***
     
-    // Analyse basée sur la magnitude totale (indépendante de l'orientation)
-    const recentData = this.accelerationBuffer.slice(-this.config.stepDetectionWindow);
-    const magnitudeAcc = recentData.map(d => d.magnitude);
+    // Historique de fenêtre glissante pour estimer la gravité locale
+    this.gravityWindow = this.gravityWindow || [];
+    this.gravityWindow.push({ ...acceleration });
     
-    // Détection de pics sur la magnitude
-    const threshold = this.currentMode === 'running' ? 
-      this.config.stepThreshold * 1.5 : this.config.stepThreshold;
-    const peaks = this.detectPeaks(magnitudeAcc, threshold);
+    // Garder seulement les 15 derniers échantillons (0.6s à 25Hz)
+    if (this.gravityWindow.length > 15) {
+      this.gravityWindow.shift();
+    }
     
-    const now = Date.now();
-    if (peaks.length > 0 && (now - this.lastStepTime) > 300) { // Minimum 300ms entre pas
-      this.stepCount++;
-      this.lastStepTime = now;
+    // Estimation de la gravité par moyenne mobile si fenêtre suffisante
+    if (this.gravityWindow.length >= 10) {
+      const gravityEstimate = {
+        x: this.gravityWindow.reduce((sum, acc) => sum + acc.x, 0) / this.gravityWindow.length,
+        y: this.gravityWindow.reduce((sum, acc) => sum + acc.y, 0) / this.gravityWindow.length,
+        z: this.gravityWindow.reduce((sum, acc) => sum + acc.z, 0) / this.gravityWindow.length
+      };
       
-      // Estimation dynamique de la longueur de pas
-      this.updateDynamicStepLength(peaks[peaks.length - 1]);
-      
-      // Callback pas détecté
-      if (this.onStepDetected) {
-        this.onStepDetected(this.stepCount, this.dynamicStepLength);
+      // Soustraction adaptative de la gravité
+      return {
+        x: acceleration.x - gravityEstimate.x,
+        y: acceleration.y - gravityEstimate.y, 
+        z: acceleration.z - gravityEstimate.z
+      };
+    } else {
+      // Fallback : estimation simple de gravité
+      const magnitude = Math.sqrt(acceleration.x**2 + acceleration.y**2 + acceleration.z**2);
+      if (magnitude > 8 && magnitude < 12) {
+        // L'accélération semble contenir principalement la gravité
+        const scale = 9.81 / magnitude;
+        return {
+          x: acceleration.x - acceleration.x * scale,
+          y: acceleration.y - acceleration.y * scale,
+          z: acceleration.z - acceleration.z * scale
+        };
+      } else {
+        // Pas de compensation si magnitude anormale
+        return acceleration;
       }
     }
   }
@@ -321,17 +436,40 @@ export class PedestrianDeadReckoning {
   }
 
   /**
-   * Mise à jour dynamique de la longueur de pas
+   * Mise à jour dynamique de la longueur de pas (corrigée pour amplitudes filtrées)
    */
   updateDynamicStepLength(peakAmplitude) {
-    // Modèle adaptatif basé sur l'amplitude du pic
+    // Modèle adaptatif basé sur l'amplitude du pic filtré
     const baseLength = this.userHeight * this.config.heightRatio;
-    const amplitudeFactor = Math.min(Math.max(peakAmplitude / 12.0, 0.8), 1.2);
     
-    // Lissage exponentiel
-    const alpha = 0.1;
+    // *** BUG FIX: Ajustement pour amplitudes filtrées (plus petites) ***
+    // Les amplitudes filtrées sont généralement entre 0.5 et 3.0
+    const normalizedAmplitude = Math.max(0.5, Math.min(3.0, peakAmplitude));
+    const amplitudeFactor = 0.7 + (normalizedAmplitude - 0.5) * 0.4 / 2.5; // [0.7, 1.1]
+    
+    // Adaptation selon le mode
+    let modeFactor = 1.0;
+    switch (this.currentMode) {
+      case 'running':
+        modeFactor = 1.2; // Pas plus longs en course
+        break;
+      case 'walking':
+        modeFactor = 1.0; // Standard
+        break;
+      case 'crawling':
+        modeFactor = 0.3; // Pas très courts pour ramper
+        break;
+    }
+    
+    const adjustedLength = baseLength * amplitudeFactor * modeFactor;
+    
+    // Lissage exponentiel plus lent pour éviter les fluctuations
+    const alpha = 0.05;
     this.dynamicStepLength = (1 - alpha) * this.dynamicStepLength + 
-                            alpha * (baseLength * amplitudeFactor);
+                            alpha * adjustedLength;
+    
+    // Contraintes raisonnables
+    this.dynamicStepLength = Math.max(0.3, Math.min(1.2, this.dynamicStepLength));
   }
 
   /**
@@ -380,7 +518,7 @@ export class PedestrianDeadReckoning {
   }
 
   /**
-   * Mise à jour de la position basée sur PDR
+   * Mise à jour de la position basée sur PDR améliorée
    */
   updatePosition() {
     if (this.accelerationBuffer.length < 2 || this.gyroscopeBuffer.length < 2) return;
@@ -391,34 +529,78 @@ export class PedestrianDeadReckoning {
     
     const dt = (lastAcc.timestamp - prevAcc.timestamp) / 1000;
     
-    // Mise à jour orientation
-    this.orientation.yaw += lastGyro.z * dt;
-    this.orientation.pitch += lastGyro.x * dt;
-    this.orientation.roll += lastGyro.y * dt;
+    // Mise à jour orientation avec correction
+    this.updateOrientation(lastGyro, dt);
     
-    // Mise à jour position selon le mode
-    if (this.currentMode === 'walking' || this.currentMode === 'running') {
-      // Utiliser les pas détectés
-      const stepDistance = this.dynamicStepLength;
-      this.position.x += stepDistance * Math.cos(this.orientation.yaw);
-      this.position.y += stepDistance * Math.sin(this.orientation.yaw);
-    } else if (this.currentMode === 'crawling') {
-      // Utiliser le modèle de crawling
-      const crawlStep = this.config.crawlSpeed * dt;
-      this.position.x += crawlStep * Math.cos(this.orientation.yaw);
-      this.position.y += crawlStep * Math.sin(this.orientation.yaw);
-    }
+    // *** BUG FIX: Mise à jour position uniquement sur détection de pas validé ***
+    // Ne plus mettre à jour la position de façon continue, seulement sur pas détecté
+    // La position sera mise à jour via le callback onStepDetected
     
-    // Mise à jour altitude avec baromètre
+    // Traitement de l'altitude avec baromètre (indépendant des pas)
+    this.updateAltitude();
+  }
+
+  /**
+   * Mise à jour de l'orientation avec filtrage
+   */
+  updateOrientation(gyroData, dt) {
+    // Filtrage des données gyroscope pour éviter la dérive
+    const maxAngularVelocity = 10; // rad/s - limite raisonnable
+    
+    const filteredGyro = {
+      x: Math.max(-maxAngularVelocity, Math.min(maxAngularVelocity, gyroData.x)),
+      y: Math.max(-maxAngularVelocity, Math.min(maxAngularVelocity, gyroData.y)),
+      z: Math.max(-maxAngularVelocity, Math.min(maxAngularVelocity, gyroData.z))
+    };
+    
+    // Mise à jour avec correction de dérive
+    this.orientation.yaw += filteredGyro.z * dt;
+    this.orientation.pitch += filteredGyro.x * dt * 0.1; // Réduction du facteur pour pitch/roll
+    this.orientation.roll += filteredGyro.y * dt * 0.1;
+    
+    // Normalisation des angles
+    this.orientation.yaw = this.normalizeAngle(this.orientation.yaw);
+    this.orientation.pitch = this.normalizeAngle(this.orientation.pitch);
+    this.orientation.roll = this.normalizeAngle(this.orientation.roll);
+  }
+
+  /**
+   * Mise à jour de l'altitude via baromètre
+   */
+  updateAltitude() {
     if (this.barometerBuffer.length >= 2) {
       const lastBaro = this.barometerBuffer[this.barometerBuffer.length - 1];
       const prevBaro = this.barometerBuffer[this.barometerBuffer.length - 2];
       const altitudeChange = lastBaro.altitude - prevBaro.altitude;
       
-      if (Math.abs(altitudeChange) < 2.0) { // Filtre aberrations
+      // Filtrage des changements d'altitude aberrants
+      if (Math.abs(altitudeChange) < 1.0) { // Plus strict : 1m max
         this.position.z += altitudeChange;
       }
     }
+  }
+
+  /**
+   * Mise à jour de position sur pas détecté (appelée depuis detectSteps)
+   */
+  advancePositionOnStep() {
+    // Avancer la position seulement quand un pas est validé
+    const stepDistance = this.dynamicStepLength;
+    
+    // Utiliser l'orientation actuelle
+    this.position.x += stepDistance * Math.cos(this.orientation.yaw);
+    this.position.y += stepDistance * Math.sin(this.orientation.yaw);
+    
+    console.log(`[PDR] Position mise à jour: (${this.position.x.toFixed(2)}, ${this.position.y.toFixed(2)}) - Distance pas: ${stepDistance.toFixed(2)}m`);
+  }
+
+  /**
+   * Normalisation d'angle [-π, π]
+   */
+  normalizeAngle(angle) {
+    while (angle > Math.PI) angle -= 2 * Math.PI;
+    while (angle < -Math.PI) angle += 2 * Math.PI;
+    return angle;
   }
 
   /**
@@ -460,31 +642,8 @@ export class PedestrianDeadReckoning {
       crawlDistance: this.crawlDistance,
       features: { ...this.activityFeatures },
       sampleRate: this.currentSampleRate,
-      isZUPT: this.isZUPT,
-      // Ajout état calibration
-      calibration: this.orientationCalibrator.getStatus()
+      isZUPT: this.isZUPT
     };
-  }
-
-  /**
-   * Configuration des callbacks de calibration
-   */
-  setCalibrationCallbacks({ onProgress, onComplete }) {
-    this.orientationCalibrator.setCallbacks({ onProgress, onComplete });
-  }
-
-  /**
-   * Vérifier si la calibration est nécessaire ou en cours
-   */
-  needsCalibration() {
-    return !this.orientationCalibrator.isCalibrated;
-  }
-
-  /**
-   * Réinitialiser la calibration
-   */
-  resetCalibration() {
-    this.orientationCalibrator.reset();
   }
 
   /**
@@ -494,5 +653,50 @@ export class PedestrianDeadReckoning {
     this.onStepDetected = onStepDetected;
     this.onModeChanged = onModeChanged;
     this.onPositionUpdate = onPositionUpdate;
+  }
+
+  /**
+   * Mise à jour du mode d'activité (nouvelle méthode pour AttitudeTracker)
+   */
+  updateActivityMode(mode) {
+    if (mode !== this.currentMode) {
+      const previousMode = this.currentMode;
+      this.currentMode = mode;
+      
+      if (this.onModeChanged) {
+        this.onModeChanged(mode, this.activityFeatures);
+      }
+      
+      console.log(`[PDR] Mode changé: ${previousMode} → ${mode}`);
+    }
+  }
+
+  /**
+   * Traitement d'un pas détecté validé
+   */
+  handleStepDetected(peakAmplitude, originalMagnitude) {
+    const now = Date.now();
+    const minStepInterval = this.currentMode === 'running' ? 250 : 400; // ms
+    
+    // Vérification intervalle temporel
+    if ((now - this.lastStepTime) <= minStepInterval) {
+      return; // Trop tôt pour un nouveau pas
+    }
+    
+    this.stepCount++;
+    this.lastStepTime = now;
+    
+    // Estimation dynamique de la longueur de pas basée sur l'amplitude filtrée
+    this.updateDynamicStepLength(peakAmplitude);
+    
+    // Avancer la position seulement sur pas validé
+    this.advancePositionOnStep();
+    
+    // Callback pas détecté
+    if (this.onStepDetected) {
+      this.onStepDetected(this.stepCount, this.dynamicStepLength);
+    }
+    
+    console.log(`[STEP] Détecté #${this.stepCount}: longueur=${this.dynamicStepLength.toFixed(3)}m`);
   }
 } 

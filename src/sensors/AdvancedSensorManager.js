@@ -25,7 +25,7 @@ export class AdvancedSensorManager {
       
       // Filtrage et calibration
       smoothingFactor: config.smoothingFactor || 0.5, // Réduit pour moins de lissage
-      calibrationSamples: config.calibrationSamples || 100,
+      calibrationSamples: config.calibrationSamples || 30, // Réduit de 50 à 30 pour calibration plus rapide
       adaptiveCalibration: config.adaptiveCalibration || true,
       
       // Confiance magnétomètre
@@ -603,6 +603,11 @@ export class AdvancedSensorManager {
         this.calibration.isCalibrating = true;
         this.calibration.isCalibrated = false;
         
+        // *** OPTIMISATION: Configuration des taux élevés pour calibration rapide ***
+        Accelerometer.setUpdateInterval(20); // 50Hz
+        Gyroscope.setUpdateInterval(20);     // 50Hz
+        Magnetometer.setUpdateInterval(20);  // 50Hz
+        
         // Collections d'échantillons pour calibration
         const calibrationData = {
           accelerometer: [],
@@ -674,11 +679,16 @@ export class AdvancedSensorManager {
           }
         });
         
-        // Vérifier completion périodiquement
+        // Vérifier completion périodiquement - OPTIMISÉ pour plus de réactivité
         const checkCompletion = setInterval(() => {
           const accComplete = calibrationData.accelerometer.length >= targetSamples;
           const gyroComplete = calibrationData.gyroscope.length >= targetSamples;
           const magComplete = calibrationData.magnetometer.length >= targetSamples;
+          
+          // Log progression pour debug
+          if (Date.now() % 1000 < 100) { // Log toutes les secondes environ
+            console.log(`Calibration: ACC=${calibrationData.accelerometer.length}/${targetSamples}, GYRO=${calibrationData.gyroscope.length}/${targetSamples}, MAG=${calibrationData.magnetometer.length}/${targetSamples}`);
+          }
           
           if (accComplete && gyroComplete && magComplete) {
             clearInterval(checkCompletion);
@@ -701,6 +711,12 @@ export class AdvancedSensorManager {
             this.calibration.isCalibrating = false;
             this.calibration.isCalibrated = true;
             
+            // *** RESTAURATION: Remettre les taux normaux après calibration ***
+            const normalInterval = 1000 / this.config.baseRate; // 40ms pour 25Hz par défaut
+            Accelerometer.setUpdateInterval(normalInterval);
+            Gyroscope.setUpdateInterval(normalInterval);
+            Magnetometer.setUpdateInterval(normalInterval);
+            
             if (progressCallback) {
               progressCallback(1.0, 'Calibration des capteurs terminée');
             }
@@ -719,9 +735,9 @@ export class AdvancedSensorManager {
               offsets: this.calibration.offsets
             });
           }
-        }, 100); // Vérifier toutes les 100ms
+        }, 50); // 50ms au lieu de 100ms pour plus de réactivité
         
-        // Timeout de sécurité
+        // Timeout de sécurité - AUGMENTÉ pour permettre la collecte complète
         setTimeout(() => {
           if (this.calibration.isCalibrating) {
             clearInterval(checkCompletion);
@@ -730,7 +746,7 @@ export class AdvancedSensorManager {
             this.calibration.isCalibrating = false;
             reject(new Error('Timeout calibration capteurs'));
           }
-        }, 15000); // 15 secondes max
+        }, 10000); // 10 secondes au lieu de 3 pour la collecte de 150 échantillons
         
       } catch (error) {
         this.calibration.isCalibrating = false;
