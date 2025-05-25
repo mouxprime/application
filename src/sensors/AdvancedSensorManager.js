@@ -24,7 +24,7 @@ export class AdvancedSensorManager {
       batteryOptimization: config.batteryOptimization || true,
       
       // Filtrage et calibration
-      smoothingFactor: config.smoothingFactor || 0.8,
+      smoothingFactor: config.smoothingFactor || 0.5, // Réduit pour moins de lissage
       calibrationSamples: config.calibrationSamples || 100,
       adaptiveCalibration: config.adaptiveCalibration || true,
       
@@ -80,7 +80,7 @@ export class AdvancedSensorManager {
     // Gestion de l'énergie
     this.energyManagement = {
       lastActivityTime: Date.now(),
-      inactivityTimeout: 30000, // 30s
+      inactivityTimeout: 120000, // 120s (2 minutes) - Augmenté pour éviter la désactivation fréquente du magnétomètre
       isInLowPowerMode: false,
       disabledSensors: new Set()
     };
@@ -399,9 +399,9 @@ export class AdvancedSensorManager {
     console.log('Passage en mode basse consommation');
     this.energyManagement.isInLowPowerMode = true;
 
-    // Désactivation capteurs moins critiques
+    // Désactivation capteurs moins critiques (magnétomètre gardé actif pour l'orientation)
     if (this.config.batteryOptimization) {
-      this.disableSensor('magnetometer');
+      // this.disableSensor('magnetometer'); // Gardé actif pour éviter la perte d'orientation
       this.disableSensor('barometer');
     }
 
@@ -525,7 +525,15 @@ export class AdvancedSensorManager {
    * Obtenir les données actuelles avec méta-informations
    */
   getEnhancedData() {
+    // Calcul des données lissées pour l'affichage
+    const smoothedData = this.applySmoothing(this.currentData);
+    
     return {
+      // Données brutes pour les algorithmes de détection
+      raw: { ...this.currentData },
+      // Données lissées pour l'affichage
+      smoothed: smoothedData,
+      // Données actuelles (brutes par défaut pour compatibilité)
       ...this.currentData,
       metadata: {
         sampleRate: this.currentSampleRate,
@@ -533,9 +541,46 @@ export class AdvancedSensorManager {
         magnetometerConfidence: this.calibration.magnetometerConfidence,
         energyLevel: this.metrics.energyLevel,
         lowPowerMode: this.energyManagement.isInLowPowerMode,
-        disabledSensors: Array.from(this.energyManagement.disabledSensors)
+        disabledSensors: Array.from(this.energyManagement.disabledSensors),
+        smoothingFactor: this.config.smoothingFactor
       }
     };
+  }
+
+  /**
+   * Application du lissage uniquement pour l'affichage
+   */
+  applySmoothing(rawData) {
+    const smoothed = {};
+    const alpha = this.config.smoothingFactor;
+    
+    Object.keys(rawData).forEach(sensorType => {
+      if (rawData[sensorType] && typeof rawData[sensorType] === 'object') {
+        smoothed[sensorType] = { ...rawData[sensorType] };
+        
+        // Appliquer le lissage sur x, y, z
+        if (rawData[sensorType].x !== undefined) {
+          const buffer = this.sensorBuffers[sensorType];
+          if (buffer && buffer.length > 1) {
+            const prev = buffer[buffer.length - 2];
+            smoothed[sensorType].x = alpha * prev.x + (1 - alpha) * rawData[sensorType].x;
+            smoothed[sensorType].y = alpha * prev.y + (1 - alpha) * rawData[sensorType].y;
+            smoothed[sensorType].z = alpha * prev.z + (1 - alpha) * rawData[sensorType].z;
+            
+            // Recalculer la magnitude pour les données lissées
+            if (sensorType === 'accelerometer' || sensorType === 'magnetometer') {
+              smoothed[sensorType].magnitude = Math.sqrt(
+                smoothed[sensorType].x ** 2 + 
+                smoothed[sensorType].y ** 2 + 
+                smoothed[sensorType].z ** 2
+              );
+            }
+          }
+        }
+      }
+    });
+    
+    return smoothed;
   }
 
   /**

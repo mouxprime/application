@@ -12,7 +12,7 @@ export class PedestrianDeadReckoning {
     this.config = {
       // Paramètres de détection de pas adaptés pour poche
       stepDetectionWindow: config.stepDetectionWindow || 30, // 30 échantillons (augmenté)
-      stepThreshold: config.stepThreshold || 1.8, // 1.8 m/s² (augmenté pour poche)
+      stepThreshold: config.stepThreshold || 1.0, // 1.0 m/s² (réduit pour plus de sensibilité)
       crawlThreshold: config.crawlThreshold || 1.0, // 1.0 m/s² (augmenté pour poche)
       crawlPitchThreshold: config.crawlPitchThreshold || 30, // degrés (sera retiré)
       

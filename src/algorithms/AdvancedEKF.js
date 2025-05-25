@@ -48,8 +48,19 @@ export class AdvancedExtendedKalmanFilter {
       [0]  // bias gyroscope Z
     ]);
 
-    // Matrice de covariance (13x13 maintenant)
-    this.P = math.multiply(math.identity(13), 10.0);
+    // Matrice de covariance (13x13 maintenant) - Incertitude initiale différenciée pour meilleure confiance
+    this.P = math.identity(13);
+    // Position X,Y
+    this.P.set([0, 0], 1.0);
+    this.P.set([1, 1], 1.0);
+    // Z, vitesses & biases
+    for (let i of [2,3,4,5,9,10,11,12]) {
+      this.P.set([i, i], 1.0);
+    }
+    // Yaw, roll, pitch
+    this.P.set([6, 6], 0.2);
+    this.P.set([7, 7], 0.2);
+    this.P.set([8, 8], 0.2);
 
     // Matrices de bruit
     this.Q = math.zeros(13, 13);
@@ -107,10 +118,10 @@ export class AdvancedExtendedKalmanFilter {
         break;
     }
 
-    // Matrice Q adaptative (13 éléments maintenant)
+    // Matrice Q adaptative (13 éléments maintenant) - Bruit position augmenté pour plus de réactivité
     const noiseVector = [
-      baseNoise * 0.1,      // position x
-      baseNoise * 0.1,      // position y  
+      baseNoise * 0.5,      // position x (augmenté de 0.1 à 0.5)
+      baseNoise * 0.5,      // position y (augmenté de 0.1 à 0.5)
       baseNoise * 0.05,     // altitude z
       baseNoise,            // vitesse vx
       baseNoise,            // vitesse vy
@@ -146,7 +157,18 @@ export class AdvancedExtendedKalmanFilter {
       
       if (PSize[0] !== 13 || PSize[1] !== 13) {
         console.warn('Matrice de covariance P corrompue, réinitialisation');
-        this.P = math.multiply(math.identity(13), 10.0);
+        this.P = math.identity(13);
+        // Position X,Y
+        this.P.set([0, 0], 1.0);
+        this.P.set([1, 1], 1.0);
+        // Z, vitesses & biases
+        for (let i of [2,3,4,5,9,10,11,12]) {
+          this.P.set([i, i], 1.0);
+        }
+        // Yaw, roll, pitch
+        this.P.set([6, 6], 0.2);
+        this.P.set([7, 7], 0.2);
+        this.P.set([8, 8], 0.2);
       }
     } catch (error) {
       console.warn('Erreur lors de la vérification de l\'état EKF:', error);
@@ -246,7 +268,18 @@ export class AdvancedExtendedKalmanFilter {
       }
           } catch (error) {
         console.warn('Erreur mise à jour covariance prédiction:', error);
-        this.P = math.multiply(math.identity(13), 10.0);
+        this.P = math.identity(13);
+        // Position X,Y
+        this.P.set([0, 0], 1.0);
+        this.P.set([1, 1], 1.0);
+        // Z, vitesses & biases
+        for (let i of [2,3,4,5,9,10,11,12]) {
+          this.P.set([i, i], 1.0);
+        }
+        // Yaw, roll, pitch
+        this.P.set([6, 6], 0.2);
+        this.P.set([7, 7], 0.2);
+        this.P.set([8, 8], 0.2);
       }
 
     // Map-matching après prédiction
@@ -378,11 +411,30 @@ export class AdvancedExtendedKalmanFilter {
   /**
    * Mise à jour avec correction magnétomètre conditionnelle
    */
-  updateWithMagnetometer(magneticField, confidence = 1.0) {
-    // Ne corriger que si confiance élevée
-    if (confidence < 0.7) return;
+  updateWithMagnetometer(magneticField, confidence = 1.0, orientationCalibrator = null) {
+    // Ne corriger que si confiance suffisante (seuil abaissé pour plus de mises à jour)
+    if (confidence < 0.5) return;
 
-    const heading = Math.atan2(magneticField.y, magneticField.x);
+    // Transformation du champ magnétique avec la calibration d'orientation si disponible
+    let transformedMagField = magneticField;
+    if (orientationCalibrator && orientationCalibrator.isCalibrated) {
+      try {
+        // Appliquer la transformation d'orientation au vecteur magnétique
+        const magVector = math.matrix([[magneticField.x], [magneticField.y], [magneticField.z]]);
+        const rotatedVector = math.multiply(orientationCalibrator.rotationMatrix, magVector);
+        
+        transformedMagField = {
+          x: rotatedVector.get([0, 0]),
+          y: rotatedVector.get([1, 0]),
+          z: rotatedVector.get([2, 0])
+        };
+      } catch (error) {
+        console.warn('Erreur transformation magnétomètre:', error);
+        transformedMagField = magneticField; // Fallback vers données brutes
+      }
+    }
+
+    const heading = Math.atan2(transformedMagField.y, transformedMagField.x);
     const measurement = math.matrix([[heading]]);
 
     // Matrice d'observation pour orientation
@@ -424,7 +476,18 @@ export class AdvancedExtendedKalmanFilter {
       
       if (!PSize || PSize.length !== 2 || PSize[0] !== 13 || PSize[1] !== 13) {
         console.warn(`Matrice P invalide pour ZUPT: ${JSON.stringify(PSize)}, réinitialisation`);
-        this.P = math.multiply(math.identity(13), 10.0);
+        this.P = math.identity(13);
+        // Position X,Y
+        this.P.set([0, 0], 1.0);
+        this.P.set([1, 1], 1.0);
+        // Z, vitesses & biases
+        for (let i of [2,3,4,5,9,10,11,12]) {
+          this.P.set([i, i], 1.0);
+        }
+        // Yaw, roll, pitch
+        this.P.set([6, 6], 0.2);
+        this.P.set([7, 7], 0.2);
+        this.P.set([8, 8], 0.2);
       }
 
       // Application ZUPT simplifiée directement sur l'état
@@ -513,7 +576,18 @@ export class AdvancedExtendedKalmanFilter {
       const PSize = this.P.size();
       if (PSize[0] !== 13 || PSize[1] !== 13) {
         console.warn(`Matrice P invalide: taille ${PSize[0]}x${PSize[1]}, attendu 13x13`);
-        this.P = math.multiply(math.identity(13), 10.0);
+        this.P = math.identity(13);
+        // Position X,Y
+        this.P.set([0, 0], 1.0);
+        this.P.set([1, 1], 1.0);
+        // Z, vitesses & biases
+        for (let i of [2,3,4,5,9,10,11,12]) {
+          this.P.set([i, i], 1.0);
+        }
+        // Yaw, roll, pitch
+        this.P.set([6, 6], 0.2);
+        this.P.set([7, 7], 0.2);
+        this.P.set([8, 8], 0.2);
       }
 
       // Innovation: y = z - H * x
@@ -598,7 +672,7 @@ export class AdvancedExtendedKalmanFilter {
       // En cas d'erreur, réinitialiser seulement les matrices problématiques
       if (error.message && error.message.includes('matrix dimensions')) {
         console.warn('Réinitialisation des matrices EKF due à une erreur de dimension');
-        this.P = math.multiply(math.identity(13), 10.0);
+        this.P = math.multiply(math.identity(13), 1.0);
         this.updateProcessNoise(this.currentMode);
       }
     } finally {
@@ -723,7 +797,18 @@ export class AdvancedExtendedKalmanFilter {
       [0], [0], [0]            // biais
     ]);
 
-    this.P = math.multiply(math.identity(13), 10.0);
+    this.P = math.identity(13);
+    // Position X,Y
+    this.P.set([0, 0], 1.0);
+    this.P.set([1, 1], 1.0);
+    // Z, vitesses & biases
+    for (let i of [2,3,4,5,9,10,11,12]) {
+      this.P.set([i, i], 1.0);
+    }
+    // Yaw, roll, pitch
+    this.P.set([6, 6], 0.2);
+    this.P.set([7, 7], 0.2);
+    this.P.set([8, 8], 0.2);
     this.updateProcessNoise('stationary');
     this.lastUpdate = Date.now();
     

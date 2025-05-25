@@ -12,7 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useLocalization } from '../context/LocalizationContext';
 import { OrientationCalibrator } from '../algorithms/OrientationCalibrator';
-import { SensorManager } from '../sensors/SensorManager';
+import { LocalizationSDK } from '../algorithms/LocalizationSDK';
 import * as Haptics from 'expo-haptics';
 
 export default function CalibrationScreen() {
@@ -22,7 +22,11 @@ export default function CalibrationScreen() {
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [pocketCalibrationError, setPocketCalibrationError] = useState(null);
   const [orientationCalibrator] = useState(() => new OrientationCalibrator());
-  const [sensorManager] = useState(() => new SensorManager());
+  const [localizationSDK] = useState(() => new LocalizationSDK({
+    userHeight: 1.7,
+    adaptiveSampling: true,
+    energyOptimization: true
+  }));
   const progressAnim = new Animated.Value(0);
 
   const calibrationSteps = [
@@ -84,19 +88,42 @@ export default function CalibrationScreen() {
     actions.setCalibrating(true);
 
     try {
-      // Initialiser les capteurs
-      if (!sensorManager.isInitialized) {
-        await sensorManager.initialize();
-        await sensorManager.start();
+      // Initialiser le SDK de localisation
+      if (!localizationSDK.isInitialized) {
+        await localizationSDK.initialize();
       }
 
-      // ÉTAPE 1: Téléphone à plat (5 secondes)
-      setCalibrationStep(1);
-      await performFlatCalibration();
-      
-      // ÉTAPE 2: Téléphone en poche (2s attente + 5s calibration)
-      setCalibrationStep(2);
-      await performPocketCalibration();
+      // Utiliser la calibration complète du LocalizationSDK
+      await localizationSDK.calibrateAll((progressInfo) => {
+        const { step, progress, message, pocketCalibration } = progressInfo;
+        
+        // Mise à jour de l'affichage selon l'étape
+        if (step === 'sensors') {
+          setCalibrationStep(1);
+          setCalibrationProgress(progress * 100);
+        } else if (step === 'pocket') {
+          setCalibrationStep(2);
+          setCalibrationProgress(progress * 100);
+        } else if (step === 'complete') {
+          setCalibrationStep(3);
+          setCalibrationProgress(100);
+          
+          // Stocker la matrice de calibration dans le contexte
+          if (pocketCalibration && pocketCalibration.rotationMatrix) {
+            actions.setPocketCalibrationMatrix(
+              pocketCalibration.rotationMatrix, 
+              pocketCalibration.avgGravity
+            );
+          }
+        }
+        
+        // Gestion des erreurs de calibration poche
+        if (message && message.includes('Mouvement détecté')) {
+          setPocketCalibrationError(message);
+        } else {
+          setPocketCalibrationError(null);
+        }
+      });
       
       // Terminé avec vibration
       setCalibrationStep(3);
@@ -125,139 +152,15 @@ export default function CalibrationScreen() {
   };
 
   /**
-   * Étape 1: Calibration téléphone à plat
+   * Répéter la calibration complète en cas d'erreur
    */
-  const performFlatCalibration = () => {
-    return new Promise((resolve) => {
-      const duration = calibrationSteps[1].duration; // 5 secondes
-      const startTime = Date.now();
-      
-      // Démarrer la calibration des capteurs
-      sensorManager.startCalibration((progress) => {
-        const elapsed = Date.now() - startTime;
-        const overallProgress = Math.min((elapsed / duration) * 50, 50); // 0% à 50%
-        setCalibrationProgress(overallProgress);
-      });
-      
-      const updateProgress = () => {
-        const elapsed = Date.now() - startTime;
-        const progress = Math.min((elapsed / duration) * 50, 50); // 0% à 50%
-        setCalibrationProgress(progress);
-        
-        if (elapsed < duration) {
-          requestAnimationFrame(updateProgress);
-        } else {
-          resolve();
-        }
-      };
-      
-      updateProgress();
-    });
-  };
-
-  /**
-   * Étape 2: Calibration téléphone en poche (2s attente + 5s calibration)
-   */
-  const performPocketCalibration = () => {
-    return new Promise((resolve, reject) => {
-      let phase = 'waiting'; // 'waiting' ou 'calibrating'
-      const waitDuration = 2000; // 2 secondes
-      const calibrationDuration = 5000; // 5 secondes
-      const startTime = Date.now();
-      let dataInterval = null;
-      
-      // Configuration des callbacks pour OrientationCalibrator
-      orientationCalibrator.setCallbacks({
-        onProgress: (progress, message) => {
-          if (phase === 'calibrating') {
-            // Progression de 50% à 100%
-            const overallProgress = 50 + (progress * 50);
-            setCalibrationProgress(overallProgress);
-            
-            if (message.includes('Mouvement détecté')) {
-              setPocketCalibrationError('Mouvement détecté. Essayez de rester immobile dans votre poche.');
-            } else {
-              setPocketCalibrationError(null);
-            }
-          }
-        },
-        onComplete: (rotationMatrix, avgGravity) => {
-          // Arrêter l'envoi de données
-          if (dataInterval) {
-            clearInterval(dataInterval);
-          }
-          
-          // Stocker la matrice de rotation
-          actions.setPocketCalibrationMatrix(rotationMatrix, avgGravity);
-          setPocketCalibrationError(null);
-          resolve();
-        }
-      });
-      
-      // Fonction de mise à jour de la progression
-      const updateProgress = () => {
-        const elapsed = Date.now() - startTime;
-        
-        if (phase === 'waiting') {
-          // Phase d'attente (2 secondes)
-          const waitProgress = Math.min((elapsed / waitDuration) * 25, 25); // 50% à 75%
-          setCalibrationProgress(50 + waitProgress);
-          
-          if (elapsed >= waitDuration) {
-            phase = 'calibrating';
-            // Démarrer la calibration d'orientation
-            orientationCalibrator.startCalibration();
-            
-            // Démarrer l'envoi de données des capteurs vers OrientationCalibrator
-            dataInterval = setInterval(() => {
-              const currentData = sensorManager.getCurrentData();
-              if (currentData.accelerometer.timestamp > 0 && currentData.gyroscope.timestamp > 0) {
-                orientationCalibrator.addCalibrationSample(
-                  currentData.accelerometer,
-                  currentData.gyroscope
-                );
-              }
-            }, 40); // 25Hz
-          }
-        }
-        
-        if (elapsed < waitDuration + calibrationDuration) {
-          requestAnimationFrame(updateProgress);
-        } else if (phase === 'calibrating') {
-          // Timeout - calibration échouée
-          if (dataInterval) {
-            clearInterval(dataInterval);
-          }
-          setPocketCalibrationError('Timeout de calibration. Recommencez.');
-          reject(new Error('Timeout calibration poche'));
-        }
-      };
-      
-      updateProgress();
-    });
-  };
-
-  /**
-   * Répéter seulement l'étape pocket en cas d'erreur
-   */
-  const retryPocketCalibration = async () => {
+  const retryCalibration = async () => {
     setPocketCalibrationError(null);
-    setCalibrationStep(2);
+    setCalibrationStep(1);
+    setCalibrationProgress(0);
     
     try {
-      await performPocketCalibration();
-      setCalibrationStep(3);
-      setCalibrationProgress(100);
-      
-      // Vibration de fin
-      try {
-        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-      } catch (error) {
-        console.warn('Vibration non disponible:', error);
-      }
-      
-      Alert.alert('Succès', 'Calibration d\'orientation poche terminée !');
-      
+      await performCalibration();
     } catch (error) {
       setPocketCalibrationError(`Erreur: ${error.message}`);
     }
@@ -275,8 +178,15 @@ export default function CalibrationScreen() {
           onPress: () => {
             setCalibrationStep(0);
             setCalibrationProgress(0);
+            setPocketCalibrationError(null);
             actions.setCalibrating(false);
-            // TODO: Appeler la méthode de reset du SensorManager
+            
+            // Réinitialiser le calibrateur d'orientation et le SDK
+            orientationCalibrator.isCalibrated = false;
+            if (localizationSDK.isInitialized) {
+              // Reset du SDK si besoin
+              console.log('Calibration réinitialisée');
+            }
           }
         }
       ]
@@ -383,9 +293,9 @@ export default function CalibrationScreen() {
             <Text style={styles.errorText}>{pocketCalibrationError}</Text>
             <TouchableOpacity 
               style={styles.retryButton}
-              onPress={retryPocketCalibration}
+              onPress={retryCalibration}
             >
-              <Text style={styles.retryButtonText}>Recommencer Étape Pocket</Text>
+              <Text style={styles.retryButtonText}>Recommencer Calibration</Text>
             </TouchableOpacity>
           </View>
         )}

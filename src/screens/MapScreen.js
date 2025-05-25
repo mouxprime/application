@@ -14,7 +14,6 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Battery from 'expo-battery';
 
 import { useLocalization } from '../context/LocalizationContext';
-import { VectorMapManager } from '../maps/VectorMapManager';
 import { LocalizationSDK } from '../algorithms/LocalizationSDK';
 import { ScaleConverter } from '../utils/ScaleConverter';
 
@@ -30,7 +29,6 @@ const MAX_ZOOM = 15;
 
 export default function MapScreen() {
   const { state, actions } = useLocalization();
-  const [mapManager] = useState(() => new VectorMapManager());
   const [localizationSDK] = useState(() => new LocalizationSDK({
     userHeight: 1.7,
     adaptiveSampling: true,
@@ -128,6 +126,27 @@ export default function MapScreen() {
       onEnergyStatusChanged: (energyStatus) => {
         console.log('État énergétique:', energyStatus);
         actions.updatePDRMetrics({ energyLevel: energyStatus.energyLevel || 1.0 });
+      },
+      onDataUpdate: (sensorData) => {
+        // Mise à jour du contexte avec les données capteurs en temps réel
+        // Gestion des données enrichies d'AdvancedSensorManager
+        const accelerometer = sensorData.accelerometer || { x: 0, y: 0, z: 0 };
+        const gyroscope = sensorData.gyroscope || { x: 0, y: 0, z: 0 };
+        const magnetometer = sensorData.magnetometer || { x: 0, y: 0, z: 0 };
+        
+        // Ajout de la magnitude pour l'accéléromètre si pas déjà présente
+        if (accelerometer && !accelerometer.magnitude) {
+          accelerometer.magnitude = Math.sqrt(
+            accelerometer.x ** 2 + accelerometer.y ** 2 + accelerometer.z ** 2
+          );
+        }
+        
+        actions.updateSensors({
+          accelerometer,
+          gyroscope,
+          magnetometer,
+          metadata: sensorData.metadata || {}
+        });
       }
     });
   }, [actions]);
@@ -380,6 +399,24 @@ export default function MapScreen() {
       return '#ff4444';
     };
 
+    // Détection d'alertes
+    const getConfidenceColor = () => {
+      if (state.pose.confidence > 0.5) return '#00ff88';
+      if (state.pose.confidence > 0.2) return '#ffaa00';
+      return '#ff4444';
+    };
+
+    const shouldShowStepAlert = () => {
+      // Alerte si pas de pas détectés après 10 secondes de marche
+      return state.isTracking && state.currentMode === 'walking' && 
+             (state.stepCount || 0) === 0 && Date.now() - (state.lastModeChange || 0) > 10000;
+    };
+
+    const shouldShowConfidenceAlert = () => {
+      // Alerte si confiance très faible trop longtemps
+      return state.pose.confidence < 0.05 && state.isTracking;
+    };
+
     return (
       <View style={styles.metricsPanel}>
         {/* Métriques principales */}
@@ -411,6 +448,9 @@ export default function MapScreen() {
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Pas</Text>
             <Text style={styles.metricValue}>{state.stepCount || 0}</Text>
+            {shouldShowStepAlert() && (
+              <Ionicons name="warning" size={12} color="#ff4444" />
+            )}
           </View>
         </View>
 
@@ -418,9 +458,12 @@ export default function MapScreen() {
         <View style={styles.metricsRow}>
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Confiance</Text>
-            <Text style={styles.metricValue}>
+            <Text style={[styles.metricValue, { color: getConfidenceColor() }]}>
               {(state.pose.confidence * 100).toFixed(0)}%
             </Text>
+            {shouldShowConfidenceAlert() && (
+              <Ionicons name="warning" size={12} color="#ff4444" />
+            )}
           </View>
           
           <View style={styles.metricItem}>
@@ -449,6 +492,59 @@ export default function MapScreen() {
             <Text style={styles.metricValue}>x{zoom}</Text>
           </View>
         </View>
+      </View>
+    );
+  };
+
+  /**
+   * Rendu des alertes de diagnostic
+   */
+  const renderDiagnosticAlerts = () => {
+    const alerts = [];
+    
+    // Alerte confiance faible
+    if (state.pose.confidence < 0.05 && state.isTracking) {
+      alerts.push({
+        key: 'low-confidence',
+        icon: 'warning',
+        color: '#ff4444',
+        message: 'Confiance très faible - Vérifiez la calibration'
+      });
+    }
+    
+    // Alerte pas non détectés
+    if (state.isTracking && state.currentMode === 'walking' && 
+        (state.stepCount || 0) === 0 && Date.now() - (state.lastModeChange || 0) > 10000) {
+      alerts.push({
+        key: 'no-steps',
+        icon: 'footsteps',
+        color: '#ffaa00', 
+        message: 'Aucun pas détecté en mode marche'
+      });
+    }
+    
+    // Alerte magnétomètre
+    if (state.sensors?.metadata?.magnetometerConfidence < 0.3) {
+      alerts.push({
+        key: 'mag-confidence',
+        icon: 'compass',
+        color: '#ffaa00',
+        message: 'Interférences magnétiques détectées'
+      });
+    }
+    
+    if (alerts.length === 0) return null;
+    
+    return (
+      <View style={styles.alertsContainer}>
+        {alerts.map(alert => (
+          <View key={alert.key} style={[styles.alertItem, { borderLeftColor: alert.color }]}>
+            <Ionicons name={alert.icon} size={16} color={alert.color} />
+            <Text style={[styles.alertText, { color: alert.color }]}>
+              {alert.message}
+            </Text>
+          </View>
+        ))}
       </View>
     );
   };
@@ -488,6 +584,9 @@ export default function MapScreen() {
 
       {/* Métriques en temps réel */}
       {renderMetrics()}
+
+      {/* Alertes de diagnostic */}
+      {renderDiagnosticAlerts()}
 
       {/* Contrôles */}
       <View style={styles.controlsContainer}>
@@ -589,5 +688,28 @@ const styles = StyleSheet.create({
   },
   activeButton: {
     backgroundColor: '#00ff88',
+  },
+  alertsContainer: {
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    borderTopWidth: 1,
+    borderTopColor: '#333333',
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+  },
+  alertItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderLeftWidth: 3,
+    borderRadius: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 5,
+  },
+  alertText: {
+    fontSize: 12,
+    fontFamily: 'monospace',
+    marginLeft: 8,
+    flex: 1,
   },
 }); 

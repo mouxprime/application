@@ -32,12 +32,26 @@ const initialState = {
   isTracking: false,
   lastUpdate: Date.now(),
   
-  // Calibration d'orientation poche
+  // Calibration d'orientation poche (statique - legacy)
   pocketCalibration: {
     isCalibrated: false,
     rotationMatrix: null,
     avgGravity: null,
     calibrationDate: null
+  },
+  
+  // Suivi d'attitude continu (nouveau système)
+  attitude: {
+    quaternion: { w: 1, x: 0, y: 0, z: 0 },
+    isStable: false,
+    stabilityDuration: 0,
+    accelerationVariance: 0,
+    gyroMagnitude: 0,
+    magneticConfidence: 0,
+    isRecalibrating: false,
+    lastRecalibration: 0,
+    bodyToPhoneMatrix: null,
+    phoneToBodyMatrix: null
   },
   
   // Métriques PDR
@@ -72,7 +86,9 @@ const ACTIONS = {
   UPDATE_SETTINGS: 'UPDATE_SETTINGS',
   RESET_POSE: 'RESET_POSE',
   UPDATE_PDR_METRICS: 'UPDATE_PDR_METRICS',
-  SET_POCKET_CALIBRATION_MATRIX: 'SET_POCKET_CALIBRATION_MATRIX'
+  SET_POCKET_CALIBRATION_MATRIX: 'SET_POCKET_CALIBRATION_MATRIX',
+  UPDATE_ATTITUDE: 'UPDATE_ATTITUDE',
+  SET_ATTITUDE_RECALIBRATION: 'SET_ATTITUDE_RECALIBRATION'
 };
 
 // Reducer pour gérer l'état
@@ -172,6 +188,27 @@ function localizationReducer(state, action) {
         }
       };
       
+    case ACTIONS.UPDATE_ATTITUDE:
+      return {
+        ...state,
+        attitude: {
+          ...state.attitude,
+          ...action.payload
+        }
+      };
+      
+    case ACTIONS.SET_ATTITUDE_RECALIBRATION:
+      return {
+        ...state,
+        attitude: {
+          ...state.attitude,
+          bodyToPhoneMatrix: action.payload.rotationMatrix,
+          phoneToBodyMatrix: action.payload.phoneToBodyMatrix,
+          lastRecalibration: action.payload.timestamp,
+          isRecalibrating: false
+        }
+      };
+      
     default:
       return state;
   }
@@ -234,6 +271,17 @@ export function LocalizationProvider({ children }) {
       dispatch({ 
         type: ACTIONS.SET_POCKET_CALIBRATION_MATRIX, 
         payload: { rotationMatrix, avgGravity } 
+      });
+    }, []),
+    
+    updateAttitude: useCallback((attitudeData) => {
+      dispatch({ type: ACTIONS.UPDATE_ATTITUDE, payload: attitudeData });
+    }, []),
+    
+    setAttitudeRecalibration: useCallback((rotationMatrix, phoneToBodyMatrix, timestamp) => {
+      dispatch({ 
+        type: ACTIONS.SET_ATTITUDE_RECALIBRATION, 
+        payload: { rotationMatrix, phoneToBodyMatrix, timestamp } 
       });
     }, [])
   };

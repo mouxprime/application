@@ -10,9 +10,11 @@ export class OrientationCalibrator {
   constructor(config = {}) {
     this.config = {
       calibrationDuration: config.calibrationDuration || 5000, // 5 secondes
-      samplesRequired: config.samplesRequired || 50, // Minimum 50 échantillons
-      gravityThreshold: config.gravityThreshold || 2.0, // Seuil de stabilité assoupli
-      gyroThreshold: config.gyroThreshold || 0.3, // Seuil gyroscope assoupli
+      samplesRequired: config.samplesRequired || 30, // Réduit pour plus de tolérance
+      gravityThreshold: config.gravityThreshold || 3.5, // Beaucoup plus tolérant (était 2.0)
+      gyroThreshold: config.gyroThreshold || 0.8, // Beaucoup plus tolérant (était 0.3)
+      maxCalibrationTime: config.maxCalibrationTime || 15000, // Timeout de sécurité 15s
+      tolerantMode: config.tolerantMode !== false, // Mode tolérant par défaut
       ...config
     };
 
@@ -59,6 +61,21 @@ export class OrientationCalibrator {
     const now = Date.now();
     const elapsed = now - this.calibrationStartTime;
     
+    // Timeout de sécurité pour éviter la boucle infinie
+    if (elapsed > this.config.maxCalibrationTime) {
+      console.warn('Timeout de calibration atteint - Finalisation forcée');
+      if (this.calibrationSamples.length >= this.config.samplesRequired / 2) {
+        this.completeCalibration();
+        return true;
+      } else {
+        this.isCalibrating = false;
+        if (this.onCalibrationProgress) {
+          this.onCalibrationProgress(1.0, 'Timeout - Calibration échouée');
+        }
+        return false;
+      }
+    }
+    
     // Vérifier la stabilité (peu de mouvement)
     const accMagnitude = Math.sqrt(
       accelerometer.x * accelerometer.x + 
@@ -71,35 +88,52 @@ export class OrientationCalibrator {
       gyroscope.z * gyroscope.z
     );
 
-    // Vérifier que l'utilisateur est relativement immobile (seuils assouplis)
+    // Vérifier que l'utilisateur est relativement immobile (seuils très assouplis)
     const gravityDiff = Math.abs(accMagnitude - 9.81);
-    if (gravityDiff > this.config.gravityThreshold || gyroMagnitude > this.config.gyroThreshold) {
-      // Trop de mouvement, mais ne redémarre plus la calibration immédiatement
+    const isStable = gravityDiff <= this.config.gravityThreshold && 
+                     gyroMagnitude <= this.config.gyroThreshold;
+
+    if (!isStable && !this.config.tolerantMode) {
+      // Mode strict : rejeter l'échantillon
       if (this.onCalibrationProgress) {
         this.onCalibrationProgress(elapsed / this.config.calibrationDuration, 
           'Mouvement détecté - essayez de rester immobile');
       }
-      // Ne pas vider les échantillons pour être plus tolérant
       return false;
     }
 
-    // Ajouter l'échantillon
+    // En mode tolérant ou si stable : ajouter l'échantillon
     this.calibrationSamples.push({
       accelerometer: { ...accelerometer },
       gyroscope: { ...gyroscope },
-      timestamp: now
+      timestamp: now,
+      stable: isStable
     });
 
-    // Progression
-    const progress = Math.min(elapsed / this.config.calibrationDuration, 1.0);
+    // Progression basée sur le temps OU le nombre d'échantillons stables
+    const timeProgress = elapsed / this.config.calibrationDuration;
+    const sampleProgress = this.calibrationSamples.length / this.config.samplesRequired;
+    const progress = Math.min(Math.max(timeProgress, sampleProgress), 1.0);
+    
+    const stableCount = this.calibrationSamples.filter(s => s.stable).length;
+    const stabilityRatio = stableCount / this.calibrationSamples.length;
+    
     if (this.onCalibrationProgress) {
-      this.onCalibrationProgress(progress, 
-        `Calibration en cours... ${(progress * 100).toFixed(0)}%`);
+      let message;
+      if (progress >= 1.0) {
+        message = 'Finalisation...';
+      } else if (stabilityRatio < 0.7) {
+        message = 'Mouvement détecté - essayez de rester immobile';
+      } else {
+        message = `Calibration en cours... ${(progress * 100).toFixed(0)}%`;
+      }
+      this.onCalibrationProgress(progress, message);
     }
 
     // Vérifier si calibration terminée
-    if (elapsed >= this.config.calibrationDuration && 
-        this.calibrationSamples.length >= this.config.samplesRequired) {
+    if ((elapsed >= this.config.calibrationDuration || 
+         this.calibrationSamples.length >= this.config.samplesRequired) && 
+        stableCount >= this.config.samplesRequired * 0.6) {
       this.completeCalibration();
       return true;
     }
@@ -111,14 +145,22 @@ export class OrientationCalibrator {
    * Finalisation de la calibration
    */
   completeCalibration() {
-    if (this.calibrationSamples.length < this.config.samplesRequired) {
-      console.warn('Pas assez d\'échantillons pour la calibration');
+    const minSamples = Math.min(this.config.samplesRequired, 15); // Au minimum 15 échantillons
+    
+    if (this.calibrationSamples.length < minSamples) {
+      console.warn(`Pas assez d'échantillons pour la calibration (${this.calibrationSamples.length}/${minSamples})`);
       this.isCalibrating = false;
       return false;
     }
 
+    // Utiliser prioritairement les échantillons stables
+    const stableSamples = this.calibrationSamples.filter(s => s.stable);
+    const samplesToUse = stableSamples.length >= minSamples ? stableSamples : this.calibrationSamples;
+    
+    console.log(`Calibration: utilisation de ${samplesToUse.length} échantillons (${stableSamples.length} stables)`);
+
     // Calcul de la moyenne des accélérations (gravité mesurée)
-    const avgAcceleration = this.calculateAverageAcceleration();
+    const avgAcceleration = this.calculateAverageAcceleration(samplesToUse);
     
     // Calcul de la matrice de rotation
     this.rotationMatrix = this.calculateRotationMatrix(avgAcceleration);
@@ -128,6 +170,10 @@ export class OrientationCalibrator {
     
     console.log('Calibration terminée - Matrice de rotation calculée');
     console.log('Gravité mesurée:', avgAcceleration);
+    
+    if (this.onCalibrationProgress) {
+      this.onCalibrationProgress(1.0, 'Calibration terminée avec succès');
+    }
     
     if (this.onCalibrationComplete) {
       this.onCalibrationComplete(this.rotationMatrix, avgAcceleration);
@@ -139,17 +185,18 @@ export class OrientationCalibrator {
   /**
    * Calcul de l'accélération moyenne pendant la calibration
    */
-  calculateAverageAcceleration() {
-    const totalAcc = this.calibrationSamples.reduce((sum, sample) => ({
+  calculateAverageAcceleration(samples = null) {
+    const samplesToUse = samples || this.calibrationSamples;
+    const totalAcc = samplesToUse.reduce((sum, sample) => ({
       x: sum.x + sample.accelerometer.x,
       y: sum.y + sample.accelerometer.y,
       z: sum.z + sample.accelerometer.z
     }), { x: 0, y: 0, z: 0 });
 
     return {
-      x: totalAcc.x / this.calibrationSamples.length,
-      y: totalAcc.y / this.calibrationSamples.length,
-      z: totalAcc.z / this.calibrationSamples.length
+      x: totalAcc.x / samplesToUse.length,
+      y: totalAcc.y / samplesToUse.length,
+      z: totalAcc.z / samplesToUse.length
     };
   }
 
@@ -257,6 +304,24 @@ export class OrientationCalibrator {
 
     const gyroVector = math.matrix([[gyroscope.x], [gyroscope.y], [gyroscope.z]]);
     const rotatedVector = math.multiply(this.rotationMatrix, gyroVector);
+
+    return {
+      x: rotatedVector.get([0, 0]),
+      y: rotatedVector.get([1, 0]),
+      z: rotatedVector.get([2, 0])
+    };
+  }
+
+  /**
+   * Application de la rotation calibrée à un vecteur de magnétomètre
+   */
+  transformMagnetometer(magnetometer) {
+    if (!this.isCalibrated) {
+      return magnetometer; // Pas de transformation si pas calibré
+    }
+
+    const magVector = math.matrix([[magnetometer.x], [magnetometer.y], [magnetometer.z]]);
+    const rotatedVector = math.multiply(this.rotationMatrix, magVector);
 
     return {
       x: rotatedVector.get([0, 0]),

@@ -78,7 +78,8 @@ export class LocalizationSDK {
       onPositionUpdate: null,
       onModeChanged: null,
       onCalibrationRequired: null,
-      onEnergyStatusChanged: null
+      onEnergyStatusChanged: null,
+      onDataUpdate: null
     };
 
     // Timer pour les callbacks utilisateur
@@ -254,6 +255,11 @@ export class LocalizationSDK {
 
     const startTime = performance.now();
 
+    // Callback pour mise à jour des données capteurs dans le contexte
+    if (this.callbacks.onDataUpdate) {
+      this.callbacks.onDataUpdate(sensorData);
+    }
+
     try {
       // 1. Traitement PDR
       this.pdr.processSensorData(sensorData);
@@ -323,9 +329,9 @@ export class LocalizationSDK {
       this.ekf.updateWithBarometer(barometer.pressure);
     }
 
-    // Mise à jour magnétomètre conditionnelle
-    if (magnetometer && metadata.magnetometerConfidence > 0.7) {
-      this.ekf.updateWithMagnetometer(magnetometer, metadata.magnetometerConfidence);
+    // Mise à jour magnétomètre conditionnelle (seuil abaissé pour plus de mises à jour)
+    if (magnetometer && metadata.magnetometerConfidence > 0.5) {
+      this.ekf.updateWithMagnetometer(magnetometer, metadata.magnetometerConfidence, this.pdr.orientationCalibrator);
     }
   }
 
@@ -553,12 +559,13 @@ export class LocalizationSDK {
   /**
    * Configuration des callbacks utilisateur
    */
-  setCallbacks({ onPositionUpdate, onModeChanged, onCalibrationRequired, onEnergyStatusChanged }) {
+  setCallbacks({ onPositionUpdate, onModeChanged, onCalibrationRequired, onEnergyStatusChanged, onDataUpdate }) {
     this.callbacks = {
       onPositionUpdate: onPositionUpdate || this.callbacks.onPositionUpdate,
       onModeChanged: onModeChanged || this.callbacks.onModeChanged,
       onCalibrationRequired: onCalibrationRequired || this.callbacks.onCalibrationRequired,
-      onEnergyStatusChanged: onEnergyStatusChanged || this.callbacks.onEnergyStatusChanged
+      onEnergyStatusChanged: onEnergyStatusChanged || this.callbacks.onEnergyStatusChanged,
+      onDataUpdate: onDataUpdate || this.callbacks.onDataUpdate
     };
   }
 

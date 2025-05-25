@@ -365,6 +365,17 @@ export class SensorManager {
   }
 
   /**
+   * Obtenir les données actuelles simples (pour AttitudeService)
+   */
+  getCurrentData() {
+    return {
+      accelerometer: { ...this.currentData.accelerometer },
+      gyroscope: { ...this.currentData.gyroscope },
+      magnetometer: { ...this.currentData.magnetometer }
+    };
+  }
+
+  /**
    * Obtenir les données brutes (non filtrées)
    */
   getRawData() {
