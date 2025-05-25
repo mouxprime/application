@@ -1,6 +1,6 @@
-import { PedestrianDeadReckoning } from './PedestrianDeadReckoning';
-import { AdvancedExtendedKalmanFilter } from './AdvancedEKF';
-import { AdvancedSensorManager } from '../sensors/AdvancedSensorManager';
+import { PedestrianDeadReckoning } from './PedestrianDeadReckoning.js';
+import { AdvancedExtendedKalmanFilter } from './AdvancedEKF.js';
+import { AdvancedSensorManager } from '../sensors/AdvancedSensorManager.js';
 import { create, all } from 'mathjs';
 
 const math = create(all);
@@ -86,6 +86,10 @@ export class LocalizationSDK {
     this.updateTimer = null;
     this.lastUserUpdate = 0;
 
+    // *** BUG FIX: Timer pour les mises à jour PDR espacées ***
+    this.lastPDRUpdate = 0;
+    this.pdrUpdateInterval = 1000; // 1000ms entre les mises à jour PDR (1Hz)
+
     // Métriques de performance
     this.performance = {
       processingTime: 0,
@@ -135,7 +139,7 @@ export class LocalizationSDK {
   }
 
   /**
-   * Démarrage du tracking avec vérification de calibration
+   * Démarrage du tracking avec calibration automatique
    */
   async startTracking(pocketCalibrationMatrix = null) {
     if (!this.isInitialized) {
@@ -143,38 +147,35 @@ export class LocalizationSDK {
     }
 
     try {
-      // Vérifier si une calibration d'orientation valide existe
-      if (pocketCalibrationMatrix && this.isPocketCalibrationValid(pocketCalibrationMatrix)) {
-        console.log('Utilisation de la calibration d\'orientation existante');
-        // Appliquer la matrice de rotation au calibrateur d'orientation
-        this.pdr.orientationCalibrator.rotationMatrix = pocketCalibrationMatrix;
-        this.pdr.orientationCalibrator.isCalibrated = true;
-      } else if (this.pdr.needsCalibration()) {
-        // Calibration automatique si nécessaire
-        console.log('Démarrage calibration d\'orientation pour usage en poche...');
-        this.pdr.startPocketCalibration();
+      // Vérifier si une calibration valide existe
+      const needsCalibration = !this.isPocketCalibrationValid(pocketCalibrationMatrix) || 
+                              this.requiresCalibration();
+
+      if (needsCalibration) {
+        // Lancer calibration automatique complète avec callback de progression
+        console.log('Lancement calibration automatique...');
         
-        // Callbacks pour suivre la progression
-        this.pdr.setCalibrationCallbacks({
-          onProgress: (progress, message) => {
-            console.log(`Calibration: ${(progress * 100).toFixed(0)}% - ${message}`);
-            if (this.callbacks.onCalibrationRequired) {
-              this.callbacks.onCalibrationRequired({ progress, message, isCalibrating: true });
-            }
-          },
-          onComplete: (rotationMatrix, avgGravity) => {
-            console.log('Calibration d\'orientation terminée avec succès');
-            console.log('Matrice de rotation calculée:', rotationMatrix);
-            if (this.callbacks.onCalibrationRequired) {
-              this.callbacks.onCalibrationRequired({ 
-                progress: 1.0, 
-                message: 'Calibration terminée', 
-                isCalibrating: false,
-                isComplete: true 
-              });
-            }
+        const calibrationResult = await this.calibrateAll((progress) => {
+          // Transmettre la progression à l'UI via le nouveau callback
+          if (this.callbacks.onCalibrationProgress) {
+            this.callbacks.onCalibrationProgress({
+              ...progress,
+              isCalibrating: progress.progress < 1.0,
+              isComplete: progress.progress >= 1.0
+            });
           }
         });
+
+        if (!calibrationResult.success) {
+          throw new Error(`Échec calibration: ${calibrationResult.error}`);
+        }
+
+        console.log('Calibration automatique terminée avec succès');
+      } else {
+        console.log('Utilisation calibration existante valide');
+        // Appliquer la matrice de rotation existante
+        this.pdr.orientationCalibrator.rotationMatrix = pocketCalibrationMatrix;
+        this.pdr.orientationCalibrator.isCalibrated = true;
       }
 
       // Démarrage des capteurs
@@ -189,6 +190,19 @@ export class LocalizationSDK {
       return true;
     } catch (error) {
       console.error('Erreur démarrage tracking:', error);
+      
+      // Notifier l'UI de l'erreur de calibration
+      if (this.callbacks.onCalibrationProgress) {
+        this.callbacks.onCalibrationProgress({
+          step: 'error',
+          progress: 0,
+          message: `Erreur: ${error.message}`,
+          isCalibrating: false,
+          isComplete: false,
+          error: error.message
+        });
+      }
+      
       return false;
     }
   }
@@ -319,19 +333,97 @@ export class LocalizationSDK {
   }
 
   /**
-   * Mise à jour EKF avec les données de capteurs
+   * Mise à jour EKF avec les données de capteurs - Version consolidée
    */
   updateEKFWithSensors(sensorData) {
+    // *** FIX: Consolidation des mises à jour en une seule transaction ***
+    const updates = [];
     const { barometer, magnetometer, metadata } = sensorData;
 
-    // Mise à jour barométrique
+    // Préparer mise à jour barométrique
     if (barometer && barometer.pressure > 0) {
-      this.ekf.updateWithBarometer(barometer.pressure);
+      const altitude = this.ekf.pressureToAltitude(barometer.pressure);
+      updates.push({
+        type: 'barometer',
+        measurement: altitude,
+        noise: this.ekf.config.barometerNoise
+      });
     }
 
-    // Mise à jour magnétomètre conditionnelle (seuil abaissé pour plus de mises à jour)
+    // Préparer mise à jour magnétomètre conditionnelle
     if (magnetometer && metadata.magnetometerConfidence > 0.5) {
-      this.ekf.updateWithMagnetometer(magnetometer, metadata.magnetometerConfidence, this.pdr.orientationCalibrator);
+      // Transformation du champ magnétique avec calibration si disponible
+      let transformedMagField = magnetometer;
+      if (this.pdr.orientationCalibrator && this.pdr.orientationCalibrator.isCalibrated) {
+        try {
+          const magVector = math.matrix([[magnetometer.x], [magnetometer.y], [magnetometer.z]]);
+          const rotatedVector = math.multiply(this.pdr.orientationCalibrator.rotationMatrix, magVector);
+          transformedMagField = {
+            x: rotatedVector.get([0, 0]),
+            y: rotatedVector.get([1, 0]),
+            z: rotatedVector.get([2, 0])
+          };
+        } catch (error) {
+          transformedMagField = magnetometer;
+        }
+      }
+      
+      const heading = Math.atan2(transformedMagField.y, transformedMagField.x);
+      updates.push({
+        type: 'magnetometer',
+        measurement: heading,
+        noise: this.ekf.config.magnetometerNoise / metadata.magnetometerConfidence
+      });
+    }
+    
+    // Préparer mise à jour PDR à intervalle espacé
+    const now = Date.now();
+    if (now - this.lastPDRUpdate > this.pdrUpdateInterval) {
+      const pdrState = this.pdr.getState();
+      if (pdrState && pdrState.position) {
+        // Configuration du bruit selon le mode
+        let positionNoise, yawNoise;
+        switch (pdrState.mode) {
+          case 'stationary':
+            positionNoise = 0.01;
+            yawNoise = 0.05;
+            break;
+          case 'walking':
+            positionNoise = 0.1;
+            yawNoise = 0.1;
+            break;
+          case 'running':
+            positionNoise = 0.3;
+            yawNoise = 0.2;
+            break;
+          case 'crawling':
+            positionNoise = 0.05;
+            yawNoise = 0.1;
+            break;
+          default:
+            positionNoise = 0.2;
+            yawNoise = 0.15;
+        }
+        
+        updates.push({
+          type: 'pdr_position',
+          measurement: { x: pdrState.position.x, y: pdrState.position.y },
+          noise: positionNoise
+        });
+        
+        updates.push({
+          type: 'pdr_yaw',
+          measurement: pdrState.orientation.yaw,
+          noise: yawNoise
+        });
+        
+        this.lastPDRUpdate = now;
+      }
+    }
+
+    // Appliquer toutes les mises à jour en une seule fois
+    if (updates.length > 0) {
+      this.ekf.updateWithBatch(updates);
     }
   }
 
@@ -430,13 +522,13 @@ export class LocalizationSDK {
         });
       }
       
-      // 1. Calibration des capteurs (via SensorManager)
-      await this.sensorManager.startCalibration((progress, isComplete) => {
+      // 1. Calibration des capteurs (via AdvancedSensorManager)
+      await this.sensorManager.startCalibration((progress, message) => {
         if (progressCallback) {
           progressCallback({ 
             step: 'sensors', 
             progress: progress * 0.8, // 80% pour les capteurs
-            message: isComplete ? 'Capteurs calibrés' : `Calibration capteurs: ${(progress * 100).toFixed(0)}%`
+            message: message || `Calibration capteurs: ${(progress * 100).toFixed(0)}%`
           });
         }
       });
@@ -490,35 +582,79 @@ export class LocalizationSDK {
    * Calibration d'orientation poche standalone
    */
   async calibratePocketOrientation(progressCallback) {
-    return new Promise((resolve, reject) => {
-      // Configuration des callbacks
-      this.pdr.orientationCalibrator.setCallbacks({
-        onProgress: (progress, message) => {
-          if (progressCallback) {
-            progressCallback(progress, message);
-          }
-        },
-        onComplete: (rotationMatrix, avgGravity) => {
-          const calibrationResult = {
-            rotationMatrix,
-            avgGravity,
-            timestamp: Date.now()
-          };
-          
-          console.log('Calibration orientation poche terminée');
-          resolve(calibrationResult);
-        }
-      });
-
-      // Démarrer la calibration d'orientation
-      this.pdr.orientationCalibrator.startCalibration();
+    return new Promise(async (resolve, reject) => {
+      let calibrationInterval = null;
       
-      // Timeout de sécurité
-      setTimeout(() => {
-        if (this.pdr.orientationCalibrator.isCalibrating) {
-          reject(new Error('Timeout calibration poche'));
+      try {
+        // *** BUG FIX: S'assurer que les capteurs sont actifs pendant la calibration ***
+        if (!this.sensorManager.isActive) {
+          console.log('Démarrage des capteurs pour la calibration poche...');
+          await this.sensorManager.startAll();
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Attendre stabilisation
         }
-      }, 10000); // 10 secondes max
+        
+        // Configuration des callbacks
+        this.pdr.orientationCalibrator.setCallbacks({
+          onProgress: (progress, message) => {
+            if (progressCallback) {
+              progressCallback(progress, message);
+            }
+          },
+          onComplete: (rotationMatrix, avgGravity) => {
+            const calibrationResult = {
+              rotationMatrix,
+              avgGravity,
+              timestamp: Date.now()
+            };
+            
+            console.log('Calibration orientation poche terminée');
+            
+            // Arrêter l'intervalle de données
+            if (calibrationInterval) {
+              clearInterval(calibrationInterval);
+            }
+            
+            resolve(calibrationResult);
+          }
+        });
+
+        // Démarrer la calibration d'orientation
+        this.pdr.orientationCalibrator.startCalibration();
+        
+        // *** BUG FIX: Fournir activement les données de capteurs au calibrateur ***
+        calibrationInterval = setInterval(() => {
+          const sensorData = this.sensorManager.getEnhancedData();
+          if (sensorData && sensorData.accelerometer && sensorData.gyroscope) {
+            // Alimenter le calibrateur avec les dernières données
+            const calibrationComplete = this.pdr.orientationCalibrator.addCalibrationSample(
+              sensorData.accelerometer, 
+              sensorData.gyroscope
+            );
+            
+            if (calibrationComplete) {
+              // La calibration se terminera via le callback onComplete
+              clearInterval(calibrationInterval);
+              calibrationInterval = null;
+            }
+          }
+        }, 50); // 20Hz - fréquence suffisante pour la calibration
+        
+        // Timeout de sécurité
+        setTimeout(() => {
+          if (this.pdr.orientationCalibrator.isCalibrating) {
+            if (calibrationInterval) {
+              clearInterval(calibrationInterval);
+            }
+            reject(new Error('Timeout calibration poche'));
+          }
+        }, 10000); // 10 secondes max
+        
+      } catch (error) {
+        if (calibrationInterval) {
+          clearInterval(calibrationInterval);
+        }
+        reject(error);
+      }
     });
   }
 
@@ -559,13 +695,14 @@ export class LocalizationSDK {
   /**
    * Configuration des callbacks utilisateur
    */
-  setCallbacks({ onPositionUpdate, onModeChanged, onCalibrationRequired, onEnergyStatusChanged, onDataUpdate }) {
+  setCallbacks({ onPositionUpdate, onModeChanged, onCalibrationRequired, onEnergyStatusChanged, onDataUpdate, onCalibrationProgress }) {
     this.callbacks = {
       onPositionUpdate: onPositionUpdate || this.callbacks.onPositionUpdate,
       onModeChanged: onModeChanged || this.callbacks.onModeChanged,
       onCalibrationRequired: onCalibrationRequired || this.callbacks.onCalibrationRequired,
       onEnergyStatusChanged: onEnergyStatusChanged || this.callbacks.onEnergyStatusChanged,
-      onDataUpdate: onDataUpdate || this.callbacks.onDataUpdate
+      onDataUpdate: onDataUpdate || this.callbacks.onDataUpdate,
+      onCalibrationProgress: onCalibrationProgress || this.callbacks.onCalibrationProgress
     };
   }
 

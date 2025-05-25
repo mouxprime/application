@@ -1,5 +1,5 @@
 import { create, all } from 'mathjs';
-import { OrientationCalibrator } from './OrientationCalibrator';
+import { OrientationCalibrator } from './OrientationCalibrator.js';
 
 const math = create(all);
 

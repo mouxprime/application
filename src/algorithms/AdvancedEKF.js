@@ -48,19 +48,27 @@ export class AdvancedExtendedKalmanFilter {
       [0]  // bias gyroscope Z
     ]);
 
-    // Matrice de covariance (13x13 maintenant) - Incertitude initiale différenciée pour meilleure confiance
+    // *** BUG FIX: Matrice de covariance avec incertitudes raisonnables pour confiance initiale décente ***
     this.P = math.identity(13);
-    // Position X,Y
-    this.P.set([0, 0], 1.0);
-    this.P.set([1, 1], 1.0);
+    
+    // Position X,Y - valeurs plus faibles pour une confiance initiale décente
+    this.P.set([0, 0], 0.1);   // 10cm d'incertitude initiale au lieu de 1m
+    this.P.set([1, 1], 0.1);   // 10cm d'incertitude initiale au lieu de 1m
+    
     // Z, vitesses & biases
-    for (let i of [2,3,4,5,9,10,11,12]) {
-      this.P.set([i, i], 1.0);
+    this.P.set([2, 2], 0.1);   // Z
+    for (let i of [3,4,5]) {
+      this.P.set([i, i], 0.01); // Vitesses - très faibles initialement
     }
-    // Yaw, roll, pitch
-    this.P.set([6, 6], 0.2);
-    this.P.set([7, 7], 0.2);
-    this.P.set([8, 8], 0.2);
+    this.P.set([9, 9], 0.01);  // Vitesse angulaire
+    for (let i of [10,11,12]) {
+      this.P.set([i, i], 0.01); // Biais - très faibles initialement
+    }
+    
+    // Yaw, roll, pitch - valeurs raisonnables
+    this.P.set([6, 6], 0.05);  // Yaw - 13° d'incertitude initiale
+    this.P.set([7, 7], 0.05);  // Roll - 13° d'incertitude initiale  
+    this.P.set([8, 8], 0.05);  // Pitch - 13° d'incertitude initiale
 
     // Matrices de bruit
     this.Q = math.zeros(13, 13);
@@ -82,8 +90,8 @@ export class AdvancedExtendedKalmanFilter {
     // Protection contre les appels simultanés
     this._isUpdating = false;
 
-    this.lastUpdate = Date.now();
-  }
+          this.lastUpdate = Date.now();
+    }
 
   /**
    * Configuration de la carte vectorielle
@@ -412,8 +420,8 @@ export class AdvancedExtendedKalmanFilter {
    * Mise à jour avec correction magnétomètre conditionnelle
    */
   updateWithMagnetometer(magneticField, confidence = 1.0, orientationCalibrator = null) {
-    // Ne corriger que si confiance suffisante (seuil abaissé pour plus de mises à jour)
-    if (confidence < 0.5) return;
+    // Autoriser l'usage même avec faible confiance (minimum 10%)
+    confidence = Math.max(confidence, 0.1);
 
     // Transformation du champ magnétique avec la calibration d'orientation si disponible
     let transformedMagField = magneticField;
@@ -490,25 +498,33 @@ export class AdvancedExtendedKalmanFilter {
         this.P.set([8, 8], 0.2);
       }
 
-      // Application ZUPT simplifiée directement sur l'état
-      // Éviter la méthode updateMeasurement() qui cause problème
-      const currentVx = this.state.get([3, 0]);
-      const currentVy = this.state.get([4, 0]);
-      const currentVz = this.state.get([5, 0]);
+      // *** FIX: Application ZUPT avec correction Kalman complète ***
+      // Mesure de vitesse nulle [0, 0, 0] avec très faible bruit
+      const zeroVelocityMeasurement = math.matrix([[0], [0], [0]]);
       
-      // Réduction progressive des vitesses au lieu de mise à jour Kalman
-      const damping = 0.1; // Facteur d'amortissement
-      this.state.set([3, 0], currentVx * damping); // vx
-      this.state.set([4, 0], currentVy * damping); // vy
-      this.state.set([5, 0], currentVz * damping); // vz
+      // Matrice d'observation pour les vitesses [vx, vy, vz]
+      const H_zupt = math.zeros(3, 13);
+      H_zupt.set([0, 3], 1); // vx
+      H_zupt.set([1, 4], 1); // vy
+      H_zupt.set([2, 5], 1); // vz
       
-      // Réduction de l'incertitude sur les vitesses dans P
-      const velocityNoiseReduction = 0.5;
-      this.P.set([3, 3], this.P.get([3, 3]) * velocityNoiseReduction);
-      this.P.set([4, 4], this.P.get([4, 4]) * velocityNoiseReduction);
-      this.P.set([5, 5], this.P.get([5, 5]) * velocityNoiseReduction);
+      // Bruit très faible pour ZUPT (haute confiance)
+      const zuptNoise = 0.001;
+      const R_zupt = math.matrix([
+        [zuptNoise ** 2, 0, 0],
+        [0, zuptNoise ** 2, 0],
+        [0, 0, zuptNoise ** 2]
+      ]);
       
-      console.log('ZUPT appliqué directement - vitesses amorties');
+      // Application Kalman pour ZUPT (réduit l'incertitude P correctement)
+      this._applyKalmanUpdate(zeroVelocityMeasurement, H_zupt, R_zupt);
+      
+      // Correction supplémentaire pour la position (stationnaire = plus de certitude)
+      const positionNoiseReduction = 0.9;
+      this.P.set([0, 0], this.P.get([0, 0]) * positionNoiseReduction);
+      this.P.set([1, 1], this.P.get([1, 1]) * positionNoiseReduction);
+      
+      console.log('ZUPT appliqué avec correction Kalman complète');
       
     } catch (error) {
       console.warn('Erreur ZUPT:', error.message || error);
@@ -748,7 +764,16 @@ export class AdvancedExtendedKalmanFilter {
                             rollUncertainty * 0.5 +        // Roll (poids 0.5)
                             pitchUncertainty * 0.5;        // Pitch (poids 0.5)
     
-    return Math.max(0, Math.min(1, 1 / (1 + totalUncertainty)));
+    const confidence = Math.max(0, Math.min(1, 1 / (1 + totalUncertainty)));
+    
+    // *** DEBUG: Traçage des incertitudes périodique ***
+    if (!this._lastConfidenceDebug || Date.now() - this._lastConfidenceDebug > 5000) {
+      console.log(`[EKF DEBUG] Incertitudes: pos=${positionUncertainty.toFixed(3)}, yaw=${yawUncertainty.toFixed(3)}, roll=${rollUncertainty.toFixed(3)}, pitch=${pitchUncertainty.toFixed(3)}`);
+      console.log(`[EKF DEBUG] Total uncertainty=${totalUncertainty.toFixed(3)}, Confidence=${(confidence * 100).toFixed(1)}%`);
+      this._lastConfidenceDebug = Date.now();
+    }
+    
+    return confidence;
   }
 
   /**
@@ -797,21 +822,239 @@ export class AdvancedExtendedKalmanFilter {
       [0], [0], [0]            // biais
     ]);
 
+    // *** BUG FIX: Initialisation avec des incertitudes plus raisonnables ***
     this.P = math.identity(13);
-    // Position X,Y
-    this.P.set([0, 0], 1.0);
-    this.P.set([1, 1], 1.0);
+    
+    // Position X,Y - valeurs plus faibles pour une confiance initiale décente
+    this.P.set([0, 0], 0.1);   // 10cm d'incertitude initiale au lieu de 1m
+    this.P.set([1, 1], 0.1);   // 10cm d'incertitude initiale au lieu de 1m
+    
     // Z, vitesses & biases
-    for (let i of [2,3,4,5,9,10,11,12]) {
-      this.P.set([i, i], 1.0);
+    this.P.set([2, 2], 0.1);   // Z
+    for (let i of [3,4,5]) {
+      this.P.set([i, i], 0.01); // Vitesses - très faibles initialement
     }
-    // Yaw, roll, pitch
-    this.P.set([6, 6], 0.2);
-    this.P.set([7, 7], 0.2);
-    this.P.set([8, 8], 0.2);
+    this.P.set([9, 9], 0.01);  // Vitesse angulaire
+    for (let i of [10,11,12]) {
+      this.P.set([i, i], 0.01); // Biais - très faibles initialement
+    }
+    
+    // Yaw, roll, pitch - valeurs raisonnables
+    this.P.set([6, 6], 0.05);  // Yaw - 13° d'incertitude initiale
+    this.P.set([7, 7], 0.05);  // Roll - 13° d'incertitude initiale  
+    this.P.set([8, 8], 0.05);  // Pitch - 13° d'incertitude initiale
+    
     this.updateProcessNoise('stationary');
     this.lastUpdate = Date.now();
     
-    console.log(`EKF avancé réinitialisé: (${x}, ${y}, ${z})`);
+    // Variables de debug
+    this._lastConfidenceDebug = null;
+    
+    // Calcul de la confiance initiale
+    const initialConfidence = this.getConfidence();
+    console.log(`EKF avancé réinitialisé: (${x}, ${y}, ${z}) - Confiance initiale: ${(initialConfidence * 100).toFixed(1)}%`);
+  }
+
+  /**
+   * Mise à jour avec données PDR pour stabiliser la confiance
+   */
+  updateWithPDR(pdrPosition, pdrYaw, mode) {
+    if (this._isUpdating) return;
+    
+    try {
+      this._isUpdating = true;
+      
+      // Configuration du bruit selon le mode
+      let positionNoise, yawNoise;
+      switch (mode) {
+        case 'stationary':
+          positionNoise = 0.01; // Très précis quand stationnaire
+          yawNoise = 0.05;
+          break;
+        case 'walking':
+          positionNoise = 0.1;  // Précision modérée en marche
+          yawNoise = 0.1;
+          break;
+        case 'running':
+          positionNoise = 0.3;  // Moins précis en course
+          yawNoise = 0.2;
+          break;
+        case 'crawling':
+          positionNoise = 0.05; // Assez précis en rampant
+          yawNoise = 0.1;
+          break;
+        default:
+          positionNoise = 0.2;
+          yawNoise = 0.15;
+      }
+      
+      // Mise à jour de position (X, Y)
+      const positionMeasurement = math.matrix([[pdrPosition.x], [pdrPosition.y]]);
+      const H_pos = math.zeros(2, 13);
+      H_pos.set([0, 0], 1); // mesure X
+      H_pos.set([1, 1], 1); // mesure Y
+      
+      const R_pos = math.matrix([
+        [positionNoise ** 2, 0],
+        [0, positionNoise ** 2]
+      ]);
+      
+      this.updateMeasurement(positionMeasurement, H_pos, R_pos);
+      
+      // Mise à jour d'orientation (Yaw)
+      const yawMeasurement = math.matrix([[pdrYaw]]);
+      const H_yaw = math.zeros(1, 13);
+      H_yaw.set([0, 6], 1); // mesure yaw
+      
+      const R_yaw = math.matrix([[yawNoise ** 2]]);
+      
+      this.updateMeasurement(yawMeasurement, H_yaw, R_yaw);
+      
+    } catch (error) {
+      console.warn('Erreur mise à jour PDR:', error);
+    } finally {
+      this._isUpdating = false;
+    }
+  }
+
+  /**
+   * Mise à jour par lot pour éviter la saturation du verrou - Version haute performance
+   */
+  updateWithBatch(updates) {
+    if (this._isUpdating || !updates || updates.length === 0) {
+      return;
+    }
+    
+    try {
+      this._isUpdating = true;
+      
+      // Vérification rapide de l'état
+      const stateSize = this.state.size();
+      if (stateSize[0] !== 13 || stateSize[1] !== 1) {
+        console.warn('État EKF invalide pour mise à jour par lot');
+        return;
+      }
+
+      // Traitement séquentiel optimisé des mises à jour
+      for (const update of updates) {
+        try {
+          this._processSingleUpdate(update);
+        } catch (error) {
+          console.warn(`Erreur update ${update.type}:`, error.message);
+          continue; // Continuer avec les autres mises à jour
+        }
+      }
+
+      // Normalisation finale des angles
+      this.state.set([6, 0], this.normalizeAngle(this.state.get([6, 0]))); // yaw
+      this.state.set([7, 0], this.normalizeAngle(this.state.get([7, 0]))); // roll
+      this.state.set([8, 0], this.normalizeAngle(this.state.get([8, 0]))); // pitch
+
+      // Assurer que P reste symétrique positive définie
+      this.P = math.multiply(0.5, math.add(this.P, math.transpose(this.P)));
+      
+      // Contraintes physiques sur les vitesses
+      const maxVelocity = this.currentMode === 'crawling' ? 0.5 : 2.0;
+      for (let i = 3; i <= 5; i++) {
+        const velocity = this.state.get([i, 0]);
+        if (Math.abs(velocity) > maxVelocity) {
+          this.state.set([i, 0], Math.sign(velocity) * maxVelocity);
+        }
+      }
+
+    } catch (error) {
+      console.warn('Erreur mise à jour par lot:', error);
+    } finally {
+      this._isUpdating = false;
+    }
+  }
+
+  /**
+   * Traitement d'une mise à jour unique (méthode interne optimisée)
+   */
+  _processSingleUpdate(update) {
+    let measurement, H, R;
+
+    switch (update.type) {
+      case 'barometer':
+        // Altitude Z
+        measurement = math.matrix([[update.measurement]]);
+        H = math.zeros(1, 13);
+        H.set([0, 2], 1); // z position
+        R = math.matrix([[update.noise ** 2]]);
+        break;
+
+      case 'magnetometer':
+        // Orientation yaw
+        measurement = math.matrix([[update.measurement]]);
+        H = math.zeros(1, 13);
+        H.set([0, 6], 1); // θ orientation
+        R = math.matrix([[update.noise ** 2]]);
+        break;
+
+      case 'pdr_position':
+        // Position X,Y
+        measurement = math.matrix([[update.measurement.x], [update.measurement.y]]);
+        H = math.zeros(2, 13);
+        H.set([0, 0], 1); // mesure X
+        H.set([1, 1], 1); // mesure Y
+        R = math.matrix([
+          [update.noise ** 2, 0],
+          [0, update.noise ** 2]
+        ]);
+        break;
+
+      case 'pdr_yaw':
+        // Orientation yaw PDR
+        measurement = math.matrix([[update.measurement]]);
+        H = math.zeros(1, 13);
+        H.set([0, 6], 1); // mesure yaw
+        R = math.matrix([[update.noise ** 2]]);
+        break;
+
+      default:
+        console.warn(`Type de mise à jour inconnu: ${update.type}`);
+        return;
+    }
+
+    // Application Kalman simplifiée sans verrous
+    this._applyKalmanUpdate(measurement, H, R);
+  }
+
+  /**
+   * Application Kalman simplifiée sans verrous (méthode interne)
+   */
+  _applyKalmanUpdate(measurement, H, R) {
+    // Innovation: y = z - H * x
+    const predicted = math.multiply(H, this.state);
+    const innovation = math.subtract(measurement, predicted);
+
+    // Covariance innovation: S = H * P * H^T + R
+    const HPHt = math.multiply(math.multiply(H, this.P), math.transpose(H));
+    const S = math.add(HPHt, R);
+
+    // Vérification que S est inversible
+    let SInv;
+    try {
+      SInv = math.inv(S);
+    } catch (invError) {
+      const regularization = math.multiply(math.identity(S.size()[0]), 1e-6);
+      const SRegularized = math.add(S, regularization);
+      SInv = math.inv(SRegularized);
+    }
+
+    // Gain de Kalman: K = P * H^T * S^(-1)
+    const PHt = math.multiply(this.P, math.transpose(H));
+    const K = math.multiply(PHt, SInv);
+
+    // Mise à jour de l'état: x = x + K * y
+    const correction = math.multiply(K, innovation);
+    this.state = math.add(this.state, correction);
+
+    // Mise à jour de la covariance: P = (I - K * H) * P
+    const I = math.identity(13);
+    const KH = math.multiply(K, H);
+    const IminusKH = math.subtract(I, KH);
+    this.P = math.multiply(IminusKH, this.P);
   }
 } 

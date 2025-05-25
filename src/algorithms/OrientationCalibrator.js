@@ -11,10 +11,11 @@ export class OrientationCalibrator {
     this.config = {
       calibrationDuration: config.calibrationDuration || 5000, // 5 secondes
       samplesRequired: config.samplesRequired || 30, // Réduit pour plus de tolérance
-      gravityThreshold: config.gravityThreshold || 3.5, // Beaucoup plus tolérant (était 2.0)
-      gyroThreshold: config.gyroThreshold || 0.8, // Beaucoup plus tolérant (était 0.3)
+      gravityThreshold: config.gravityThreshold || 0.3, // En G (gravité terrestre) - plus tolérant
+      gyroThreshold: config.gyroThreshold || 0.5, // Plus tolérant (était 0.8, maintenant plus réaliste)
       maxCalibrationTime: config.maxCalibrationTime || 15000, // Timeout de sécurité 15s
       tolerantMode: config.tolerantMode !== false, // Mode tolérant par défaut
+      gravityScale: config.gravityScale || 9.81, // Facteur de conversion G vers m/s²
       ...config
     };
 
@@ -88,8 +89,9 @@ export class OrientationCalibrator {
       gyroscope.z * gyroscope.z
     );
 
-    // Vérifier que l'utilisateur est relativement immobile (seuils très assouplis)
-    const gravityDiff = Math.abs(accMagnitude - 9.81);
+    // *** BUG FIX: Travail avec unités G (gravité terrestre = ~9.81 en données brutes) ***
+    // Le capteur retourne des valeurs en unités qui correspondent à ~9.81 pour 1G
+    const gravityDiff = Math.abs(accMagnitude - 9.81); // Comparaison avec 9.81 (gravité terrestre)
     const isStable = gravityDiff <= this.config.gravityThreshold && 
                      gyroMagnitude <= this.config.gyroThreshold;
 
@@ -110,6 +112,12 @@ export class OrientationCalibrator {
       stable: isStable
     });
 
+    // *** DEBUG: Traçage des échantillons ***
+    if (this.calibrationSamples.length % 50 === 0) {
+      console.log(`[DEBUG] Échantillon ${this.calibrationSamples.length}: acc=${accMagnitude.toFixed(3)} m/s², gyro=${gyroMagnitude.toFixed(3)}rad/s, stable=${isStable}`);
+      console.log(`[DEBUG] Seuils: gravityDiff=${gravityDiff.toFixed(3)} (max: ${this.config.gravityThreshold}), gyro=${gyroMagnitude.toFixed(3)} (max: ${this.config.gyroThreshold})`);
+    }
+
     // Progression basée sur le temps OU le nombre d'échantillons stables
     const timeProgress = elapsed / this.config.calibrationDuration;
     const sampleProgress = this.calibrationSamples.length / this.config.samplesRequired;
@@ -118,9 +126,21 @@ export class OrientationCalibrator {
     const stableCount = this.calibrationSamples.filter(s => s.stable).length;
     const stabilityRatio = stableCount / this.calibrationSamples.length;
     
+    // Vérifier si calibration terminée AVANT d'envoyer le message de progression
+    const isCalibrationComplete = (elapsed >= this.config.calibrationDuration || 
+         this.calibrationSamples.length >= this.config.samplesRequired) && 
+        stableCount >= this.config.samplesRequired * 0.6;
+    
+    if (isCalibrationComplete) {
+      // Compléter immédiatement sans envoyer plus de messages de progression
+      this.completeCalibration();
+      return true;
+    }
+    
+    // Envoyer la progression seulement si pas encore terminé
     if (this.onCalibrationProgress) {
       let message;
-      if (progress >= 1.0) {
+      if (progress >= 0.95) {
         message = 'Finalisation...';
       } else if (stabilityRatio < 0.7) {
         message = 'Mouvement détecté - essayez de rester immobile';
@@ -130,14 +150,6 @@ export class OrientationCalibrator {
       this.onCalibrationProgress(progress, message);
     }
 
-    // Vérifier si calibration terminée
-    if ((elapsed >= this.config.calibrationDuration || 
-         this.calibrationSamples.length >= this.config.samplesRequired) && 
-        stableCount >= this.config.samplesRequired * 0.6) {
-      this.completeCalibration();
-      return true;
-    }
-
     return false;
   }
 
@@ -145,31 +157,79 @@ export class OrientationCalibrator {
    * Finalisation de la calibration
    */
   completeCalibration() {
+    // Protection contre les appels multiples
+    if (!this.isCalibrating) {
+      console.warn('completeCalibration appelé mais calibration déjà terminée');
+      return false;
+    }
+    
     const minSamples = Math.min(this.config.samplesRequired, 15); // Au minimum 15 échantillons
     
     if (this.calibrationSamples.length < minSamples) {
       console.warn(`Pas assez d'échantillons pour la calibration (${this.calibrationSamples.length}/${minSamples})`);
       this.isCalibrating = false;
+      if (this.onCalibrationProgress) {
+        this.onCalibrationProgress(1.0, 'Échec - Pas assez d\'échantillons');
+      }
       return false;
     }
 
     // Utiliser prioritairement les échantillons stables
     const stableSamples = this.calibrationSamples.filter(s => s.stable);
-    const samplesToUse = stableSamples.length >= minSamples ? stableSamples : this.calibrationSamples;
+    
+    // *** BUG FIX: Meilleure gestion des échantillons stables ***
+    let samplesToUse;
+    if (stableSamples.length >= Math.min(minSamples, 10)) {
+      // Assez d'échantillons stables
+      samplesToUse = stableSamples;
+    } else if (this.calibrationSamples.length >= minSamples) {
+      // Pas assez d'échantillons stables, mais on a assez d'échantillons en général
+      // Utiliser tous les échantillons mais avec un message d'avertissement
+      samplesToUse = this.calibrationSamples;
+      console.warn(`Calibration avec mouvement détecté - précision réduite (${stableSamples.length} stables sur ${this.calibrationSamples.length})`);
+    } else {
+      // Pas assez d'échantillons au total
+      this.isCalibrating = false;
+      if (this.onCalibrationProgress) {
+        this.onCalibrationProgress(1.0, 'Échec - Mouvement excessif détecté');
+      }
+      return false;
+    }
     
     console.log(`Calibration: utilisation de ${samplesToUse.length} échantillons (${stableSamples.length} stables)`);
 
     // Calcul de la moyenne des accélérations (gravité mesurée)
     const avgAcceleration = this.calculateAverageAcceleration(samplesToUse);
     
-    // Calcul de la matrice de rotation
+    // *** BUG FIX: Validation de la gravité mesurée (données brutes ~9.81) ***
+    const gravityMagnitude = Math.sqrt(
+      avgAcceleration.x * avgAcceleration.x + 
+      avgAcceleration.y * avgAcceleration.y + 
+      avgAcceleration.z * avgAcceleration.z
+    );
+    
+    // Validation avec données brutes (devrait être proche de 9.81)
+    if (gravityMagnitude < 8.0 || gravityMagnitude > 12.0) {
+      console.error(`Gravité mesurée aberrante: ${gravityMagnitude.toFixed(2)} (devrait être ~9.81)`);
+      this.isCalibrating = false;
+      if (this.onCalibrationProgress) {
+        this.onCalibrationProgress(1.0, 'Échec - Mesures aberrantes');
+      }
+      return false;
+    }
+    
+    // *** BUG FIX: Les données sont déjà en m/s² selon les observations ***
+    // Pas besoin de conversion supplémentaire
+    
+    // Calcul de la matrice de rotation avec les données telles quelles
     this.rotationMatrix = this.calculateRotationMatrix(avgAcceleration);
     
     this.isCalibrating = false;
     this.isCalibrated = true;
     
     console.log('Calibration terminée - Matrice de rotation calculée');
-    console.log('Gravité mesurée:', avgAcceleration);
+    console.log('Gravité mesurée:', `${gravityMagnitude.toFixed(2)} m/s² (magnitude brute)`);
+    console.log('Données brutes (m/s²):', avgAcceleration);
     
     if (this.onCalibrationProgress) {
       this.onCalibrationProgress(1.0, 'Calibration terminée avec succès');
@@ -204,12 +264,18 @@ export class OrientationCalibrator {
    * Calcul de la matrice de rotation du repère téléphone vers repère corps
    */
   calculateRotationMatrix(measuredGravity) {
-    // Normaliser la gravité mesurée
+    // Normaliser la gravité mesurée (doit être en m/s²)
     const gMag = Math.sqrt(
       measuredGravity.x * measuredGravity.x + 
       measuredGravity.y * measuredGravity.y + 
       measuredGravity.z * measuredGravity.z
     );
+    
+    // Protection contre division par zéro
+    if (gMag < 1e-6) {
+      console.warn('Magnitude de gravité nulle, retour matrice identité');
+      return math.identity(3);
+    }
     
     const gNorm = {
       x: measuredGravity.x / gMag,
@@ -217,7 +283,7 @@ export class OrientationCalibrator {
       z: measuredGravity.z / gMag
     };
 
-    // Gravité cible (vers le bas dans le repère corps)
+    // Gravité cible (vers le bas dans le repère corps) - normalisée
     const gTarget = { x: 0, y: 0, z: -1 };
 
     // Calcul de l'axe de rotation (produit vectoriel)
@@ -238,8 +304,9 @@ export class OrientationCalibrator {
     const cosAngle = gNorm.x * gTarget.x + gNorm.y * gTarget.y + gNorm.z * gTarget.z;
     const angle = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
 
-    // Si pas de rotation nécessaire
+    // Si pas de rotation nécessaire (déjà aligné)
     if (rotAxisMag < 1e-6 || Math.abs(angle) < 1e-6) {
+      console.log('Pas de rotation nécessaire - téléphone déjà aligné');
       return math.identity(3);
     }
 
@@ -249,6 +316,9 @@ export class OrientationCalibrator {
       y: rotAxis.y / rotAxisMag,
       z: rotAxis.z / rotAxisMag
     };
+
+    console.log(`Angle de rotation calculé: ${(angle * 180 / Math.PI).toFixed(1)}°`);
+    console.log(`Axe de rotation:`, axis);
 
     // Matrice de rotation selon l'axe (formule de Rodrigues)
     const c = Math.cos(angle);

@@ -4,7 +4,6 @@ import { Ionicons } from '@expo/vector-icons';
 
 import MapScreen from '../screens/MapScreen';
 import SensorsScreen from '../screens/SensorsScreen';
-import CalibrationScreen from '../screens/CalibrationScreen';
 import AnalyticsScreen from '../screens/AnalyticsScreen';
 
 const Tab = createBottomTabNavigator();
@@ -20,8 +19,6 @@ export default function MainNavigator() {
             iconName = focused ? 'map' : 'map-outline';
           } else if (route.name === 'Capteurs') {
             iconName = focused ? 'hardware-chip' : 'hardware-chip-outline';
-          } else if (route.name === 'Calibrage') {
-            iconName = focused ? 'compass' : 'compass-outline';
           } else if (route.name === 'Analytique') {
             iconName = focused ? 'analytics' : 'analytics-outline';
           }
@@ -58,13 +55,7 @@ export default function MainNavigator() {
           headerTitle: 'Données Capteurs'
         }}
       />
-      <Tab.Screen 
-        name="Calibrage" 
-        component={CalibrationScreen}
-        options={{
-          headerTitle: 'Calibrage Système'
-        }}
-      />
+
       <Tab.Screen 
         name="Analytique" 
         component={AnalyticsScreen}

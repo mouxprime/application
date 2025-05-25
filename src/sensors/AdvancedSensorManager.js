@@ -593,6 +593,184 @@ export class AdvancedSensorManager {
   }
 
   /**
+   * Démarrage de la calibration automatique des capteurs
+   */
+  async startCalibration(progressCallback) {
+    return new Promise((resolve, reject) => {
+      try {
+        console.log('Démarrage calibration automatique des capteurs...');
+        
+        this.calibration.isCalibrating = true;
+        this.calibration.isCalibrated = false;
+        
+        // Collections d'échantillons pour calibration
+        const calibrationData = {
+          accelerometer: [],
+          gyroscope: [],
+          magnetometer: []
+        };
+        
+        const targetSamples = this.config.calibrationSamples;
+        
+        // Callback de progression initial
+        if (progressCallback) {
+          progressCallback(0, 'Démarrage calibration des capteurs...');
+        }
+        
+        // Collecte des échantillons temporaires
+        const tempSubscriptions = {};
+        
+        // Fonction pour calculer et notifier la progression
+        const updateProgress = () => {
+          const accProgress = calibrationData.accelerometer.length / targetSamples;
+          const gyroProgress = calibrationData.gyroscope.length / targetSamples;
+          const magProgress = calibrationData.magnetometer.length / targetSamples;
+          const totalProgress = (accProgress + gyroProgress + magProgress) / 3;
+          
+          if (progressCallback) {
+            const totalCollected = calibrationData.accelerometer.length + 
+                                   calibrationData.gyroscope.length + 
+                                   calibrationData.magnetometer.length;
+            progressCallback(totalProgress * 0.6, `Collecte échantillons: ${totalCollected}/${targetSamples * 3}`);
+          }
+        };
+        
+        // Collecteur d'échantillons accéléromètre
+        tempSubscriptions.accelerometer = Accelerometer.addListener((data) => {
+          if (calibrationData.accelerometer.length < targetSamples) {
+            calibrationData.accelerometer.push({
+              x: data.x,
+              y: data.y,
+              z: data.z,
+              timestamp: Date.now()
+            });
+            updateProgress();
+          }
+        });
+        
+        // Collecteur d'échantillons gyroscope
+        tempSubscriptions.gyroscope = Gyroscope.addListener((data) => {
+          if (calibrationData.gyroscope.length < targetSamples) {
+            calibrationData.gyroscope.push({
+              x: data.x,
+              y: data.y,
+              z: data.z,
+              timestamp: Date.now()
+            });
+            updateProgress();
+          }
+        });
+        
+        // Collecteur d'échantillons magnétomètre
+        tempSubscriptions.magnetometer = Magnetometer.addListener((data) => {
+          if (calibrationData.magnetometer.length < targetSamples) {
+            calibrationData.magnetometer.push({
+              x: data.x,
+              y: data.y,
+              z: data.z,
+              timestamp: Date.now()
+            });
+            updateProgress();
+          }
+        });
+        
+        // Vérifier completion périodiquement
+        const checkCompletion = setInterval(() => {
+          const accComplete = calibrationData.accelerometer.length >= targetSamples;
+          const gyroComplete = calibrationData.gyroscope.length >= targetSamples;
+          const magComplete = calibrationData.magnetometer.length >= targetSamples;
+          
+          if (accComplete && gyroComplete && magComplete) {
+            clearInterval(checkCompletion);
+            
+            // Arrêter les subscriptions temporaires
+            Object.values(tempSubscriptions).forEach(sub => sub.remove());
+            
+            // Calculer les offsets
+            if (progressCallback) {
+              progressCallback(0.7, 'Calcul des offsets de calibration...');
+            }
+            
+            this.calculateCalibrationOffsets(calibrationData);
+            
+            if (progressCallback) {
+              progressCallback(0.9, 'Validation de la calibration...');
+            }
+            
+            // Validation et finalisation
+            this.calibration.isCalibrating = false;
+            this.calibration.isCalibrated = true;
+            
+            if (progressCallback) {
+              progressCallback(1.0, 'Calibration des capteurs terminée');
+            }
+            
+            console.log('Calibration des capteurs terminée avec succès', {
+              offsets: this.calibration.offsets,
+              samples: {
+                accelerometer: calibrationData.accelerometer.length,
+                gyroscope: calibrationData.gyroscope.length,
+                magnetometer: calibrationData.magnetometer.length
+              }
+            });
+            
+            resolve({
+              success: true,
+              offsets: this.calibration.offsets
+            });
+          }
+        }, 100); // Vérifier toutes les 100ms
+        
+        // Timeout de sécurité
+        setTimeout(() => {
+          if (this.calibration.isCalibrating) {
+            clearInterval(checkCompletion);
+            Object.values(tempSubscriptions).forEach(sub => sub.remove());
+            
+            this.calibration.isCalibrating = false;
+            reject(new Error('Timeout calibration capteurs'));
+          }
+        }, 15000); // 15 secondes max
+        
+      } catch (error) {
+        this.calibration.isCalibrating = false;
+        reject(error);
+      }
+    });
+  }
+  
+  /**
+   * Calcul des offsets de calibration
+   */
+  calculateCalibrationOffsets(calibrationData) {
+    // Offset accéléromètre (moyenne en position repos)
+    const accSamples = calibrationData.accelerometer;
+    this.calibration.offsets.accelerometer = {
+      x: accSamples.reduce((sum, s) => sum + s.x, 0) / accSamples.length,
+      y: accSamples.reduce((sum, s) => sum + s.y, 0) / accSamples.length,
+      z: accSamples.reduce((sum, s) => sum + s.z, 0) / accSamples.length - 9.81 // Soustraire gravité
+    };
+    
+    // Offset gyroscope (moyenne en position repos - doit être ~0)
+    const gyroSamples = calibrationData.gyroscope;
+    this.calibration.offsets.gyroscope = {
+      x: gyroSamples.reduce((sum, s) => sum + s.x, 0) / gyroSamples.length,
+      y: gyroSamples.reduce((sum, s) => sum + s.y, 0) / gyroSamples.length,
+      z: gyroSamples.reduce((sum, s) => sum + s.z, 0) / gyroSamples.length
+    };
+    
+    // Offset magnétomètre (hard iron calibration basique)
+    const magSamples = calibrationData.magnetometer;
+    this.calibration.offsets.magnetometer = {
+      x: magSamples.reduce((sum, s) => sum + s.x, 0) / magSamples.length,
+      y: magSamples.reduce((sum, s) => sum + s.y, 0) / magSamples.length,
+      z: magSamples.reduce((sum, s) => sum + s.z, 0) / magSamples.length
+    };
+    
+    console.log('Offsets calculés:', this.calibration.offsets);
+  }
+
+  /**
    * Configuration des callbacks
    */
   setCallbacks(callbacks) {

@@ -14,7 +14,7 @@ export class AttitudeService {
       stabilityAccThreshold: 0.2,         // m/s² - assez strict pour stabilité
       stabilityGyroThreshold: 0.1,        // rad/s - assez strict pour stabilité  
       stabilityDuration: 2000,            // 2s de stabilité requise
-      magConfidenceThreshold: 0.7,        // Confiance magnétique > 70%
+      magConfidenceThreshold: 0.5,        // Confiance magnétique > 50%
       autoRecalibrationEnabled: true,     // Re-calibration automatique active
       recalibrationInterval: 30000        // 30s minimum entre re-calibrations
     });

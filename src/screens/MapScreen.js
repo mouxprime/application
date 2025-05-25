@@ -7,6 +7,8 @@ import {
   Text,
   Alert,
   PanResponder,
+  Modal,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, Pattern } from 'react-native-svg';
@@ -50,6 +52,14 @@ export default function MapScreen() {
   const [zoom, setZoom] = useState(1);
   const [batteryLevel, setBatteryLevel] = useState(1);
   const [batteryState, setBatteryState] = useState('unknown');
+  
+  // État de la calibration
+  const [calibrationModal, setCalibrationModal] = useState({
+    visible: false,
+    progress: 0,
+    message: '',
+    step: ''
+  });
   
   // Référence pour les gestes de pan
   const panRef = useRef();
@@ -126,6 +136,24 @@ export default function MapScreen() {
       onEnergyStatusChanged: (energyStatus) => {
         console.log('État énergétique:', energyStatus);
         actions.updatePDRMetrics({ energyLevel: energyStatus.energyLevel || 1.0 });
+      },
+      onCalibrationProgress: (progress) => {
+        console.log('Progression calibration:', progress);
+        
+        // Afficher le modal de calibration
+        setCalibrationModal({
+          visible: progress.isCalibrating || !progress.isComplete,
+          progress: progress.progress || 0,
+          message: progress.message || 'Calibration en cours...',
+          step: progress.step || 'unknown'
+        });
+        
+        // Cacher le modal quand calibration terminée
+        if (progress.isComplete) {
+          setTimeout(() => {
+            setCalibrationModal(prev => ({ ...prev, visible: false }));
+          }, 1500); // Afficher "Terminé" pendant 1.5s
+        }
       },
       onDataUpdate: (sensorData) => {
         // Mise à jour du contexte avec les données capteurs en temps réel
@@ -613,6 +641,55 @@ export default function MapScreen() {
           <Ionicons name="add" size={24} color="#00ff88" />
         </TouchableOpacity>
       </View>
+
+      {/* Modal de calibration */}
+      <Modal
+        visible={calibrationModal.visible}
+        transparent={true}
+        animationType="fade"
+      >
+        <View style={styles.calibrationModalOverlay}>
+          <View style={styles.calibrationModalContent}>
+            <View style={styles.calibrationHeader}>
+              <Ionicons name="compass" size={32} color="#00ff88" />
+              <Text style={styles.calibrationTitle}>Calibration automatique</Text>
+            </View>
+            
+            <Text style={styles.calibrationMessage}>
+              {calibrationModal.message}
+            </Text>
+            
+            <Text style={styles.calibrationInstruction}>
+              📱 Placez le téléphone en poche et bougez naturellement
+            </Text>
+            
+            <View style={styles.progressContainer}>
+              <View style={styles.progressBar}>
+                <View 
+                  style={[
+                    styles.progressFill, 
+                    { width: `${(calibrationModal.progress * 100)}%` }
+                  ]} 
+                />
+              </View>
+              <Text style={styles.progressText}>
+                {(calibrationModal.progress * 100).toFixed(0)}%
+              </Text>
+            </View>
+            
+            {calibrationModal.progress < 1 && (
+              <ActivityIndicator size="large" color="#00ff88" style={styles.spinner} />
+            )}
+            
+            {calibrationModal.progress >= 1 && (
+              <View style={styles.calibrationSuccess}>
+                <Ionicons name="checkmark-circle" size={24} color="#00ff88" />
+                <Text style={styles.successText}>Calibration terminée !</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -711,5 +788,84 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     marginLeft: 8,
     flex: 1,
+  },
+  calibrationModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  calibrationModalContent: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 25,
+    margin: 20,
+    minWidth: 300,
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    alignItems: 'center',
+  },
+  calibrationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  calibrationTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginLeft: 10,
+  },
+  calibrationMessage: {
+    color: '#cccccc',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 15,
+    fontFamily: 'monospace',
+  },
+  calibrationInstruction: {
+    color: '#ffaa00',
+    fontSize: 12,
+    textAlign: 'center',
+    marginBottom: 20,
+    fontStyle: 'italic',
+  },
+  progressContainer: {
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  progressBar: {
+    width: '100%',
+    height: 8,
+    backgroundColor: '#333333',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#00ff88',
+    borderRadius: 4,
+  },
+  progressText: {
+    color: '#00ff88',
+    fontSize: 14,
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+  },
+  spinner: {
+    marginTop: 10,
+  },
+  calibrationSuccess: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  successText: {
+    color: '#00ff88',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginLeft: 8,
   },
 }); 

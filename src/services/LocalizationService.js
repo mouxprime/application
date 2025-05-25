@@ -1,5 +1,5 @@
 import { SensorManager } from '../sensors/SensorManager';
-import { AttitudeService } from './AttitudeService';
+import { AttitudeService } from './AttitudeService.js';
 import { PedestrianDeadReckoning } from '../algorithms/PedestrianDeadReckoning';
 import { AdvancedEKF } from '../algorithms/AdvancedEKF';
 
