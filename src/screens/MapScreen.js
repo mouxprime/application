@@ -109,9 +109,11 @@ export default function MapScreen() {
 
   // Configuration des callbacks du SDK
   useEffect(() => {
+    if (!localizationSDK) return;
+    
     localizationSDK.setCallbacks({
       onPositionUpdate: (x, y, theta, mode) => {
-        const pose = { x, y, theta, confidence: localizationSDK.currentState.confidence };
+        const pose = { x, y, theta, confidence: localizationSDK.currentState?.confidence || 0 };
         actions.updatePose(pose);
         actions.addTrajectoryPoint({
           x, y, timestamp: Date.now(),
@@ -120,14 +122,16 @@ export default function MapScreen() {
         
         // Mise à jour des métriques PDR
         const currentState = localizationSDK.currentState;
-        actions.updatePDRMetrics({
-          currentMode: mode || 'stationary',
-          stepCount: currentState.stepCount || 0,
-          distance: currentState.distance || 0,
-          sampleRate: currentState.sampleRate || 25,
-          energyLevel: currentState.energyLevel || 1.0,
-          isZUPT: currentState.isZUPT || false
-        });
+        if (currentState) {
+          actions.updatePDRMetrics({
+            currentMode: mode || 'stationary',
+            stepCount: currentState.stepCount || 0,
+            distance: currentState.distance || 0,
+            sampleRate: currentState.sampleRate || 25,
+            energyLevel: currentState.energyLevel || 1.0,
+            isZUPT: currentState.isZUPT || false
+          });
+        }
       },
       onModeChanged: (mode, features) => {
         console.log(`Mode changé: ${mode}`, features);
@@ -173,11 +177,12 @@ export default function MapScreen() {
           accelerometer,
           gyroscope,
           magnetometer,
-          metadata: sensorData.metadata || {}
+          metadata: sensorData.metadata || {},
+          timestamp: Date.now()
         });
       }
     });
-  }, [actions]);
+  }, []); // Dépendances vides pour éviter les re-rendus
 
   /**
    * Initialisation de la batterie

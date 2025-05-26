@@ -30,12 +30,16 @@ export default function AnalyticsScreen() {
 
   const [selectedMetric, setSelectedMetric] = useState('confidence');
 
-  // Calcul des métriques en temps réel
+  // Calcul des métriques en temps réel avec optimisation
   useEffect(() => {
     if (state.trajectory.length > 1) {
-      calculateAnalytics();
+      // Éviter les recalculs trop fréquents
+      const lastCalculation = Date.now() - (analyticsData.lastUpdate || 0);
+      if (lastCalculation > 1000) { // Recalculer maximum toutes les secondes
+        calculateAnalytics();
+      }
     }
-  }, [state.trajectory, state.pose]);
+  }, [state.trajectory.length, state.pose.x, state.pose.y]); // Dépendances optimisées
 
   const calculateAnalytics = () => {
     const trajectory = state.trajectory;
@@ -99,7 +103,8 @@ export default function AnalyticsScreen() {
       sessionDuration,
       confidenceHistory: confidences.slice(-100), // Derniers 100 points
       speedHistory: speeds.slice(-100),
-      accuracyDistribution
+      accuracyDistribution,
+      lastUpdate: Date.now() // Ajout du timestamp
     });
   };
 

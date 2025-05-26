@@ -34,31 +34,59 @@ export default function SensorsScreen() {
         // Ajout des nouvelles données avec timestamp
         const timestamp = Date.now();
         
+        // Vérifier si les données ont réellement changé pour éviter les mises à jour infinies
+        const lastAccel = prev.accelerometer[prev.accelerometer.length - 1];
+        const lastGyro = prev.gyroscope[prev.gyroscope.length - 1];
+        const lastMag = prev.magnetometer[prev.magnetometer.length - 1];
+        
+        let hasChanged = false;
+        
         if (state.sensors.accelerometer) {
-          newHistory.accelerometer = [
-            ...prev.accelerometer.slice(-maxHistoryLength + 1),
-            { ...state.sensors.accelerometer, timestamp }
-          ];
+          const current = state.sensors.accelerometer;
+          if (!lastAccel || 
+              Math.abs(current.x - lastAccel.x) > 0.001 ||
+              Math.abs(current.y - lastAccel.y) > 0.001 ||
+              Math.abs(current.z - lastAccel.z) > 0.001) {
+            newHistory.accelerometer = [
+              ...prev.accelerometer.slice(-maxHistoryLength + 1),
+              { ...current, timestamp }
+            ];
+            hasChanged = true;
+          }
         }
         
         if (state.sensors.gyroscope) {
-          newHistory.gyroscope = [
-            ...prev.gyroscope.slice(-maxHistoryLength + 1),
-            { ...state.sensors.gyroscope, timestamp }
-          ];
+          const current = state.sensors.gyroscope;
+          if (!lastGyro || 
+              Math.abs(current.x - lastGyro.x) > 0.001 ||
+              Math.abs(current.y - lastGyro.y) > 0.001 ||
+              Math.abs(current.z - lastGyro.z) > 0.001) {
+            newHistory.gyroscope = [
+              ...prev.gyroscope.slice(-maxHistoryLength + 1),
+              { ...current, timestamp }
+            ];
+            hasChanged = true;
+          }
         }
         
         if (state.sensors.magnetometer) {
-          newHistory.magnetometer = [
-            ...prev.magnetometer.slice(-maxHistoryLength + 1),
-            { ...state.sensors.magnetometer, timestamp }
-          ];
+          const current = state.sensors.magnetometer;
+          if (!lastMag || 
+              Math.abs(current.x - lastMag.x) > 0.001 ||
+              Math.abs(current.y - lastMag.y) > 0.001 ||
+              Math.abs(current.z - lastMag.z) > 0.001) {
+            newHistory.magnetometer = [
+              ...prev.magnetometer.slice(-maxHistoryLength + 1),
+              { ...current, timestamp }
+            ];
+            hasChanged = true;
+          }
         }
         
-        return newHistory;
+        return hasChanged ? newHistory : prev;
       });
     }
-  }, [state.sensors, maxHistoryLength]);
+  }, [state.sensors?.timestamp]); // Dépendance uniquement sur le timestamp
 
   /**
    * Génération d'un graphique SVG pour un capteur

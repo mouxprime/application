@@ -74,6 +74,15 @@ export class PedestrianDeadReckoning {
 
     // Ajouté pour la nouvelle méthode detectSteps
     this.accelerationHistory = [];
+
+    // Ajout d'une variable pour le dernier log
+    this.lastLogTime = 0;
+    
+    // *** NOUVEAU: Système de classification stable ***
+    this.lastModeUpdate = 0;
+    this.modeUpdateInterval = 10000; // 10 secondes
+    this.modeVotes = []; // Historique des votes pour stabilité
+    this.maxVotes = 50; // Nombre maximum de votes à conserver
   }
 
   /**
@@ -112,6 +121,15 @@ export class PedestrianDeadReckoning {
     
     // Mise à jour de la position
     this.updatePosition();
+    
+    // *** NOUVEAU: Log périodique du statut même sans pas détectés ***
+    const now = Date.now();
+    if (now - this.lastLogTime >= 2000) {
+      const timeUntilNextUpdate = Math.max(0, this.modeUpdateInterval - (now - this.lastModeUpdate));
+      const secondsUntilUpdate = Math.ceil(timeUntilNextUpdate / 1000);
+      console.log(`[STATUS] Mode: ${this.currentMode}, Pas: ${this.stepCount}, Prochaine éval: ${secondsUntilUpdate}s`);
+      this.lastLogTime = now;
+    }
     
     // Callback de mise à jour
     if (this.onPositionUpdate) {
@@ -174,7 +192,7 @@ export class PedestrianDeadReckoning {
   }
 
   /**
-   * Classification d'activité adaptée pour usage en poche (AMÉLIORÉE)
+   * Classification d'activité adaptée pour usage en poche (AMÉLIORÉE AVEC STABILITÉ)
    */
   classifyActivity() {
     if (this.accelerationBuffer.length < this.config.stepDetectionWindow) return;
@@ -199,39 +217,105 @@ export class PedestrianDeadReckoning {
     this.activityFeatures.stepFrequency = peaks.length / (this.config.stepDetectionWindow / this.currentSampleRate);
     this.activityFeatures.peakAmplitude = peaks.length > 0 ? Math.max(...peaks) : 0;
     
-    // *** CLASSIFICATION AMÉLIORÉE avec amplitude des pics ***
-    const previousMode = this.currentMode;
+    // *** NOUVEAU: Classification avec système de vote ***
     const variance = this.activityFeatures.accelerationVariance;
     const frequency = this.activityFeatures.stepFrequency;
     const amplitude = this.activityFeatures.peakAmplitude;
     
-    // Nouveau modèle avec seuils affinés
-    if (variance < 0.2) {
-      // Stationnaire : variance très stricte (réduit de 0.3 à 0.2)
-      this.currentMode = 'stationary';
-    } else if (amplitude < 0.3 && variance < 1.0 && frequency < 1.5) {
-      // Crawling : amplitude faible + variance modérée + fréquence faible
-      this.currentMode = 'crawling';
-    } else if (frequency >= 0.8 && frequency < 2.5) {
-      // Walking : fréquence normale (seuil baissé de 1.0 à 0.8)
-      if (amplitude > 1.5 && frequency > 2.0) {
-        // Détection fine de course par amplitude élevée + fréquence élevée
-        this.currentMode = 'running';
+    // Déterminer le mode candidat
+    let candidateMode;
+    if (variance < 0.1) {
+      candidateMode = 'stationary';
+    } else if (amplitude < 0.2 && variance < 0.8 && frequency < 1.2) {
+      candidateMode = 'crawling';
+    } else if (frequency >= 0.5 && frequency < 2.5) {
+      if (amplitude > 1.2 && frequency > 1.8) {
+        candidateMode = 'running';
       } else {
-        this.currentMode = 'walking';
+        candidateMode = 'walking';
       }
-    } else if (frequency >= 2.5 || (amplitude > 1.2 && frequency > 2.0)) {
-      // Running : fréquence très élevée OU amplitude élevée + fréquence élevée
-      this.currentMode = 'running';
+    } else if (frequency >= 2.5 || (amplitude > 1.0 && frequency > 1.8)) {
+      candidateMode = 'running';
     } else {
-      // Mode par défaut si conditions ambiguës
-      this.currentMode = 'walking';
+      candidateMode = 'walking';
     }
     
-    // Notification changement de mode avec plus d'infos
-    if (previousMode !== this.currentMode && this.onModeChanged) {
-      console.log(`[MODE] ${previousMode} → ${this.currentMode} | Var:${variance.toFixed(3)}, Freq:${frequency.toFixed(2)}Hz, Amp:${amplitude.toFixed(2)}`);
-      this.onModeChanged(this.currentMode, this.activityFeatures);
+    // Ajouter le vote
+    this.modeVotes.push({
+      mode: candidateMode,
+      timestamp: Date.now(),
+      variance: variance,
+      frequency: frequency,
+      amplitude: amplitude
+    });
+    
+    // Limiter la taille de l'historique des votes
+    if (this.modeVotes.length > this.maxVotes) {
+      this.modeVotes.shift();
+    }
+    
+    // *** NOUVEAU: Mise à jour du mode seulement toutes les 10 secondes ***
+    const now = Date.now();
+    if (now - this.lastModeUpdate >= this.modeUpdateInterval) {
+      const newMode = this.determineFinalMode();
+      const previousMode = this.currentMode;
+      
+      if (newMode !== previousMode) {
+        this.currentMode = newMode;
+        this.lastModeUpdate = now;
+        
+        if (this.onModeChanged) {
+          this.onModeChanged(this.currentMode, this.activityFeatures);
+        }
+        
+        console.log(`[MODE STABLE] ${previousMode} → ${this.currentMode} (décision toutes les 10s)`);
+      } else {
+        this.lastModeUpdate = now;
+        console.log(`[MODE STABLE] ${this.currentMode} confirmé (décision toutes les 10s)`);
+      }
+    }
+  }
+
+  /**
+   * Détermine le mode final basé sur les votes des 10 dernières secondes
+   */
+  determineFinalMode() {
+    if (this.modeVotes.length === 0) return this.currentMode;
+    
+    // Compter les votes des 10 dernières secondes
+    const now = Date.now();
+    const recentVotes = this.modeVotes.filter(vote => 
+      now - vote.timestamp <= this.modeUpdateInterval
+    );
+    
+    if (recentVotes.length === 0) return this.currentMode;
+    
+    // Compter les occurrences de chaque mode
+    const modeCounts = {};
+    recentVotes.forEach(vote => {
+      modeCounts[vote.mode] = (modeCounts[vote.mode] || 0) + 1;
+    });
+    
+    // Trouver le mode le plus voté
+    let winningMode = this.currentMode;
+    let maxCount = 0;
+    
+    for (const [mode, count] of Object.entries(modeCounts)) {
+      if (count > maxCount) {
+        maxCount = count;
+        winningMode = mode;
+      }
+    }
+    
+    // Exiger une majorité claire (au moins 60% des votes) pour changer de mode
+    const totalVotes = recentVotes.length;
+    const winningPercentage = maxCount / totalVotes;
+    
+    if (winningPercentage >= 0.6) {
+      return winningMode;
+    } else {
+      // Pas de majorité claire, garder le mode actuel
+      return this.currentMode;
     }
   }
 
@@ -253,34 +337,36 @@ export class PedestrianDeadReckoning {
 
     if (this.accelerationHistory.length < 20) return; // Pas assez de données
 
-    // *** NOUVEAU PIPELINE ADAPTATIF ***
+    // *** NOUVEAU PIPELINE ADAPTATIF AMÉLIORÉ ***
     
-    // 1. Calcul magnitude brute et suppression gravité
+    // 1. Calcul magnitude brute
     const recentSamples = this.accelerationHistory.slice(-50); // 2 secondes à 25Hz
-    const magnitudes = recentSamples.map(sample => {
-      const linearAcc = this.removeGravityComponent(sample);
-      return Math.sqrt(linearAcc.x**2 + linearAcc.y**2 + linearAcc.z**2);
-    });
+    const mags = recentSamples.map(sample => Math.hypot(sample.x, sample.y, sample.z));
     
-    // 2. Filtrage passe-haut (supprimer composante quasi-statique)
-    const detrendedMagnitudes = this.applyDetrendingFilter(magnitudes);
+    // 2. Detrending amélioré - soustraire la moyenne glissante
+    const avg = mags.reduce((a, b) => a + b) / mags.length;
+    const detrended = mags.map(v => Math.abs(v - avg)); // Valeur absolue pour garder les variations
     
-    // 3. Détection de pics avec seuil adaptatif (utilise detectPeaks existant)
-    const peaks = this.detectPeaks(detrendedMagnitudes); // Pas de seuil = calcul auto
+    // 3. Détection de pics sans seuil fixe (calcul automatique)
+    const peaks = this.detectPeaks(detrended);
     
     const now = Date.now();
     
-    // 4. Validation temporelle anti-rebond
-    const minStepInterval = this.currentMode === 'running' ? 250 : 400; // ms
+    // 4. Validation temporelle anti-rebond (ajusté)
+    const minStepInterval = this.currentMode === 'running' ? 200 : 250; // Ajusté pour course
     
     if (peaks.length > 0 && (now - this.lastStepTime) > minStepInterval) {
-      // Pas détecté validé
-      this.handleStepDetected(peaks[peaks.length - 1], magnitudes[magnitudes.length - 1]);
-      
-      // *** DEBUG: Log périodique avec nouvelles métriques ***
-      if (this.stepCount % 5 === 0) {
-        const adaptiveThreshold = this.getLastAdaptiveThreshold();
-        console.log(`[STEP] Pas ${this.stepCount}: peak=${peaks[peaks.length - 1].toFixed(2)}, seuil=${adaptiveThreshold.toFixed(2)}, mode=${this.currentMode}`);
+      // Vérifier que l'amplitude du pic est significative
+      const peakAmplitude = Math.max(...peaks);
+      if (peakAmplitude > 0.1) { // Seuil minimum d'amplitude
+        // Pas détecté validé
+        this.handleStepDetected(peakAmplitude, mags[mags.length - 1]);
+        
+        // *** DEBUG: Log périodique avec nouvelles métriques ***
+        if (this.stepCount % 5 === 0) {
+          const adaptiveThreshold = this.getLastAdaptiveThreshold();
+          console.log(`[STEP] Pas ${this.stepCount}: peak=${peakAmplitude.toFixed(2)}, seuil=${adaptiveThreshold.toFixed(2)}, mode=${this.currentMode}`);
+        }
       }
     }
   }
@@ -330,25 +416,25 @@ export class PedestrianDeadReckoning {
       const std = Math.sqrt(variance);
       
       // *** SEUIL ADAPTATIF SELON MODE ***
-      let k = 1.0; // Coefficient multiplicateur par défaut
+      let k = 0.8; // Coefficient multiplicateur par défaut réduit de 1.0 à 0.8
       switch (this.currentMode) {
         case 'running':
-          k = 0.8; // Plus sensible pour la course
+          k = 0.6; // Plus sensible pour la course (réduit de 0.8)
           break;
         case 'walking':
-          k = 1.0; // Standard pour la marche
+          k = 0.8; // Standard pour la marche (réduit de 1.0)
           break;
         case 'crawling':
-          k = 1.5; // Moins sensible pour ramper
+          k = 1.2; // Moins sensible pour ramper (réduit de 1.5)
           break;
         default:
-          k = 1.2;
+          k = 1.0;
       }
       
       threshold = mean + k * std;
       
       // Contraintes pour éviter les extrêmes
-      threshold = Math.max(0.1, Math.min(2.0, threshold));
+      threshold = Math.max(0.05, Math.min(1.5, threshold)); // Seuils réduits
       this._lastAdaptiveThreshold = threshold; // Stockage pour debug
     }
     
@@ -676,7 +762,7 @@ export class PedestrianDeadReckoning {
    */
   handleStepDetected(peakAmplitude, originalMagnitude) {
     const now = Date.now();
-    const minStepInterval = this.currentMode === 'running' ? 250 : 400; // ms
+    const minStepInterval = this.currentMode === 'running' ? 200 : 250; // Cohérent avec detectSteps
     
     // Vérification intervalle temporel
     if ((now - this.lastStepTime) <= minStepInterval) {
@@ -697,6 +783,12 @@ export class PedestrianDeadReckoning {
       this.onStepDetected(this.stepCount, this.dynamicStepLength);
     }
     
-    console.log(`[STEP] Détecté #${this.stepCount}: longueur=${this.dynamicStepLength.toFixed(3)}m`);
+    // Log simplifié toutes les 2 secondes avec informations de stabilité
+    if (now - this.lastLogTime >= 2000) {
+      const timeUntilNextUpdate = Math.max(0, this.modeUpdateInterval - (now - this.lastModeUpdate));
+      const secondsUntilUpdate = Math.ceil(timeUntilNextUpdate / 1000);
+      console.log(`[STATUS] Mode: ${this.currentMode}, Pas: ${this.stepCount}, Prochaine éval: ${secondsUntilUpdate}s`);
+      this.lastLogTime = now;
+    }
   }
 } 

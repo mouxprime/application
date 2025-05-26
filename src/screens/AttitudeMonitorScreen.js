@@ -24,11 +24,17 @@ export default function AttitudeMonitorScreen() {
   const updateInterval = useRef(null);
 
   useEffect(() => {
-    // Mise à jour périodique du statut système
+    // Mise à jour périodique du statut système avec optimisation
     updateInterval.current = setInterval(() => {
       if (isServiceRunning) {
         const status = localizationService.getSystemStatus();
-        setSystemStatus(status);
+        // Éviter les mises à jour inutiles si le statut n'a pas changé
+        setSystemStatus(prevStatus => {
+          if (!prevStatus || JSON.stringify(prevStatus) !== JSON.stringify(status)) {
+            return status;
+          }
+          return prevStatus;
+        });
       }
     }, 100); // 10Hz pour l'affichage
 

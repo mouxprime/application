@@ -129,6 +129,9 @@ export class LocalizationSDK {
       lastBenchmark: Date.now()
     };
 
+    // Ajout d'une variable pour le dernier log
+    this.lastLogTime = 0;
+
     this.setupInternalCallbacks();
     this.setupAttitudeCallbacks();
     console.log('LocalizationSDK initialisé avec orientation adaptative et calibration dynamique');
@@ -285,7 +288,11 @@ export class LocalizationSDK {
         this.processSensorUpdate(sensorData);
       },
       onModeChanged: (modeInfo) => {
-        console.log('Taux échantillonnage adapté:', modeInfo);
+        const now = Date.now();
+        if (now - this.lastLogTime >= 2000) {
+          console.log(`[STATUS] Mode: ${this.currentState.mode}`);
+          this.lastLogTime = now;
+        }
       },
       onEnergyStatusChanged: (energyStatus) => {
         if (this.callbacks.onEnergyStatusChanged) {
@@ -427,9 +434,6 @@ export class LocalizationSDK {
       this.ekf._lastMagnetometerConfidence = confidence;
       
       // *** BONUS: Bonus confiance explicite après correction magnétomètre ***
-      if (confidence > 0.5) {
-        console.log(`[MAG] Correction appliquée avec confiance ${(confidence * 100).toFixed(0)}%, bruit=${adaptiveNoise.toFixed(2)}`);
-      }
     }
     
     // Préparer mise à jour PDR à intervalle espacé

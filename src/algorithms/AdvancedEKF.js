@@ -82,6 +82,7 @@ export class AdvancedExtendedKalmanFilter {
     // État du mode de mouvement
     this.currentMode = 'stationary';
     this.zuptActive = false;
+    this._zuptApplied = false;
 
     // Historique pour analyse
     this.innovationHistory = [];
@@ -90,8 +91,11 @@ export class AdvancedExtendedKalmanFilter {
     // Protection contre les appels simultanés
     this._isUpdating = false;
 
-          this.lastUpdate = Date.now();
-    }
+    this.lastUpdate = Date.now();
+    
+    // Ajout d'une variable pour le dernier log
+    this.lastLogTime = 0;
+  }
 
   /**
    * Configuration de la carte vectorielle
@@ -109,7 +113,13 @@ export class AdvancedExtendedKalmanFilter {
    * Mise à jour du bruit de processus selon le mode
    */
   updateProcessNoise(mode) {
+    const previousMode = this.currentMode;
     this.currentMode = mode;
+    
+    // Réinitialiser le flag ZUPT si on sort du mode stationnaire
+    if (previousMode === 'stationary' && mode !== 'stationary') {
+      this._zuptApplied = false;
+    }
     
     let baseNoise;
     switch (mode) {
@@ -274,21 +284,21 @@ export class AdvancedExtendedKalmanFilter {
           this.P.set([i, i], minEigenvalue);
         }
       }
-          } catch (error) {
-        console.warn('Erreur mise à jour covariance prédiction:', error);
-        this.P = math.identity(13);
-        // Position X,Y
-        this.P.set([0, 0], 1.0);
-        this.P.set([1, 1], 1.0);
-        // Z, vitesses & biases
-        for (let i of [2,3,4,5,9,10,11,12]) {
-          this.P.set([i, i], 1.0);
-        }
-        // Yaw, roll, pitch
-        this.P.set([6, 6], 0.2);
-        this.P.set([7, 7], 0.2);
-        this.P.set([8, 8], 0.2);
+    } catch (error) {
+      console.warn('Erreur mise à jour covariance prédiction:', error);
+      this.P = math.identity(13);
+      // Position X,Y
+      this.P.set([0, 0], 1.0);
+      this.P.set([1, 1], 1.0);
+      // Z, vitesses & biases
+      for (let i of [2,3,4,5,9,10,11,12]) {
+        this.P.set([i, i], 1.0);
       }
+      // Yaw, roll, pitch
+      this.P.set([6, 6], 0.2);
+      this.P.set([7, 7], 0.2);
+      this.P.set([8, 8], 0.2);
+    }
 
     // Map-matching après prédiction
     this.applyMapMatching();
@@ -468,59 +478,57 @@ export class AdvancedExtendedKalmanFilter {
    * Application Zero-Velocity Update (ZUPT) - AMÉLIORÉE pour confiance
    */
   applyZUPT() {
-    if (this.zuptActive) return; // Déjà actif
-    
-    this.zuptActive = true;
-    
-    const stateVelocity = [
-      this.state.get([3, 0]), // vx
-      this.state.get([4, 0]), // vy
-      this.state.get([5, 0])  // vz
-    ];
-    
-    // *** BUG FIX: Réduction des vitesses plus aggressive (95% au lieu de 90%) ***
-    this.state.set([3, 0], stateVelocity[0] * 0.05); // vx
-    this.state.set([4, 0], stateVelocity[1] * 0.05); // vy
-    this.state.set([5, 0], stateVelocity[2] * 0.05); // vz
-    
-    // *** NOUVEAU: Réduction de l'incertitude de position pendant ZUPT ***
-    // Multiplier les covariances de position par un facteur < 1
-    this.P.set([0, 0], this.P.get([0, 0]) * 0.5); // Position X plus certaine
-    this.P.set([1, 1], this.P.get([1, 1]) * 0.5); // Position Y plus certaine
-    
-    // *** NOUVEAU: Réduction modérée de l'incertitude d'orientation si confiance magnéto élevée ***
-    // Si on a une bonne référence magnétique, on peut aussi resserrer yaw
-    if (this._lastMagnetometerConfidence > 0.7) {
-      this.P.set([6, 6], this.P.get([6, 6]) * 0.7); // Yaw plus certain
+    // Ne s'appliquer qu'à la transition vers stationnaire
+    if (this.currentMode === 'stationary' && !this._zuptApplied) {
+      this.zuptActive = true;
+      this._zuptApplied = true;
+      
+      const stateVelocity = [
+        this.state.get([3, 0]), // vx
+        this.state.get([4, 0]), // vy
+        this.state.get([5, 0])  // vz
+      ];
+      
+      // *** BUG FIX: Réduction des vitesses plus aggressive (95% au lieu de 90%) ***
+      this.state.set([3, 0], stateVelocity[0] * 0.05); // vx
+      this.state.set([4, 0], stateVelocity[1] * 0.05); // vy
+      this.state.set([5, 0], stateVelocity[2] * 0.05); // vz
+      
+      // *** NOUVEAU: Réduction de l'incertitude de position pendant ZUPT ***
+      // Multiplier les covariances de position par un facteur < 1
+      this.P.set([0, 0], this.P.get([0, 0]) * 0.5); // Position X plus certaine
+      this.P.set([1, 1], this.P.get([1, 1]) * 0.5); // Position Y plus certaine
+      
+      // *** NOUVEAU: Réduction modérée de l'incertitude d'orientation si confiance magnéto élevée ***
+      // Si on a une bonne référence magnétique, on peut aussi resserrer yaw
+      if (this._lastMagnetometerConfidence > 0.7) {
+        this.P.set([6, 6], this.P.get([6, 6]) * 0.7); // Yaw plus certain
+      }
+      
+      // Logs détaillés pour le debug
+      const positionUncertaintyBefore = this.P.get([0, 0]) + this.P.get([1, 1]);
+      const yawUncertaintyBefore = this.P.get([6, 6]);
+      
+      console.log(`[ZUPT] Activé à la transition - Gain confiance appliqué`);
+      console.log(`[ZUPT] Incertitudes avant: pos=${positionUncertaintyBefore.toFixed(3)}, yaw=${yawUncertaintyBefore.toFixed(3)}`);
+      
+      // Mise à jour avec mesure de vitesse nulle
+      const velocityMeasurement = math.matrix([[0], [0], [0]]);
+      const velocityNoiseMatrix = math.diag([this.config.zuptNoise, this.config.zuptNoise, this.config.zuptNoise]);
+      
+      // Matrice d'observation pour les vitesses (H)
+      const H = math.zeros(3, 13);
+      H.set([0, 3], 1); // vx
+      H.set([1, 4], 1); // vy
+      H.set([2, 5], 1); // vz
+      
+      this.updateMeasurement(velocityMeasurement, H, velocityNoiseMatrix);
+      
+      const positionUncertaintyAfter = this.P.get([0, 0]) + this.P.get([1, 1]);
+      const yawUncertaintyAfter = this.P.get([6, 6]);
+      
+      console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
     }
-    
-    // Amélioration du gain confiance
-    const positionGain = 30; // Augmenté de 10% à 30%
-    const orientationGain = 20; // Nouveau: gain orientation
-    
-    // Logs détaillés pour le debug
-    const positionUncertaintyBefore = this.P.get([0, 0]) + this.P.get([1, 1]);
-    const yawUncertaintyBefore = this.P.get([6, 6]);
-    
-    console.log(`[ZUPT] Activé - Gain confiance pos: +${positionGain}%, orient: +${orientationGain}%`);
-    console.log(`[ZUPT] Incertitudes avant: pos=${positionUncertaintyBefore.toFixed(3)}, yaw=${yawUncertaintyBefore.toFixed(3)}`);
-    
-    // Mise à jour avec mesure de vitesse nulle
-    const velocityMeasurement = [0, 0, 0];
-    const velocityNoiseMatrix = math.diag([this.config.zuptNoise, this.config.zuptNoise, this.config.zuptNoise]);
-    
-    // Matrice d'observation pour les vitesses (H)
-    const H = math.zeros(3, 13);
-    H.set([0, 3], 1); // vx
-    H.set([1, 4], 1); // vy
-    H.set([2, 5], 1); // vz
-    
-    this.updateMeasurement(velocityMeasurement, H, velocityNoiseMatrix);
-    
-    const positionUncertaintyAfter = this.P.get([0, 0]) + this.P.get([1, 1]);
-    const yawUncertaintyAfter = this.P.get([6, 6]);
-    
-    console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
   }
 
   /**
@@ -547,8 +555,38 @@ export class AdvancedExtendedKalmanFilter {
 
       // Vérifications des dimensions
       const stateSize = this.state.size();
-      const measurementSize = measurement.size();
+      
+      // Correction pour measurement.size
+      let measurementSize;
+      if (Array.isArray(measurement)) {
+        // Si c'est un tableau
+        const rows = measurement.length;
+        const cols = Array.isArray(measurement[0]) ? measurement[0].length : 1;
+        measurementSize = [rows, cols];
+        // Convertir en matrice MathJS
+        measurement = math.matrix(measurement);
+      } else if (measurement && typeof measurement.size === 'function') {
+        // Si c'est déjà une matrice MathJS
+        measurementSize = measurement.size();
+      } else {
+        console.warn('Type de measurement invalide:', typeof measurement);
+        return;
+      }
+      
+      // Vérification que H est défini avant d'appeler size()
+      if (!H || typeof H.size !== 'function') {
+        console.warn('Matrice H invalide ou non définie:', H);
+        return;
+      }
+      
       const HSize = H.size();
+      
+      // Vérification que R est défini avant d'appeler size()
+      if (!R || typeof R.size !== 'function') {
+        console.warn('Matrice R invalide ou non définie:', R);
+        return;
+      }
+      
       const RSize = R.size();
 
       // Vérifications de compatibilité
@@ -742,31 +780,33 @@ export class AdvancedExtendedKalmanFilter {
     const rollUncertainty = this.P.get([7, 7]);     // roll
     const pitchUncertainty = this.P.get([8, 8]);    // pitch
     
-    // *** BUG FIX: Pondération plus optimiste et plafonnement des incertitudes ***
+    // *** BUG FIX: Pondération plus réaliste et plafonnement des incertitudes ***
     // Plafonner les incertitudes individuelles pour éviter l'explosion
-    const cappedPositionUncertainty = Math.min(positionUncertainty, 5.0); // Max 5m²
-    const cappedYawUncertainty = Math.min(yawUncertainty, 2.0);           // Max 2 rad²
-    const cappedRollUncertainty = Math.min(rollUncertainty, 1.0);         // Max 1 rad²
-    const cappedPitchUncertainty = Math.min(pitchUncertainty, 1.0);       // Max 1 rad²
+    const cappedPositionUncertainty = Math.min(positionUncertainty, 10.0); // Max 10m²
+    const cappedYawUncertainty = Math.min(yawUncertainty, 3.0);            // Max 3 rad²
+    const cappedRollUncertainty = Math.min(rollUncertainty, 2.0);          // Max 2 rad²
+    const cappedPitchUncertainty = Math.min(pitchUncertainty, 2.0);        // Max 2 rad²
     
-    // Total des incertitudes avec pondération plus optimiste
-    const totalUncertainty = cappedPositionUncertainty * 0.6 +      // Position (poids réduit)
-                            cappedYawUncertainty * 0.8 +            // Yaw (poids réduit)
-                            cappedRollUncertainty * 0.2 +           // Roll (poids très réduit)
-                            cappedPitchUncertainty * 0.2;           // Pitch (poids très réduit)
+    // Total des incertitudes avec pondération plus réaliste
+    const totalUncertainty = cappedPositionUncertainty * 1.0 +      // Position (poids normal)
+                            cappedYawUncertainty * 0.5 +            // Yaw (poids modéré)
+                            cappedRollUncertainty * 0.2 +           // Roll (poids faible)
+                            cappedPitchUncertainty * 0.2;           // Pitch (poids faible)
     
-    // *** BUG FIX: Fonction de confiance plus optimiste ***
-    // Nouvelle formule pour éviter la chute rapide vers 1%
+    // *** BUG FIX: Fonction de confiance plus réaliste ***
     let confidence;
     if (totalUncertainty < 0.5) {
       // Très bonne confiance si incertitude faible
-      confidence = 0.95 - totalUncertainty * 0.2;
+      confidence = 0.90 - totalUncertainty * 0.3;
     } else if (totalUncertainty < 2.0) {
       // Confiance décroissante mais raisonnable
-      confidence = 0.85 - (totalUncertainty - 0.5) * 0.4;
+      confidence = 0.75 - (totalUncertainty - 0.5) * 0.3;
+    } else if (totalUncertainty < 5.0) {
+      // Confiance modérée
+      confidence = 0.50 - (totalUncertainty - 2.0) * 0.1;
     } else {
-      // Confiance minimale mais pas catastrophique
-      confidence = Math.max(0.15, 0.25 - totalUncertainty * 0.05);
+      // Confiance faible mais pas catastrophique
+      confidence = Math.max(0.10, 0.20 - totalUncertainty * 0.02);
     }
     
     // Assurer que la confiance reste dans [0, 1]
@@ -774,9 +814,9 @@ export class AdvancedExtendedKalmanFilter {
     
     // *** BUG FIX: Bonus de confiance selon le mode d'activité ***
     if (this.currentMode === 'stationary') {
-      confidence = Math.min(1, confidence * 1.2); // Bonus 20% en stationnaire
+      confidence = Math.min(1, confidence * 1.1); // Bonus 10% en stationnaire
     } else if (this.zuptActive) {
-      confidence = Math.min(1, confidence * 1.15); // Bonus 15% avec ZUPT
+      confidence = Math.min(1, confidence * 1.05); // Bonus 5% avec ZUPT
     }
     
     // *** DEBUG: Traçage des incertitudes périodique avec nouvelles métriques ***
@@ -967,18 +1007,11 @@ export class AdvancedExtendedKalmanFilter {
       
       this.updateMeasurement(yawMeasurement, H_yaw, R_yaw);
       
-      // *** BUG FIX: Bonus de confiance pour PDR après correction ***
-      // Si PDR fonctionne bien, récompenser avec réduction d'incertitude
-      const pdrConfidenceBonus = 0.05; // 5% de réduction supplémentaire
-      this.P.set([0, 0], this.P.get([0, 0]) * (1 - pdrConfidenceBonus));
-      this.P.set([1, 1], this.P.get([1, 1]) * (1 - pdrConfidenceBonus));
-      this.P.set([6, 6], this.P.get([6, 6]) * (1 - pdrConfidenceBonus * 0.5));
-      
-      // Log périodique pour debug
-      if (!this._lastPdrDebug || Date.now() - this._lastPdrDebug > 3000) {
-        const posUncertainty = this.P.get([0, 0]) + this.P.get([1, 1]);
-        console.log(`[PDR] Correction ${mode}: bruit pos=${positionNoise.toFixed(3)}, incertitude=${posUncertainty.toFixed(3)}`);
-        this._lastPdrDebug = Date.now();
+      // Log simplifié toutes les 2 secondes
+      const now = Date.now();
+      if (now - this.lastLogTime >= 2000) {
+        console.log(`[STATUS] Mode: ${mode}`);
+        this.lastLogTime = now;
       }
       
     } catch (error) {
