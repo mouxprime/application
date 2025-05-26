@@ -79,6 +79,9 @@ export class LocalizationSDK {
     // *** NOUVEAU: AttitudeTracker pour orientation adaptative ***
     this.attitudeTracker = new AttitudeTracker(this.config.attitudeConfig);
     
+    // *** NOUVEAU: Injection de l'AttitudeTracker dans le PDR pour détection verticale ***
+    this.pdr.setAttitudeTracker(this.attitudeTracker);
+    
     // État du SDK
     this.isInitialized = false;
     this.isTracking = false;
@@ -101,6 +104,7 @@ export class LocalizationSDK {
       mode: 'stationary',
       confidence: 0,
       stepCount: 0,
+      crawlDistance: 0,
       distance: 0
     };
 
@@ -128,6 +132,17 @@ export class LocalizationSDK {
       updateCount: 0,
       lastBenchmark: Date.now()
     };
+
+    // État du système
+    this.isInitialized = false;
+    this.isTracking = false;
+    this.currentState = {};
+    this.performanceMetrics = {};
+    
+    // *** NOUVEAU: Gestion mode automatique/manuel ***
+    this.detectionMode = 'auto'; // 'auto' ou 'manual'
+    this.manualModeOverride = null; // Mode forcé en manuel
+    this.autoModeEnabled = true; // Classification automatique activée
 
     this.setupInternalCallbacks();
     this.setupAttitudeCallbacks();
@@ -427,9 +442,9 @@ export class LocalizationSDK {
       this.ekf._lastMagnetometerConfidence = confidence;
       
       // *** BONUS: Bonus confiance explicite après correction magnétomètre ***
-      if (confidence > 0.5) {
-        console.log(`[MAG] Correction appliquée avec confiance ${(confidence * 100).toFixed(0)}%, bruit=${adaptiveNoise.toFixed(2)}`);
-      }
+      // if (confidence > 0.5) {
+      //   console.log(`[MAG] Correction appliquée avec confiance ${(confidence * 100).toFixed(0)}%, bruit=${adaptiveNoise.toFixed(2)}`);
+      // }
     }
     
     // Préparer mise à jour PDR à intervalle espacé
@@ -506,13 +521,25 @@ export class LocalizationSDK {
       mode: pdrState.mode,
       confidence: ekfPose.confidence,
       stepCount: pdrState.stepCount,
+      crawlDistance: pdrState.crawlDistance,
       distance: this.calculateTotalDistance(),
       
       // Informations avancées
       sampleRate: pdrState.sampleRate,
       isZUPT: pdrState.isZUPT,
       energyLevel: this.sensorManager.getStatus().metrics.energyLevel,
-      features: pdrState.features
+      features: pdrState.features,
+      
+      // *** NOUVEAU: Informations de contrôle de mode ***
+      modeControl: {
+        detectionMode: this.detectionMode,
+        manualModeOverride: this.manualModeOverride,
+        autoModeEnabled: this.autoModeEnabled,
+        isManualActive: this.isManualModeActive()
+      },
+      
+      // Métriques de détection verticale
+      verticalDetection: pdrState.verticalDetection
     };
   }
 
@@ -520,8 +547,9 @@ export class LocalizationSDK {
    * Calcul de la distance totale parcourue
    */
   calculateTotalDistance() {
-    // Approximation basée sur le nombre de pas et la longueur moyenne
-    return this.currentState.stepCount * this.config.stepLength;
+    // *** NOUVEAU: Utiliser la distance totale du PDR (pas + crawling) ***
+    const pdrState = this.pdr.getState();
+    return pdrState.totalDistance || (this.currentState.stepCount * this.config.stepLength);
   }
 
   /**
@@ -534,13 +562,16 @@ export class LocalizationSDK {
       if (this.callbacks.onPositionUpdate && this.isTracking) {
         const now = Date.now();
         if (now - this.lastUserUpdate >= interval) {
-          this.callbacks.onPositionUpdate(
-            this.currentState.position.x,
-            this.currentState.position.y,
-            this.currentState.orientation.yaw,
-            this.currentState.mode
-          );
-          this.lastUserUpdate = now;
+          // *** CORRECTION: Protection contre les états invalides ***
+          if (this.currentState && this.currentState.position) {
+            this.callbacks.onPositionUpdate(
+              this.currentState.position.x,
+              this.currentState.position.y,
+              this.currentState.orientation.yaw,
+              this.currentState.mode
+            );
+            this.lastUserUpdate = now;
+          }
         }
       }
     }, interval);
@@ -1149,5 +1180,232 @@ export class LocalizationSDK {
     this.ekf.state.set([6, 0], this.pdr.orientation.yaw);
     
     console.log(`[CALIBRATION DYNAMIQUE] Trajectoire corrigée: (${correctedX.toFixed(2)}, ${correctedY.toFixed(2)})`);
+  }
+
+  /**
+   * *** NOUVEAU: Test d'intégration du mode crawling ***
+   */
+  testCrawlingIntegration() {
+    if (!this.isInitialized) {
+      console.warn('[SDK] SDK non initialisé pour le test crawling');
+      return { success: false, error: 'SDK non initialisé' };
+    }
+    
+    console.log('[SDK] Lancement test intégration crawling...');
+    
+    try {
+      // Test PDR
+      const pdrResult = this.pdr.testCrawlingIntegration();
+      
+      // Test EKF avec mode crawling
+      const initialEKFState = this.ekf.getFullState();
+      this.ekf.updateProcessNoise('crawling');
+      
+      console.log('[SDK] Test EKF - Mode crawling configuré');
+      console.log('[SDK] État EKF initial:', {
+        position: { 
+          x: initialEKFState.position.x, 
+          y: initialEKFState.position.y 
+        },
+        velocity: initialEKFState.velocity
+      });
+      
+      // Vérifier que l'EKF gère bien le mode crawling
+      const crawlingState = this.ekf.getFullState();
+      
+      const result = {
+        success: pdrResult.success,
+        pdr: pdrResult,
+        ekf: {
+          initialState: initialEKFState,
+          crawlingState: crawlingState,
+          processNoiseUpdated: true
+        },
+        integration: {
+          totalDistance: this.calculateTotalDistance(),
+          currentState: this.currentState
+        }
+      };
+      
+      console.log('[SDK] Test crawling terminé:', result.success ? '✓ RÉUSSI' : '✗ ÉCHOUÉ');
+      return result;
+      
+    } catch (error) {
+      console.error('[SDK] Erreur test crawling:', error);
+      return { 
+        success: false, 
+        error: error.message,
+        pdr: null,
+        ekf: null 
+      };
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Activation du mode automatique ***
+   */
+  setAutoMode() {
+    this.detectionMode = 'auto';
+    this.manualModeOverride = null;
+    this.autoModeEnabled = true;
+    
+    // Réactiver la classification automatique dans le PDR
+    if (this.pdr) {
+      this.pdr.setAutoClassification(true);
+    }
+    
+    console.log('[SDK] Mode automatique activé - Classification d\'activité réactivée');
+  }
+
+  /**
+   * *** NOUVEAU: Activation du mode manuel avec mode spécifique ***
+   */
+  setManualMode(mode) {
+    const validModes = ['stationary', 'walking', 'crawling', 'running'];
+    
+    if (!validModes.includes(mode)) {
+      console.warn(`[SDK] Mode manuel invalide: ${mode}. Modes valides: ${validModes.join(', ')}`);
+      return;
+    }
+    
+    this.detectionMode = 'manual';
+    this.manualModeOverride = mode;
+    this.autoModeEnabled = false;
+    
+    // Désactiver la classification automatique et forcer le mode
+    if (this.pdr) {
+      this.pdr.setAutoClassification(false);
+      this.pdr.updateActivityMode(mode);
+    }
+    
+    // Mettre à jour l'EKF avec le nouveau mode
+    if (this.ekf) {
+      this.ekf.updateProcessNoise(mode);
+    }
+    
+    console.log(`[SDK] Mode manuel activé: ${mode}`);
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir l'état du contrôle de mode ***
+   */
+  getModeControlState() {
+    return {
+      detectionMode: this.detectionMode,
+      manualModeOverride: this.manualModeOverride,
+      autoModeEnabled: this.autoModeEnabled,
+      currentMode: this.currentState.mode || 'stationary'
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Vérifier si un mode est forcé manuellement ***
+   */
+  isManualModeActive() {
+    return this.detectionMode === 'manual' && this.manualModeOverride !== null;
+  }
+
+  /**
+   * *** NOUVEAU: Test des garde-fous physiologiques ***
+   */
+  testPhysiologicalGuards() {
+    if (!this.isInitialized) {
+      console.warn('[SDK] SDK non initialisé pour le test physiologique');
+      return { success: false, error: 'SDK non initialisé' };
+    }
+    
+    console.log('[SDK] Lancement test garde-fous physiologiques...');
+    
+    try {
+      // Test PDR
+      const pdrResult = this.pdr.testPhysiologicalGuards();
+      
+      // Informations sur l'état actuel
+      const currentState = this.currentState;
+      const pdrState = this.pdr.getState();
+      
+      console.log('[SDK] État actuel du système:');
+      console.log('[SDK] - Mode:', currentState.mode);
+      console.log('[SDK] - Pas détectés:', currentState.stepCount);
+      console.log('[SDK] - Distance:', currentState.distance?.toFixed(2), 'm');
+      
+      // Métriques physiologiques
+      const physioMetrics = pdrState.physiologicalMetrics;
+      console.log('[SDK] Métriques physiologiques:');
+      console.log('[SDK] - Fréquence actuelle:', physioMetrics.currentStepFrequency.toFixed(2), 'Hz');
+      console.log('[SDK] - Fréquence max autorisée:', physioMetrics.maxAllowedFrequency, 'Hz');
+      console.log('[SDK] - Historique pas:', physioMetrics.stepHistoryLength, 'pas');
+      console.log('[SDK] - Confirmation gyro:', physioMetrics.gyroConfirmationEnabled ? 'activée' : 'désactivée');
+      console.log('[SDK] - Activité gyro:', physioMetrics.lastGyroActivity.toFixed(3), 'rad/s');
+      
+      const result = {
+        success: true,
+        pdr: pdrResult,
+        currentState: {
+          mode: currentState.mode,
+          stepCount: currentState.stepCount,
+          distance: currentState.distance
+        },
+        physiologicalMetrics: physioMetrics,
+        recommendations: this.generatePhysiologicalRecommendations(physioMetrics)
+      };
+      
+      console.log('[SDK] Test garde-fous physiologiques terminé ✓');
+      return result;
+      
+    } catch (error) {
+      console.error('[SDK] Erreur test garde-fous physiologiques:', error);
+      return { 
+        success: false, 
+        error: error.message,
+        pdr: null 
+      };
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Générer des recommandations basées sur les métriques physiologiques ***
+   */
+  generatePhysiologicalRecommendations(metrics) {
+    const recommendations = [];
+    
+    // Vérification fréquence de pas
+    const frequencyRatio = metrics.currentStepFrequency / metrics.maxAllowedFrequency;
+    if (frequencyRatio > 0.8) {
+      recommendations.push({
+        type: 'warning',
+        message: `Fréquence de pas élevée (${(frequencyRatio * 100).toFixed(0)}% du maximum)`,
+        suggestion: 'Risque de faux positifs - Vérifier les seuils de détection'
+      });
+    }
+    
+    // Vérification historique des pas
+    if (metrics.stepHistoryLength < 3 && this.currentState.mode === 'walking') {
+      recommendations.push({
+        type: 'info',
+        message: 'Peu de pas détectés en mode marche',
+        suggestion: 'Normal en début de session ou si stationnaire'
+      });
+    }
+    
+    // Vérification confirmation gyroscopique
+    if (metrics.gyroConfirmationEnabled && metrics.lastGyroActivity < 0.1) {
+      recommendations.push({
+        type: 'warning',
+        message: 'Activité gyroscopique très faible',
+        suggestion: 'Vérifier que le téléphone bouge naturellement'
+      });
+    }
+    
+    // Vérification buffer gyroscopique
+    if (metrics.gyroConfirmationEnabled && metrics.gyroBufferLength < 10) {
+      recommendations.push({
+        type: 'info',
+        message: 'Buffer gyroscopique en cours de remplissage',
+        suggestion: 'Confirmation gyro sera active sous peu'
+      });
+    }
+    
+    return recommendations;
   }
 } 

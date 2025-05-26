@@ -25,40 +25,46 @@ export default function SensorsScreen() {
   });
   const [maxHistoryLength] = useState(100); // Nombre de points à afficher
 
-  // Mise à jour de l'historique des capteurs
+  // *** CORRECTION: Mise à jour de l'historique des capteurs avec throttling ***
   useEffect(() => {
     if (state.sensors && state.sensors.timestamp) {
-      setSensorHistory(prev => {
-        const newHistory = { ...prev };
-        
-        // Ajout des nouvelles données avec timestamp
-        const timestamp = Date.now();
-        
-        if (state.sensors.accelerometer) {
-          newHistory.accelerometer = [
-            ...prev.accelerometer.slice(-maxHistoryLength + 1),
-            { ...state.sensors.accelerometer, timestamp }
-          ];
-        }
-        
-        if (state.sensors.gyroscope) {
-          newHistory.gyroscope = [
-            ...prev.gyroscope.slice(-maxHistoryLength + 1),
-            { ...state.sensors.gyroscope, timestamp }
-          ];
-        }
-        
-        if (state.sensors.magnetometer) {
-          newHistory.magnetometer = [
-            ...prev.magnetometer.slice(-maxHistoryLength + 1),
-            { ...state.sensors.magnetometer, timestamp }
-          ];
-        }
-        
-        return newHistory;
-      });
+      // Throttling: mettre à jour seulement toutes les 100ms
+      const now = Date.now();
+      const lastUpdate = sensorHistory.lastUpdate || 0;
+      
+      if (now - lastUpdate >= 100) {
+        setSensorHistory(prev => {
+          const newHistory = { ...prev, lastUpdate: now };
+          
+          // Ajout des nouvelles données avec timestamp
+          const timestamp = now;
+          
+          if (state.sensors.accelerometer) {
+            newHistory.accelerometer = [
+              ...prev.accelerometer.slice(-maxHistoryLength + 1),
+              { ...state.sensors.accelerometer, timestamp }
+            ];
+          }
+          
+          if (state.sensors.gyroscope) {
+            newHistory.gyroscope = [
+              ...prev.gyroscope.slice(-maxHistoryLength + 1),
+              { ...state.sensors.gyroscope, timestamp }
+            ];
+          }
+          
+          if (state.sensors.magnetometer) {
+            newHistory.magnetometer = [
+              ...prev.magnetometer.slice(-maxHistoryLength + 1),
+              { ...state.sensors.magnetometer, timestamp }
+            ];
+          }
+          
+          return newHistory;
+        });
+      }
     }
-  }, [state.sensors, maxHistoryLength]);
+  }, [state.sensors?.timestamp]); // Dépendance plus spécifique
 
   /**
    * Génération d'un graphique SVG pour un capteur

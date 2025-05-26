@@ -25,17 +25,22 @@ export default function AnalyticsScreen() {
     sessionDuration: 0,
     confidenceHistory: [],
     speedHistory: [],
-    accuracyDistribution: { high: 0, medium: 0, low: 0 }
+    accuracyDistribution: { high: 0, medium: 0, low: 0 },
+    verticalDetection: null
   });
 
   const [selectedMetric, setSelectedMetric] = useState('confidence');
 
-  // Calcul des métriques en temps réel
+  // *** CORRECTION: Calcul des métriques avec throttling pour éviter les boucles infinies ***
   useEffect(() => {
     if (state.trajectory.length > 1) {
-      calculateAnalytics();
+      // Throttling: recalculer seulement si assez de temps s'est écoulé
+      const now = Date.now();
+      if (!analyticsData.lastCalculation || now - analyticsData.lastCalculation > 1000) {
+        calculateAnalytics();
+      }
     }
-  }, [state.trajectory, state.pose]);
+  }, [state.trajectory.length, state.stepCount]); // Dépendances plus spécifiques
 
   const calculateAnalytics = () => {
     const trajectory = state.trajectory;
@@ -91,15 +96,20 @@ export default function AnalyticsScreen() {
       ? (trajectory[trajectory.length - 1].timestamp - trajectory[0].timestamp) / 1000 
       : 0;
 
+    // *** NOUVEAU: Métriques de détection verticale ***
+    const verticalMetrics = state.pdrMetrics?.verticalDetection || null;
+
     setAnalyticsData({
       totalDistance,
       averageSpeed,
       maxSpeed,
       averageAccuracy,
       sessionDuration,
-      confidenceHistory: confidences.slice(-100), // Derniers 100 points
-      speedHistory: speeds.slice(-100),
-      accuracyDistribution
+      confidenceHistory: confidences.slice(-50), // 50 derniers points
+      speedHistory: speeds.slice(-50),
+      accuracyDistribution,
+      verticalDetection: verticalMetrics, // Ajout des métriques verticales
+      lastCalculation: Date.now() // *** NOUVEAU: Timestamp pour throttling ***
     });
   };
 
@@ -131,6 +141,19 @@ export default function AnalyticsScreen() {
         value: formatDuration(analyticsData.sessionDuration),
         icon: 'time',
         color: '#ffa726'
+      },
+      // *** NOUVEAU: Métriques de crawling ***
+      {
+        title: 'Distance crawling',
+        value: `${(state.crawlDistance || 0).toFixed(1)} m`,
+        icon: 'git-merge',
+        color: '#ff6b6b'
+      },
+      {
+        title: 'Nombre de pas',
+        value: `${state.stepCount || 0}`,
+        icon: 'footsteps',
+        color: '#4ecdc4'
       }
     ];
 
@@ -287,20 +310,104 @@ export default function AnalyticsScreen() {
           }]} />
         </View>
         
-        <View style={styles.distributionStats}>
-          <View style={styles.statItem}>
-            <View style={[styles.statColor, { backgroundColor: '#00ff88' }]} />
-            <Text style={styles.statText}>Haute: {high} ({highPercent.toFixed(0)}%)</Text>
+        <View style={styles.distributionLegend}>
+          <View style={styles.legendRow}>
+            <View style={[styles.legendColor, { backgroundColor: '#00ff88' }]} />
+            <Text style={styles.legendText}>Haute ({highPercent.toFixed(1)}%)</Text>
           </View>
-          <View style={styles.statItem}>
-            <View style={[styles.statColor, { backgroundColor: '#ffaa00' }]} />
-            <Text style={styles.statText}>Moyenne: {medium} ({mediumPercent.toFixed(0)}%)</Text>
+          <View style={styles.legendRow}>
+            <View style={[styles.legendColor, { backgroundColor: '#ffaa00' }]} />
+            <Text style={styles.legendText}>Moyenne ({mediumPercent.toFixed(1)}%)</Text>
           </View>
-          <View style={styles.statItem}>
-            <View style={[styles.statColor, { backgroundColor: '#ff4444' }]} />
-            <Text style={styles.statText}>Faible: {low} ({lowPercent.toFixed(0)}%)</Text>
+          <View style={styles.legendRow}>
+            <View style={[styles.legendColor, { backgroundColor: '#ff4444' }]} />
+            <Text style={styles.legendText}>Faible ({lowPercent.toFixed(1)}%)</Text>
           </View>
         </View>
+      </View>
+    );
+  };
+
+  /**
+   * *** NOUVEAU: Métriques de détection verticale ***
+   */
+  const renderVerticalDetectionMetrics = () => {
+    const verticalData = analyticsData.verticalDetection;
+    
+    if (!verticalData) {
+      return (
+        <View style={styles.verticalContainer}>
+          <Text style={styles.sectionTitle}>🔄 Détection Verticale</Text>
+          <View style={styles.noDataContainer}>
+            <Text style={styles.noDataText}>Détection verticale non disponible</Text>
+          </View>
+        </View>
+      );
+    }
+
+    const getMethodColor = (method) => {
+      switch (method) {
+        case 'vertical_projection': return '#00ff88';
+        case 'magnitude_fallback': return '#ffaa00';
+        case 'magnitude_default': return '#ff8800';
+        case 'magnitude_only': return '#ff4444';
+        default: return '#888888';
+      }
+    };
+
+    const getMethodLabel = (method) => {
+      switch (method) {
+        case 'vertical_projection': return 'Projection Verticale';
+        case 'magnitude_fallback': return 'Magnitude (Fallback)';
+        case 'magnitude_default': return 'Magnitude (Défaut)';
+        case 'magnitude_only': return 'Magnitude Seule';
+        default: return 'Inconnu';
+      }
+    };
+
+    return (
+      <View style={styles.verticalContainer}>
+        <Text style={styles.sectionTitle}>🔄 Détection Verticale</Text>
+        
+        {/* État actuel */}
+        <View style={styles.verticalStatusRow}>
+          <Text style={styles.verticalLabel}>Méthode:</Text>
+          <View style={[styles.methodBadge, { backgroundColor: getMethodColor(verticalData.method) }]}>
+            <Text style={styles.methodBadgeText}>
+              {getMethodLabel(verticalData.method)}
+            </Text>
+          </View>
+        </View>
+
+        {/* Confiance d'orientation */}
+        <View style={styles.verticalStatusRow}>
+          <Text style={styles.verticalLabel}>Confiance Orientation:</Text>
+          <Text style={[styles.verticalValue, { 
+            color: verticalData.orientationConfidence > 0.5 ? '#00ff88' : '#ffaa00' 
+          }]}>
+            {(verticalData.orientationConfidence * 100).toFixed(0)}%
+          </Text>
+        </View>
+
+        {/* Dernier pic vertical */}
+        {verticalData.lastVerticalPeak > 0 && (
+          <View style={styles.verticalStatusRow}>
+            <Text style={styles.verticalLabel}>Dernier Pic Vertical:</Text>
+            <Text style={styles.verticalValue}>
+              {verticalData.lastVerticalPeak.toFixed(3)}g
+            </Text>
+          </View>
+        )}
+
+        {/* État fallback */}
+        {verticalData.fallbackActive && (
+          <View style={styles.verticalStatusRow}>
+            <Text style={styles.verticalLabel}>⚠️ Fallback Actif</Text>
+            <Text style={styles.verticalValue}>
+              Orientation instable
+            </Text>
+          </View>
+        )}
       </View>
     );
   };
@@ -386,6 +493,114 @@ export default function AnalyticsScreen() {
     }
   };
 
+  /**
+   * *** NOUVEAU: Rendu des métriques physiologiques ***
+   */
+  const renderPhysiologicalMetrics = () => {
+    const pdrState = state.pdr;
+    if (!pdrState?.physiologicalMetrics) {
+      return null;
+    }
+
+    const metrics = pdrState.physiologicalMetrics;
+    
+    const getFrequencyColor = () => {
+      const ratio = metrics.currentStepFrequency / metrics.maxAllowedFrequency;
+      if (ratio > 0.8) return '#ff4444'; // Rouge si proche du max
+      if (ratio > 0.6) return '#ffaa00'; // Orange si élevé
+      return '#00ff88'; // Vert si normal
+    };
+
+    const getGyroColor = () => {
+      if (!metrics.gyroConfirmationEnabled) return '#888888';
+      if (metrics.lastGyroActivity > 0.3) return '#00ff88';
+      if (metrics.lastGyroActivity > 0.1) return '#ffaa00';
+      return '#ff4444';
+    };
+
+    return (
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>🧬 Garde-fous Physiologiques</Text>
+        
+        <View style={styles.metricsGrid}>
+          {/* Fréquence de pas */}
+          <View style={styles.metricCard}>
+            <Ionicons name="pulse" size={24} color={getFrequencyColor()} />
+            <Text style={styles.metricTitle}>Fréquence Pas</Text>
+            <Text style={[styles.metricValue, { color: getFrequencyColor() }]}>
+              {metrics.currentStepFrequency.toFixed(1)} Hz
+            </Text>
+            <Text style={styles.metricSubtitle}>
+              Max: {metrics.maxAllowedFrequency} Hz
+            </Text>
+          </View>
+
+          {/* Historique des pas */}
+          <View style={styles.metricCard}>
+            <Ionicons name="time" size={24} color="#4ecdc4" />
+            <Text style={styles.metricTitle}>Historique</Text>
+            <Text style={[styles.metricValue, { color: '#4ecdc4' }]}>
+              {metrics.stepHistoryLength}
+            </Text>
+            <Text style={styles.metricSubtitle}>pas récents</Text>
+          </View>
+
+          {/* Confirmation gyroscopique */}
+          <View style={styles.metricCard}>
+            <Ionicons 
+              name={metrics.gyroConfirmationEnabled ? "checkmark-circle" : "close-circle"} 
+              size={24} 
+              color={getGyroColor()} 
+            />
+            <Text style={styles.metricTitle}>Gyro Confirm</Text>
+            <Text style={[styles.metricValue, { color: getGyroColor() }]}>
+              {metrics.gyroConfirmationEnabled ? 
+                metrics.lastGyroActivity.toFixed(2) : 'OFF'
+              }
+            </Text>
+            <Text style={styles.metricSubtitle}>
+              {metrics.gyroConfirmationEnabled ? 'rad/s' : 'désactivé'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Indicateurs d'état */}
+        <View style={styles.statusIndicators}>
+          <View style={[
+            styles.statusIndicator,
+            { backgroundColor: metrics.currentStepFrequency / metrics.maxAllowedFrequency > 0.8 ? 
+              'rgba(255, 68, 68, 0.2)' : 'rgba(0, 255, 136, 0.2)' }
+          ]}>
+            <Text style={[
+              styles.statusText,
+              { color: metrics.currentStepFrequency / metrics.maxAllowedFrequency > 0.8 ? 
+                '#ff4444' : '#00ff88' }
+            ]}>
+              {metrics.currentStepFrequency / metrics.maxAllowedFrequency > 0.8 ? 
+                '⚠️ Fréquence élevée' : '✅ Fréquence normale'}
+            </Text>
+          </View>
+
+          {metrics.gyroConfirmationEnabled && (
+            <View style={[
+              styles.statusIndicator,
+              { backgroundColor: metrics.lastGyroActivity > 0.1 ? 
+                'rgba(0, 255, 136, 0.2)' : 'rgba(255, 170, 0, 0.2)' }
+            ]}>
+              <Text style={[
+                styles.statusText,
+                { color: metrics.lastGyroActivity > 0.1 ? '#00ff88' : '#ffaa00' }
+              ]}>
+                {metrics.lastGyroActivity > 0.1 ? 
+                  '✅ Gyro actif' : '⚠️ Gyro faible'}
+              </Text>
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView showsVerticalScrollIndicator={false}>
@@ -398,8 +613,14 @@ export default function AnalyticsScreen() {
         {/* Distribution de précision */}
         {renderAccuracyDistribution()}
         
+        {/* Métriques de détection verticale */}
+        {renderVerticalDetectionMetrics()}
+        
         {/* Informations système */}
         {renderSystemInfo()}
+        
+        {/* Métriques physiologiques */}
+        {renderPhysiologicalMetrics()}
         
         {/* Boutons d'action */}
         <View style={styles.actionsContainer}>
@@ -439,7 +660,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 15,
     alignItems: 'center',
-    width: '48%',
+    width: '31%',
     marginBottom: 15,
     borderWidth: 1,
     borderColor: 'rgba(0, 255, 136, 0.3)',
@@ -507,7 +728,7 @@ const styles = StyleSheet.create({
   distributionSegment: {
     height: '100%',
   },
-  distributionStats: {
+  distributionLegend: {
     flexDirection: 'row',
     justifyContent: 'space-around',
   },
@@ -580,5 +801,54 @@ const styles = StyleSheet.create({
   },
   spacer: {
     height: 40,
+  },
+  verticalContainer: {
+    marginHorizontal: 20,
+    marginBottom: 25,
+  },
+  verticalStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 5,
+  },
+  verticalLabel: {
+    color: '#cccccc',
+    fontSize: 12,
+    marginRight: 8,
+  },
+  verticalValue: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  methodBadge: {
+    padding: 4,
+    borderRadius: 4,
+  },
+  methodBadgeText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  section: {
+    padding: 20,
+  },
+  metricSubtitle: {
+    color: '#888888',
+    fontSize: 12,
+  },
+  statusIndicators: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 10,
+  },
+  statusIndicator: {
+    padding: 8,
+    borderRadius: 8,
+  },
+  statusText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
 }); 

@@ -12,32 +12,47 @@ export class PedestrianDeadReckoning {
       // Paramètres de détection de pas adaptés pour poche
       stepDetectionWindow: config.stepDetectionWindow || 30, // 30 échantillons (augmenté)
       stepThreshold: config.stepThreshold || 1.0, // 1.0 m/s² (réduit pour plus de sensibilité)
-      crawlThreshold: config.crawlThreshold || 1.0, // 1.0 m/s² (augmenté pour poche)
-      crawlPitchThreshold: config.crawlPitchThreshold || 30, // degrés (sera retiré)
       
       // Paramètres de longueur de pas
       defaultStepLength: config.defaultStepLength || 0.7, // mètres
       heightRatio: config.heightRatio || 0.4, // ratio taille/longueur pas
-      crawlSpeed: config.crawlSpeed || 0.3, // m/s
       
       // Paramètres ZUPT adaptés pour poche
       zuptThreshold: config.zuptThreshold || 0.1, // m/s²
       zuptDuration: config.zuptDuration || 300, // 300ms (augmenté pour éviter micro-mouvements)
+      
+      // *** NOUVEAU: Paramètres détection verticale avec AttitudeTracker ***
+      verticalStepDetection: {
+        enabled: config.verticalStepDetection?.enabled !== false, // Activé par défaut
+        verticalThreshold: config.verticalStepDetection?.verticalThreshold || 0.3, // 0.3g pour pic vertical
+        minVerticalPeak: config.verticalStepDetection?.minVerticalPeak || 0.2, // 0.2g minimum
+        maxVerticalPeak: config.verticalStepDetection?.maxVerticalPeak || 1.5, // 1.5g maximum
+        orientationConfidenceThreshold: config.verticalStepDetection?.orientationConfidenceThreshold || 0.3, // 30% confiance min
+        fallbackToMagnitude: config.verticalStepDetection?.fallbackToMagnitude !== false // Fallback activé par défaut
+      },
       
       // Échantillonnage adaptatif
       baseSampleRate: config.baseSampleRate || 25, // Hz
       highSampleRate: config.highSampleRate || 100, // Hz
       motionThreshold: config.motionThreshold || 2.0, // m/s²
       
+      // *** NOUVEAU: Garde-fous physiologiques (crawling supprimé) ***
+      physiologicalConstraints: {
+        maxStepFrequencyWalking: config.physiologicalConstraints?.maxStepFrequencyWalking || 3.0, // Hz - 3 pas/sec max en marche
+        maxStepFrequencyRunning: config.physiologicalConstraints?.maxStepFrequencyRunning || 5.0, // Hz - 5 pas/sec max en course
+        minStepInterval: config.physiologicalConstraints?.minStepInterval || 200, // ms - intervalle minimum absolu
+        gyroConfirmationThreshold: config.physiologicalConstraints?.gyroConfirmationThreshold || 0.3, // rad/s - seuil gyro pour confirmation
+        gyroConfirmationEnabled: config.physiologicalConstraints?.gyroConfirmationEnabled !== false // Activé par défaut
+      },
+      
       ...config
     };
 
     // État du système
-    this.currentMode = 'stationary'; // stationary, walking, crawling, running
+    this.currentMode = 'stationary'; // stationary, walking, running (crawling supprimé)
     this.currentSampleRate = this.config.baseSampleRate;
     this.lastStepTime = 0;
     this.stepCount = 0;
-    this.crawlDistance = 0;
     
     // Buffers pour analyse
     this.accelerationBuffer = [];
@@ -58,9 +73,22 @@ export class PedestrianDeadReckoning {
       peakAmplitude: 0
     };
     
+    // *** NOUVEAU: Contrôle de classification automatique/manuelle ***
+    this.autoClassificationEnabled = true;
+    this.manualModeOverride = null;
+    
     // Calibration utilisateur
     this.userHeight = 1.7; // mètres par défaut
     this.dynamicStepLength = this.config.defaultStepLength;
+    
+    // *** NOUVEAU: État pour détection verticale ***
+    this.verticalDetectionState = {
+      isActive: false,
+      verticalAccHistory: [],
+      lastVerticalPeak: 0,
+      orientationConfidence: 0,
+      fallbackActive: false
+    };
     
     // Callbacks
     this.onStepDetected = null;
@@ -74,6 +102,13 @@ export class PedestrianDeadReckoning {
 
     // Ajouté pour la nouvelle méthode detectSteps
     this.accelerationHistory = [];
+    
+    // *** NOUVEAU: Référence vers AttitudeTracker (sera injectée) ***
+    this.attitudeTracker = null;
+
+    // *** NOUVEAU: Historique des pas pour garde-fous physiologiques ***
+    this.stepHistory = []; // Timestamps des derniers pas
+    this.gyroConfirmationBuffer = []; // Buffer pour confirmation gyroscopique
   }
 
   /**
@@ -86,6 +121,20 @@ export class PedestrianDeadReckoning {
   }
 
   /**
+   * *** NOUVEAU: Injection de l'AttitudeTracker pour détection verticale ***
+   */
+  setAttitudeTracker(attitudeTracker) {
+    this.attitudeTracker = attitudeTracker;
+    this.verticalDetectionState.isActive = this.config.verticalStepDetection.enabled && !!attitudeTracker;
+    
+    if (this.verticalDetectionState.isActive) {
+      console.log('[PDR] Détection verticale activée avec AttitudeTracker');
+    } else {
+      console.log('[PDR] Détection par magnitude (méthode classique)');
+    }
+  }
+
+  /**
    * Traitement principal des données de capteurs (SIMPLIFIÉ - plus d'OrientationCalibrator)
    */
   processSensorData(sensorData) {
@@ -94,17 +143,19 @@ export class PedestrianDeadReckoning {
     // Ajout aux buffers avec données brutes (transformation via AttitudeTracker dans LocalizationSDK)
     this.updateBuffers(accelerometer, gyroscope, magnetometer, barometer);
     
+    // *** MODIFICATION 1: Toujours calculer stepFrequency et peakAmplitude pour classification ***
+    this.computeStepMetricsForClassification();
+    
     // Classification d'activité
     this.classifyActivity();
     
     // Adaptation du taux d'échantillonnage
     this.adaptSampleRate();
     
-    // Détection de pas/crawling selon le mode
+    // *** MODIFICATION 1: Détection de pas conditionnelle après calcul des métriques ***
+    // Les métriques sont maintenant calculées avant la classification
     if (this.currentMode === 'walking' || this.currentMode === 'running') {
       this.detectSteps(accelerometer);
-    } else if (this.currentMode === 'crawling') {
-      this.processCrawling();
     }
     
     // Zero-Velocity Updates
@@ -149,6 +200,9 @@ export class PedestrianDeadReckoning {
       this.gyroscopeBuffer.shift();
     }
     
+    // *** NOUVEAU: Mise à jour du buffer de confirmation gyroscopique ***
+    this.updateGyroConfirmationBuffer(gyro);
+    
     // Buffer magnétomètre
     if (mag) {
       this.magnetometerBuffer.push({
@@ -174,10 +228,60 @@ export class PedestrianDeadReckoning {
   }
 
   /**
+   * *** NOUVEAU: Calcul des métriques de pas pour classification (toujours exécuté) ***
+   */
+  computeStepMetricsForClassification() {
+    if (this.accelerationBuffer.length < this.config.stepDetectionWindow) {
+      // Pas assez de données - réinitialiser les métriques
+      this.activityFeatures.stepFrequency = 0;
+      this.activityFeatures.peakAmplitude = 0;
+      return;
+    }
+    
+    // Calcul des magnitudes détrended pour détection de pics
+    const recentAcc = this.accelerationBuffer.slice(-this.config.stepDetectionWindow);
+    const magnitudes = recentAcc.map(sample => sample.magnitude);
+    const detrendedMagnitudes = this.applyDetrendingFilter(magnitudes);
+    
+    // Détection de pics sur la fenêtre d'analyse
+    const peaks = this.detectPeaks(detrendedMagnitudes);
+    
+    // Durée de la fenêtre en secondes
+    const windowDurationSec = this.config.stepDetectionWindow / this.currentSampleRate;
+    
+    // Mise à jour des métriques pour classification
+    this.activityFeatures.stepFrequency = peaks.length / windowDurationSec;
+    this.activityFeatures.peakAmplitude = peaks.length > 0 ? Math.max(...peaks) : 0;
+    
+    // Debug périodique
+    // if (this.accelerationBuffer.length % 25 === 0) { // Toutes les secondes à 25Hz
+    //   console.log(`[METRICS] Freq: ${this.activityFeatures.stepFrequency.toFixed(2)}Hz, Amp: ${this.activityFeatures.peakAmplitude.toFixed(2)}, Pics: ${peaks.length}, Mode: ${this.currentMode}`);
+    // }
+  }
+
+  /**
    * Classification d'activité adaptée pour usage en poche (AMÉLIORÉE)
    */
   classifyActivity() {
     if (this.accelerationBuffer.length < this.config.stepDetectionWindow) return;
+    
+    // *** NOUVEAU: Vérifier si mode manuel activé ***
+    if (!this.autoClassificationEnabled && this.manualModeOverride) {
+      // Mode manuel - forcer le mode spécifié
+      const previousMode = this.currentMode;
+      this.currentMode = this.manualModeOverride;
+      
+      // Notification changement de mode si différent
+      if (previousMode !== this.currentMode && this.onModeChanged) {
+        console.log(`[MODE MANUEL] ${previousMode} → ${this.currentMode} (forcé)`);
+        this.handleModeTransition(previousMode, this.currentMode);
+        this.onModeChanged(this.currentMode, this.activityFeatures);
+      }
+      
+      return; // Sortir sans classification automatique
+    }
+    
+    // *** CLASSIFICATION AUTOMATIQUE (code existant) ***
     
     // Calcul des caractéristiques basées sur la magnitude uniquement
     const recentAcc = this.accelerationBuffer.slice(-this.config.stepDetectionWindow);
@@ -188,55 +292,65 @@ export class PedestrianDeadReckoning {
     this.activityFeatures.accelerationVariance = accMagnitudes.reduce((acc, val) => 
       acc + Math.pow(val - meanAcc, 2), 0) / accMagnitudes.length;
     
-    // Garde les angles pour information mais ne les utilise plus pour la classification
+    // *** MODIFICATION 2: Calcul de l'orientation pour confirmation de posture ***
     const lastAcc = recentAcc[recentAcc.length - 1];
     this.activityFeatures.devicePitch = Math.atan2(-lastAcc.x, 
       Math.sqrt(lastAcc.y * lastAcc.y + lastAcc.z * lastAcc.z)) * 180 / Math.PI;
     this.activityFeatures.deviceRoll = Math.atan2(lastAcc.y, lastAcc.z) * 180 / Math.PI;
     
-    // Fréquence des pics basée sur magnitude avec seuil adaptatif
-    const peaks = this.detectPeaks(accMagnitudes);
-    this.activityFeatures.stepFrequency = peaks.length / (this.config.stepDetectionWindow / this.currentSampleRate);
-    this.activityFeatures.peakAmplitude = peaks.length > 0 ? Math.max(...peaks) : 0;
+    // *** MODIFICATION 1: stepFrequency et peakAmplitude sont maintenant calculés dans computeStepMetricsForClassification ***
+    // Les métriques sont déjà à jour, pas besoin de les recalculer ici
     
-    // *** CLASSIFICATION AMÉLIORÉE avec amplitude des pics ***
+    // *** MODIFICATION 2: CLASSIFICATION AMÉLIORÉE avec seuils plus permissifs et orientation ***
     const previousMode = this.currentMode;
     const variance = this.activityFeatures.accelerationVariance;
     const frequency = this.activityFeatures.stepFrequency;
     const amplitude = this.activityFeatures.peakAmplitude;
+    const pitch = Math.abs(this.activityFeatures.devicePitch);
     
-    // Nouveau modèle avec seuils affinés
+    // *** MODIFICATION 2: Seuils plus permissifs pour transition vers walking ***
+    const varThresholdWalk = 0.7;    // Augmenté de 0.5 à 0.7
+    const freqThreshold = 0.1;       // 0.1 Hz = 1 pic toutes les 10s
+    
     if (variance < 0.2) {
-      // Stationnaire : variance très stricte (réduit de 0.3 à 0.2)
+      // Stationnaire : variance très faible
       this.currentMode = 'stationary';
-    } else if (amplitude < 0.3 && variance < 1.0 && frequency < 1.5) {
-      // Crawling : amplitude faible + variance modérée + fréquence faible
-      this.currentMode = 'crawling';
-    } else if (frequency >= 0.8 && frequency < 2.5) {
-      // Walking : fréquence normale (seuil baissé de 1.0 à 0.8)
-      if (amplitude > 1.5 && frequency > 2.0) {
-        // Détection fine de course par amplitude élevée + fréquence élevée
+    } else if (amplitude > 1.0) {
+      // *** MODIFICATION 2: Gros pic = directement walking ***
+      this.currentMode = 'walking';
+    } else if (pitch > 30 && pitch < 60) {
+      // *** MODIFICATION 3: Posture de marche (téléphone en poche) ***
+      this.currentMode = 'walking';
+    } else if (frequency >= freqThreshold) {
+      // *** MODIFICATION 2: Autoriser walking dès qu'on détecte au moins 1 pic sur la fenêtre ***
+      if (frequency >= 2.5 || (amplitude > 1.2 && frequency > 2.0)) {
         this.currentMode = 'running';
       } else {
         this.currentMode = 'walking';
       }
-    } else if (frequency >= 2.5 || (amplitude > 1.2 && frequency > 2.0)) {
-      // Running : fréquence très élevée OU amplitude élevée + fréquence élevée
-      this.currentMode = 'running';
+    } else if (variance > varThresholdWalk) {
+      // *** MODIFICATION 2: Si variance déjà assez haute, considérer comme marche ***
+      this.currentMode = 'walking';
     } else {
-      // Mode par défaut si conditions ambiguës
+      // *** CRAWLING SUPPRIMÉ: Mode par défaut = walking ***
       this.currentMode = 'walking';
     }
     
     // Notification changement de mode avec plus d'infos
     if (previousMode !== this.currentMode && this.onModeChanged) {
-      console.log(`[MODE] ${previousMode} → ${this.currentMode} | Var:${variance.toFixed(3)}, Freq:${frequency.toFixed(2)}Hz, Amp:${amplitude.toFixed(2)}`);
+      const modeLabel = this.autoClassificationEnabled ? 'AUTO' : 'MANUEL';
+      console.log(`[MODE ${modeLabel}] ${previousMode} → ${this.currentMode} | Var:${variance.toFixed(3)}, Freq:${frequency.toFixed(2)}Hz, Amp:${amplitude.toFixed(2)}, Pitch:${pitch.toFixed(1)}°`);
+      
+      // *** NOUVEAU: Gestion des transitions de mode ***
+      this.handleModeTransition(previousMode, this.currentMode);
+      
       this.onModeChanged(this.currentMode, this.activityFeatures);
     }
   }
 
   /**
    * Détection robuste de pas avec seuil adaptatif (REFACTORISÉE)
+   * *** NOUVEAU: Utilise projection verticale avec AttitudeTracker si disponible ***
    */
   detectSteps(accelerometerData) {
     // Ajouter les nouvelles données
@@ -253,7 +367,91 @@ export class PedestrianDeadReckoning {
 
     if (this.accelerationHistory.length < 20) return; // Pas assez de données
 
-    // *** NOUVEAU PIPELINE ADAPTATIF ***
+    // *** NOUVEAU: Choix de la méthode de détection ***
+    const shouldUseVerticalDetection = this.shouldUseVerticalDetection();
+    
+    if (shouldUseVerticalDetection) {
+      this.detectStepsVertical(accelerometerData);
+    } else {
+      this.detectStepsMagnitude(accelerometerData);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Détection de pas basée sur la composante verticale ***
+   */
+  detectStepsVertical(accelerometerData) {
+    try {
+      // 1. Projeter l'accélération dans le repère terrestre (North-East-Up)
+      const worldAcceleration = this.projectAccelerationToWorld(accelerometerData);
+      if (!worldAcceleration) {
+        // Fallback vers détection par magnitude
+        this.verticalDetectionState.fallbackActive = true;
+        this.verticalDetectionState.fallbackStartTime = Date.now();
+        this.detectStepsMagnitude(accelerometerData);
+        return;
+      }
+      
+      // 2. Extraire la composante verticale (Up)
+      const verticalAcc = worldAcceleration.up;
+      
+      // 3. Ajouter à l'historique vertical
+      this.verticalDetectionState.verticalAccHistory.push({
+        vertical: verticalAcc,
+        timestamp: Date.now()
+      });
+      
+      // Garder historique de 2 secondes
+      const cutoffTime = Date.now() - 2000;
+      this.verticalDetectionState.verticalAccHistory = this.verticalDetectionState.verticalAccHistory.filter(
+        sample => sample.timestamp > cutoffTime
+      );
+      
+      if (this.verticalDetectionState.verticalAccHistory.length < 15) return;
+      
+      // 4. Filtrage et détection de pics sur signal vertical
+      const recentVertical = this.verticalDetectionState.verticalAccHistory.slice(-40); // 1.6s à 25Hz
+      const verticalSignal = recentVertical.map(sample => sample.vertical);
+      
+      // Suppression de la composante continue (gravité résiduelle)
+      const detrendedVertical = this.applyDetrendingFilter(verticalSignal);
+      
+      // Détection de pics avec seuil adapté pour signal vertical
+      const verticalPeaks = this.detectVerticalPeaks(detrendedVertical);
+      
+      const now = Date.now();
+      const minStepInterval = this.currentMode === 'running' ? 250 : 400; // ms
+      
+      if (verticalPeaks.length > 0 && (now - this.lastStepTime) > minStepInterval) {
+        // Validation du pic vertical
+        const peakValue = verticalPeaks[verticalPeaks.length - 1];
+        if (this.isValidVerticalPeak(peakValue)) {
+          this.handleStepDetected(peakValue, Math.abs(verticalAcc));
+          this.verticalDetectionState.lastVerticalPeak = peakValue;
+          
+          // Debug périodique
+          if (this.stepCount % 5 === 0) {
+            console.log(`[STEP VERTICAL] Pas ${this.stepCount}: pic=${peakValue.toFixed(3)}g, vertical=${verticalAcc.toFixed(3)}g, mode=${this.currentMode}`);
+          }
+        }
+      }
+      
+      // Réinitialiser fallback si détection verticale fonctionne
+      this.verticalDetectionState.fallbackActive = false;
+      
+    } catch (error) {
+      console.warn('[PDR] Erreur détection verticale, fallback vers magnitude:', error);
+      this.verticalDetectionState.fallbackActive = true;
+      this.verticalDetectionState.fallbackStartTime = Date.now();
+      this.detectStepsMagnitude(accelerometerData);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Détection de pas par magnitude (méthode originale) ***
+   */
+  detectStepsMagnitude(accelerometerData) {
+    // *** PIPELINE ADAPTATIF ORIGINAL ***
     
     // 1. Calcul magnitude brute et suppression gravité
     const recentSamples = this.accelerationHistory.slice(-50); // 2 secondes à 25Hz
@@ -280,7 +478,8 @@ export class PedestrianDeadReckoning {
       // *** DEBUG: Log périodique avec nouvelles métriques ***
       if (this.stepCount % 5 === 0) {
         const adaptiveThreshold = this.getLastAdaptiveThreshold();
-        console.log(`[STEP] Pas ${this.stepCount}: peak=${peaks[peaks.length - 1].toFixed(2)}, seuil=${adaptiveThreshold.toFixed(2)}, mode=${this.currentMode}`);
+        const method = this.verticalDetectionState.fallbackActive ? 'MAGNITUDE (fallback)' : 'MAGNITUDE';
+        console.log(`[STEP ${method}] Pas ${this.stepCount}: peak=${peaks[peaks.length - 1].toFixed(2)}, seuil=${adaptiveThreshold.toFixed(2)}, mode=${this.currentMode}`);
       }
     }
   }
@@ -418,20 +617,20 @@ export class PedestrianDeadReckoning {
     }
   }
 
+
+
   /**
-   * Traitement du crawling
+   * *** NOUVEAU: Gestion des transitions de mode (crawling supprimé) ***
    */
-  processCrawling() {
-    if (this.accelerationBuffer.length < 2) return;
-    
-    const lastAcc = this.accelerationBuffer[this.accelerationBuffer.length - 1];
-    const prevAcc = this.accelerationBuffer[this.accelerationBuffer.length - 2];
-    
-    const dt = (lastAcc.timestamp - prevAcc.timestamp) / 1000;
-    const accChange = Math.abs(lastAcc.magnitude - prevAcc.magnitude);
-    
-    if (accChange > 0.5) { // Mouvement de crawling détecté
-      this.crawlDistance += this.config.crawlSpeed * dt;
+  handleModeTransition(previousMode, newMode) {
+    // Réinitialiser la vitesse lors des transitions
+    if (previousMode !== newMode) {
+      console.log(`[TRANSITION] ${previousMode} → ${newMode}`);
+      
+      // Réinitialiser la vitesse pour le nouveau mode
+      this.velocity.vx = 0;
+      this.velocity.vy = 0;
+      this.velocity.vz = 0;
     }
   }
 
@@ -456,9 +655,8 @@ export class PedestrianDeadReckoning {
       case 'walking':
         modeFactor = 1.0; // Standard
         break;
-      case 'crawling':
-        modeFactor = 0.3; // Pas très courts pour ramper
-        break;
+      default:
+        modeFactor = 1.0; // Par défaut
     }
     
     const adjustedLength = baseLength * amplitudeFactor * modeFactor;
@@ -625,7 +823,6 @@ export class PedestrianDeadReckoning {
     this.position = { x, y, z };
     this.orientation.yaw = yaw;
     this.stepCount = 0;
-    this.crawlDistance = 0;
     console.log(`Position PDR réinitialisée: (${x}, ${y}, ${z})`);
   }
 
@@ -639,10 +836,84 @@ export class PedestrianDeadReckoning {
       velocity: { ...this.velocity },
       mode: this.currentMode,
       stepCount: this.stepCount,
-      crawlDistance: this.crawlDistance,
+      totalDistance: this.calculateTotalDistance(),
       features: { ...this.activityFeatures },
       sampleRate: this.currentSampleRate,
-      isZUPT: this.isZUPT
+      isZUPT: this.isZUPT,
+      
+      // *** NOUVEAU: Métriques de détection verticale ***
+      verticalDetection: {
+        isActive: this.verticalDetectionState.isActive,
+        orientationConfidence: this.verticalDetectionState.orientationConfidence,
+        fallbackActive: this.verticalDetectionState.fallbackActive,
+        lastVerticalPeak: this.verticalDetectionState.lastVerticalPeak,
+        method: this.getDetectionMethod()
+      },
+      
+      // *** NOUVEAU: Métriques physiologiques ***
+      physiologicalMetrics: {
+        currentStepFrequency: this.getCurrentStepFrequency(),
+        maxAllowedFrequency: this.getMaxAllowedFrequency(),
+        stepHistoryLength: this.stepHistory.length,
+        gyroConfirmationEnabled: this.config.physiologicalConstraints.gyroConfirmationEnabled,
+        gyroBufferLength: this.gyroConfirmationBuffer.length,
+        lastGyroActivity: this.getLastGyroActivity()
+      }
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir la méthode de détection actuelle ***
+   */
+  getDetectionMethod() {
+    if (!this.verticalDetectionState.isActive) {
+      return 'magnitude_only';
+    }
+    
+    if (this.verticalDetectionState.fallbackActive) {
+      return 'magnitude_fallback';
+    }
+    
+    if (this.shouldUseVerticalDetection()) {
+      return 'vertical_projection';
+    }
+    
+    return 'magnitude_default';
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir les métriques détaillées de détection verticale ***
+   */
+  getVerticalDetectionMetrics() {
+    if (!this.verticalDetectionState.isActive) {
+      return null;
+    }
+    
+    const attitudeStatus = this.attitudeTracker ? this.attitudeTracker.getStatus() : null;
+    
+    return {
+      // État général
+      isActive: this.verticalDetectionState.isActive,
+      currentMethod: this.getDetectionMethod(),
+      
+      // Confiance d'orientation
+      orientationConfidence: this.verticalDetectionState.orientationConfidence,
+      orientationValid: attitudeStatus ? 
+        !(attitudeStatus.quaternion.w === 1 && attitudeStatus.quaternion.x === 0) : false,
+      
+      // État du fallback
+      fallbackActive: this.verticalDetectionState.fallbackActive,
+      fallbackStartTime: this.verticalDetectionState.fallbackStartTime,
+      
+      // Historique vertical
+      verticalHistoryLength: this.verticalDetectionState.verticalAccHistory.length,
+      lastVerticalPeak: this.verticalDetectionState.lastVerticalPeak,
+      
+      // Configuration
+      config: this.config.verticalStepDetection,
+      
+      // AttitudeTracker status
+      attitudeStatus: attitudeStatus
     };
   }
 
@@ -676,15 +947,33 @@ export class PedestrianDeadReckoning {
    */
   handleStepDetected(peakAmplitude, originalMagnitude) {
     const now = Date.now();
-    const minStepInterval = this.currentMode === 'running' ? 250 : 400; // ms
     
-    // Vérification intervalle temporel
-    if ((now - this.lastStepTime) <= minStepInterval) {
+    // *** NOUVEAU: Garde-fous physiologiques ***
+    if (!this.validateStepPhysiologically(now)) {
+      console.log(`[STEP REJECTED] Garde-fou physiologique - Fréquence trop élevée ou gyro non confirmé`);
+      return; // Pas rejeté par les contraintes physiologiques
+    }
+    
+    // Vérification intervalle temporel (garde-fou existant amélioré)
+    const minInterval = Math.max(
+      this.getPhysiologicalMinInterval(),
+      this.config.physiologicalConstraints.minStepInterval
+    );
+    
+    if ((now - this.lastStepTime) <= minInterval) {
+      console.log(`[STEP REJECTED] Intervalle trop court: ${now - this.lastStepTime}ms < ${minInterval}ms`);
       return; // Trop tôt pour un nouveau pas
     }
     
     this.stepCount++;
     this.lastStepTime = now;
+    
+    // *** NOUVEAU: Ajouter à l'historique des pas ***
+    this.stepHistory.push(now);
+    
+    // Garder seulement les pas des 10 dernières secondes pour calcul de fréquence
+    const cutoffTime = now - 10000;
+    this.stepHistory = this.stepHistory.filter(timestamp => timestamp > cutoffTime);
     
     // Estimation dynamique de la longueur de pas basée sur l'amplitude filtrée
     this.updateDynamicStepLength(peakAmplitude);
@@ -697,6 +986,510 @@ export class PedestrianDeadReckoning {
       this.onStepDetected(this.stepCount, this.dynamicStepLength);
     }
     
-    console.log(`[STEP] Détecté #${this.stepCount}: longueur=${this.dynamicStepLength.toFixed(3)}m`);
+    // *** NOUVEAU: Log avec informations physiologiques ***
+    const currentFrequency = this.getCurrentStepFrequency();
+    console.log(`[STEP VALIDATED] #${this.stepCount}: longueur=${this.dynamicStepLength.toFixed(3)}m, fréq=${currentFrequency.toFixed(2)}Hz`);
+  }
+
+  /**
+   * *** NOUVEAU: Projection de l'accélération dans le repère terrestre ***
+   */
+  projectAccelerationToWorld(accelerometerData) {
+    if (!this.attitudeTracker) {
+      return null;
+    }
+    
+    try {
+      // Obtenir le statut de l'AttitudeTracker
+      const attitudeStatus = this.attitudeTracker.getStatus();
+      
+      // Vérifier que l'orientation est valide (quaternion non-identité)
+      const { quaternion } = attitudeStatus;
+      if (quaternion.w === 1 && quaternion.x === 0 && quaternion.y === 0 && quaternion.z === 0) {
+        return null; // Orientation pas encore initialisée
+      }
+      
+      // Utiliser la transformation de l'AttitudeTracker
+      const worldAcceleration = this.attitudeTracker.transformAcceleration(accelerometerData);
+      
+      // L'AttitudeTracker transforme vers le repère corps/monde
+      // worldAcceleration.z correspond à la composante "Up" (verticale)
+      return {
+        north: worldAcceleration.x,  // Nord
+        east: worldAcceleration.y,   // Est  
+        up: worldAcceleration.z      // Haut (composante verticale recherchée)
+      };
+      
+    } catch (error) {
+      console.warn('[PDR] Erreur projection AttitudeTracker:', error);
+      return null;
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Détection de pics sur signal vertical ***
+   */
+  detectVerticalPeaks(data) {
+    if (data.length < 5) return [];
+    
+    // Calcul du seuil adaptatif pour signal vertical
+    const mean = data.reduce((a, b) => a + b) / data.length;
+    const variance = data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / data.length;
+    const std = Math.sqrt(variance);
+    
+    // Seuil plus conservateur pour signal vertical (pics plus nets)
+    let threshold = mean + 1.5 * std;
+    threshold = Math.max(this.config.verticalStepDetection.minVerticalPeak, 
+                        Math.min(this.config.verticalStepDetection.maxVerticalPeak, threshold));
+    
+    const peaks = [];
+    for (let i = 1; i < data.length - 1; i++) {
+      const current = data[i];
+      const prev = data[i - 1];
+      const next = data[i + 1];
+      
+      // Conditions pour un pic valide
+      const isLocalMaximum = current > prev && current > next;
+      const isAboveThreshold = current > threshold;
+      
+      if (isLocalMaximum && isAboveThreshold) {
+        peaks.push(current);
+      }
+    }
+    
+    return peaks;
+  }
+
+  /**
+   * *** NOUVEAU: Validation d'un pic vertical ***
+   */
+  isValidVerticalPeak(peakValue) {
+    const config = this.config.verticalStepDetection;
+    return peakValue >= config.minVerticalPeak && peakValue <= config.maxVerticalPeak;
+  }
+
+  /**
+   * *** NOUVEAU: Évaluation de la confiance d'orientation pour détection verticale ***
+   */
+  shouldUseVerticalDetection() {
+    if (!this.verticalDetectionState.isActive || !this.attitudeTracker) {
+      return false;
+    }
+    
+    // Si fallback actif, rester en mode magnitude quelques secondes
+    if (this.verticalDetectionState.fallbackActive) {
+      const timeSinceFallback = Date.now() - (this.verticalDetectionState.fallbackStartTime || 0);
+      if (timeSinceFallback < 5000) { // 5 secondes de fallback minimum
+        return false;
+      }
+      // Réessayer après 5 secondes
+      this.verticalDetectionState.fallbackActive = false;
+    }
+    
+    try {
+      const attitudeStatus = this.attitudeTracker.getStatus();
+      
+      // Vérifier que l'orientation est stable et fiable
+      const orientationConfidence = this.calculateOrientationConfidence(attitudeStatus);
+      this.verticalDetectionState.orientationConfidence = orientationConfidence;
+      
+      return orientationConfidence >= this.config.verticalStepDetection.orientationConfidenceThreshold;
+      
+    } catch (error) {
+      console.warn('[PDR] Erreur évaluation confiance orientation:', error);
+      return false;
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Calcul de la confiance d'orientation ***
+   */
+  calculateOrientationConfidence(attitudeStatus) {
+    const { quaternion, isStable, magneticConfidence, accelerationVariance, gyroMagnitude } = attitudeStatus;
+    
+    // Vérifier que le quaternion n'est pas l'identité
+    if (quaternion.w === 1 && quaternion.x === 0 && quaternion.y === 0 && quaternion.z === 0) {
+      return 0;
+    }
+    
+    // Facteurs de confiance
+    let confidence = 0.5; // Base
+    
+    // Bonus pour stabilité
+    if (isStable) {
+      confidence += 0.3;
+    }
+    
+    // Bonus pour confiance magnétique
+    if (magneticConfidence > 0.5) {
+      confidence += magneticConfidence * 0.2;
+    }
+    
+    // Pénalité pour variance d'accélération élevée
+    if (accelerationVariance > 1.0) {
+      confidence -= Math.min(0.3, accelerationVariance * 0.1);
+    }
+    
+    // Pénalité pour mouvement gyroscopique élevé
+    if (gyroMagnitude > 0.5) {
+      confidence -= Math.min(0.2, gyroMagnitude * 0.2);
+    }
+    
+    return Math.max(0, Math.min(1, confidence));
+  }
+
+  /**
+   * *** NOUVEAU: Test de la détection verticale (pour debug) ***
+   */
+  testVerticalDetection() {
+    if (!this.verticalDetectionState.isActive) {
+      console.log('[TEST] Détection verticale non activée');
+      return;
+    }
+    
+    console.log('[TEST] === Test Détection Verticale ===');
+    console.log('[TEST] AttitudeTracker présent:', !!this.attitudeTracker);
+    
+    if (this.attitudeTracker) {
+      const status = this.attitudeTracker.getStatus();
+      console.log('[TEST] Quaternion:', status.quaternion);
+      console.log('[TEST] Stabilité:', status.isStable);
+      console.log('[TEST] Confiance magnétique:', status.magneticConfidence);
+    }
+    
+    console.log('[TEST] État détection verticale:');
+    console.log('[TEST] - Méthode actuelle:', this.getDetectionMethod());
+    console.log('[TEST] - Confiance orientation:', this.verticalDetectionState.orientationConfidence);
+    console.log('[TEST] - Fallback actif:', this.verticalDetectionState.fallbackActive);
+    console.log('[TEST] - Historique vertical:', this.verticalDetectionState.verticalAccHistory.length, 'échantillons');
+    console.log('[TEST] - Dernier pic vertical:', this.verticalDetectionState.lastVerticalPeak);
+    
+    // Test de projection
+    const testAcc = { x: 0, y: 0, z: 9.81 }; // Gravité pure
+    const projected = this.projectAccelerationToWorld(testAcc);
+    console.log('[TEST] Projection test (gravité pure):', projected);
+    
+    console.log('[TEST] === Fin Test ===');
+  }
+
+  /**
+   * *** NOUVEAU: Statistiques de performance détection verticale ***
+   */
+  getVerticalDetectionStats() {
+    if (!this.verticalDetectionState.isActive) {
+      return null;
+    }
+    
+    const now = Date.now();
+    const recentHistory = this.verticalDetectionState.verticalAccHistory.filter(
+      sample => now - sample.timestamp < 10000 // 10 dernières secondes
+    );
+    
+    if (recentHistory.length === 0) {
+      return { noData: true };
+    }
+    
+    const verticalValues = recentHistory.map(s => s.vertical);
+    const mean = verticalValues.reduce((a, b) => a + b) / verticalValues.length;
+    const variance = verticalValues.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / verticalValues.length;
+    const std = Math.sqrt(variance);
+    const min = Math.min(...verticalValues);
+    const max = Math.max(...verticalValues);
+    
+    return {
+      samplesCount: recentHistory.length,
+      mean: mean,
+      std: std,
+      min: min,
+      max: max,
+      range: max - min,
+      signalQuality: std < 0.5 ? 'good' : std < 1.0 ? 'medium' : 'poor'
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Calcul de la distance totale (crawling supprimé) ***
+   */
+  calculateTotalDistance() {
+    // Distance des pas uniquement
+    const stepDistance = this.stepCount * this.dynamicStepLength;
+    return stepDistance;
+  }
+
+
+
+  /**
+   * *** NOUVEAU: Activation/désactivation de la classification automatique ***
+   */
+  setAutoClassification(enabled) {
+    this.autoClassificationEnabled = enabled;
+    
+    if (enabled) {
+      this.manualModeOverride = null;
+      console.log('[PDR] Classification automatique activée');
+    } else {
+      console.log('[PDR] Classification automatique désactivée');
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Forcer un mode spécifique (mode manuel) ***
+   */
+  setManualMode(mode) {
+    const validModes = ['stationary', 'walking', 'running']; // crawling supprimé
+    
+    if (!validModes.includes(mode)) {
+      console.warn(`[PDR] Mode manuel invalide: ${mode}. Modes valides: ${validModes.join(', ')}`);
+      return;
+    }
+    
+    this.autoClassificationEnabled = false;
+    this.manualModeOverride = mode;
+    
+    // Appliquer immédiatement le mode
+    const previousMode = this.currentMode;
+    this.currentMode = mode;
+    
+    // Notification changement si différent
+    if (previousMode !== this.currentMode && this.onModeChanged) {
+      console.log(`[PDR] Mode manuel forcé: ${previousMode} → ${this.currentMode}`);
+      this.handleModeTransition(previousMode, this.currentMode);
+      this.onModeChanged(this.currentMode, this.activityFeatures);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir l'état du contrôle de classification ***
+   */
+  getClassificationState() {
+    return {
+      autoEnabled: this.autoClassificationEnabled,
+      manualMode: this.manualModeOverride,
+      currentMode: this.currentMode,
+      features: { ...this.activityFeatures }
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Vérifier si en mode manuel ***
+   */
+  isManualModeActive() {
+    return !this.autoClassificationEnabled && this.manualModeOverride !== null;
+  }
+
+  /**
+   * *** NOUVEAU: Validation physiologique d'un pas ***
+   */
+  validateStepPhysiologically(timestamp) {
+    // 1. Vérification de la fréquence de pas
+    if (!this.validateStepFrequency(timestamp)) {
+      return false;
+    }
+    
+    // 2. Confirmation gyroscopique si activée
+    if (this.config.physiologicalConstraints.gyroConfirmationEnabled) {
+      if (!this.validateGyroscopicConfirmation()) {
+        return false;
+      }
+    }
+    
+    return true;
+  }
+
+  /**
+   * *** NOUVEAU: Validation de la fréquence de pas selon le mode (SEUILS DÉTENDUS) ***
+   */
+  validateStepFrequency(timestamp) {
+    // Calculer la fréquence actuelle
+    const currentFrequency = this.getCurrentStepFrequency();
+    
+         // *** MODIFICATION: Seuils dynamiques plus permissifs (crawling supprimé) ***
+     const MAX_FREQ = {
+       walking: 4.0,   // Augmenté de 3.0 à 4.0 Hz - permet marche rapide jusqu'à 3.5 Hz
+       running: 8.0,   // Augmenté de 5.0 à 8.0 Hz - coureur rapide
+       stationary: 0.5 // Très faible pour stationnaire
+     }[this.currentMode] || 4.0; // Défaut plus permissif
+    
+    // Vérifier si la fréquence dépasse la limite
+    if (currentFrequency > MAX_FREQ) {
+      console.log(`[PHYSIO GUARD] Fréquence trop élevée: ${currentFrequency.toFixed(2)}Hz > ${MAX_FREQ}Hz (mode: ${this.currentMode})`);
+      return false;
+    }
+    
+    return true;
+  }
+
+  /**
+   * *** NOUVEAU: Calcul de la fréquence actuelle de pas ***
+   */
+  getCurrentStepFrequency() {
+    if (this.stepHistory.length < 2) {
+      return 0;
+    }
+    
+    // Calculer la fréquence sur les 5 derniers pas (plus stable)
+    const recentSteps = this.stepHistory.slice(-5);
+    if (recentSteps.length < 2) {
+      return 0;
+    }
+    
+    const timeSpan = (recentSteps[recentSteps.length - 1] - recentSteps[0]) / 1000; // en secondes
+    const stepCount = recentSteps.length - 1; // nombre d'intervalles
+    
+    if (timeSpan <= 0) {
+      return 0;
+    }
+    
+    return stepCount / timeSpan; // Hz
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir l'intervalle minimum physiologique selon le mode (SEUILS DÉTENDUS) ***
+   */
+  getPhysiologicalMinInterval() {
+         // *** MODIFICATION: Utiliser les mêmes seuils détendus (crawling supprimé) ***
+     const MAX_FREQ = {
+       walking: 4.0,   // Augmenté de 3.0 à 4.0 Hz
+       running: 8.0,   // Augmenté de 5.0 à 8.0 Hz
+       stationary: 0.5 // Très faible pour stationnaire
+     }[this.currentMode] || 4.0;
+    
+    // Convertir fréquence max en intervalle min (ms)
+    return Math.floor(1000 / MAX_FREQ);
+  }
+
+  /**
+   * *** NOUVEAU: Validation par confirmation gyroscopique ***
+   */
+  validateGyroscopicConfirmation() {
+    if (this.gyroConfirmationBuffer.length < 5) {
+      // Pas assez de données gyro, accepter par défaut
+      return true;
+    }
+    
+    // Analyser les 10 derniers échantillons gyro (400ms à 25Hz)
+    const recentGyro = this.gyroConfirmationBuffer.slice(-10);
+    
+    // Calculer la magnitude de rotation moyenne
+    const gyroMagnitudes = recentGyro.map(sample => 
+      Math.sqrt(sample.x**2 + sample.y**2 + sample.z**2)
+    );
+    
+    const maxGyroMagnitude = Math.max(...gyroMagnitudes);
+    const avgGyroMagnitude = gyroMagnitudes.reduce((a, b) => a + b) / gyroMagnitudes.length;
+    
+    // Un pas devrait s'accompagner d'une rotation détectable
+    const threshold = this.config.physiologicalConstraints.gyroConfirmationThreshold;
+    
+    // Vérifier qu'il y a eu une activité gyroscopique significative
+    const hasGyroActivity = maxGyroMagnitude > threshold || avgGyroMagnitude > threshold * 0.5;
+    
+    if (!hasGyroActivity) {
+      console.log(`[GYRO GUARD] Pas sans rotation détectable: max=${maxGyroMagnitude.toFixed(3)}, avg=${avgGyroMagnitude.toFixed(3)}, seuil=${threshold}`);
+      return false;
+    }
+    
+    return true;
+  }
+
+  /**
+   * *** NOUVEAU: Mise à jour du buffer de confirmation gyroscopique ***
+   */
+  updateGyroConfirmationBuffer(gyroData) {
+    if (!this.config.physiologicalConstraints.gyroConfirmationEnabled) {
+      return;
+    }
+    
+    this.gyroConfirmationBuffer.push({
+      x: gyroData.x,
+      y: gyroData.y,
+      z: gyroData.z,
+      timestamp: Date.now()
+    });
+    
+    // Garder seulement les 50 derniers échantillons (2 secondes à 25Hz)
+    if (this.gyroConfirmationBuffer.length > 50) {
+      this.gyroConfirmationBuffer.shift();
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir la fréquence maximale autorisée selon le mode (SEUILS DÉTENDUS) ***
+   */
+  getMaxAllowedFrequency() {
+         // *** MODIFICATION: Utiliser les seuils détendus (crawling supprimé) ***
+     const MAX_FREQ = {
+       walking: 4.0,   // Augmenté de 3.0 à 4.0 Hz
+       running: 8.0,   // Augmenté de 5.0 à 8.0 Hz
+       stationary: 0.5 // Très faible pour stationnaire
+     }[this.currentMode] || 4.0;
+    
+    return MAX_FREQ;
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir la dernière activité gyroscopique ***
+   */
+  getLastGyroActivity() {
+    if (this.gyroConfirmationBuffer.length === 0) {
+      return 0;
+    }
+    
+    const recentGyro = this.gyroConfirmationBuffer.slice(-5);
+    const gyroMagnitudes = recentGyro.map(sample => 
+      Math.sqrt(sample.x**2 + sample.y**2 + sample.z**2)
+    );
+    
+    return Math.max(...gyroMagnitudes);
+  }
+
+  /**
+   * *** NOUVEAU: Test des garde-fous physiologiques ***
+   */
+  testPhysiologicalGuards() {
+    console.log('[TEST PHYSIO] === Test des garde-fous physiologiques ===');
+    
+    const config = this.config.physiologicalConstraints;
+    console.log('[TEST PHYSIO] Configuration:');
+    console.log(`[TEST PHYSIO] - Max fréq marche: ${config.maxStepFrequencyWalking}Hz`);
+    console.log(`[TEST PHYSIO] - Max fréq course: ${config.maxStepFrequencyRunning}Hz`);
+    console.log(`[TEST PHYSIO] - Max fréq ramper: ${config.maxStepFrequencyCrawling}Hz`);
+    console.log(`[TEST PHYSIO] - Intervalle min: ${config.minStepInterval}ms`);
+    console.log(`[TEST PHYSIO] - Confirmation gyro: ${config.gyroConfirmationEnabled}`);
+    console.log(`[TEST PHYSIO] - Seuil gyro: ${config.gyroConfirmationThreshold}rad/s`);
+    
+    // Test fréquence actuelle
+    const currentFreq = this.getCurrentStepFrequency();
+    const maxFreq = this.getMaxAllowedFrequency();
+    console.log(`[TEST PHYSIO] Fréquence actuelle: ${currentFreq.toFixed(2)}Hz (max: ${maxFreq}Hz)`);
+    
+    // Test historique des pas
+    console.log(`[TEST PHYSIO] Historique pas: ${this.stepHistory.length} pas enregistrés`);
+    if (this.stepHistory.length > 1) {
+      const lastInterval = this.stepHistory[this.stepHistory.length - 1] - this.stepHistory[this.stepHistory.length - 2];
+      console.log(`[TEST PHYSIO] Dernier intervalle: ${lastInterval}ms`);
+    }
+    
+    // Test buffer gyroscopique
+    console.log(`[TEST PHYSIO] Buffer gyro: ${this.gyroConfirmationBuffer.length} échantillons`);
+    const lastGyroActivity = this.getLastGyroActivity();
+    console.log(`[TEST PHYSIO] Dernière activité gyro: ${lastGyroActivity.toFixed(3)}rad/s`);
+    
+    // Simulation de validation
+    const now = Date.now();
+    const wouldValidate = this.validateStepPhysiologically(now);
+    console.log(`[TEST PHYSIO] Validation actuelle: ${wouldValidate ? '✓ PASS' : '✗ FAIL'}`);
+    
+    console.log('[TEST PHYSIO] === Fin du test ===');
+    
+    return {
+      currentFrequency: currentFreq,
+      maxAllowedFrequency: maxFreq,
+      stepHistoryLength: this.stepHistory.length,
+      gyroBufferLength: this.gyroConfirmationBuffer.length,
+      lastGyroActivity: lastGyroActivity,
+      wouldValidate: wouldValidate,
+      config: config
+    };
   }
 } 

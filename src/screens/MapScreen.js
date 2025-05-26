@@ -53,6 +53,11 @@ export default function MapScreen() {
   const [batteryLevel, setBatteryLevel] = useState(1);
   const [batteryState, setBatteryState] = useState('unknown');
   
+  // *** NOUVEAU: État pour contrôle de mode ***
+  const [detectionMode, setDetectionMode] = useState('auto'); // 'auto' ou 'manual'
+  const [manualMode, setManualMode] = useState('stationary'); // Mode manuel sélectionné
+  const [modeControlVisible, setModeControlVisible] = useState(false); // Visibilité panneau contrôle
+  
   // État de la calibration
   const [calibrationModal, setCalibrationModal] = useState({
     visible: false,
@@ -72,62 +77,69 @@ export default function MapScreen() {
     initializeSystem();
     initializeBattery();
     
-    // Mise à jour périodique des métriques et de la batterie
-    const metricsInterval = setInterval(async () => {
-      // Mise à jour des métriques PDR
-      if (localizationSDK && localizationSDK.currentState) {
-        const currentState = localizationSDK.currentState;
-        actions.updatePDRMetrics({
-          stepCount: currentState.stepCount || 0,
-          distance: currentState.distance || 0,
-          sampleRate: currentState.sampleRate || 25,
-          energyLevel: currentState.energyLevel || 1.0,
-          isZUPT: currentState.isZUPT || false
-        });
-      }
-      
-      // Mise à jour de la batterie toutes les 30 secondes
-      if (Date.now() % 30000 < 1000) {
-        try {
-          const newLevel = await Battery.getBatteryLevelAsync();
-          const newState = await Battery.getBatteryStateAsync();
-          setBatteryLevel(newLevel);
-          setBatteryState(newState);
-        } catch (error) {
-          console.warn('Erreur mise à jour batterie:', error);
-        }
-      }
-    }, 1000); // Mise à jour toutes les secondes
+    // *** CORRECTION: Suppression de la mise à jour périodique qui cause la boucle infinie ***
+    // Les métriques sont maintenant mises à jour via les callbacks du SDK
     
     return () => {
       if (localizationSDK) {
         localizationSDK.stopTracking();
       }
-      clearInterval(metricsInterval);
     };
+  }, []);
+
+  // *** NOUVEAU: Mise à jour de la batterie séparée pour éviter les boucles infinies ***
+  useEffect(() => {
+    const batteryInterval = setInterval(async () => {
+      try {
+        const newLevel = await Battery.getBatteryLevelAsync();
+        const newState = await Battery.getBatteryStateAsync();
+        setBatteryLevel(newLevel);
+        setBatteryState(newState);
+      } catch (error) {
+        console.warn('Erreur mise à jour batterie:', error);
+      }
+    }, 30000); // Mise à jour toutes les 30 secondes
+    
+    return () => clearInterval(batteryInterval);
   }, []);
 
   // Configuration des callbacks du SDK
   useEffect(() => {
+    // *** CORRECTION: Throttling des mises à jour pour éviter les boucles infinies ***
+    let lastUpdateTime = 0;
+    const UPDATE_THROTTLE = 100; // Limiter à 10Hz maximum
+    
     localizationSDK.setCallbacks({
       onPositionUpdate: (x, y, theta, mode) => {
-        const pose = { x, y, theta, confidence: localizationSDK.currentState.confidence };
+        const now = Date.now();
+        if (now - lastUpdateTime < UPDATE_THROTTLE) {
+          return; // Ignorer si trop fréquent
+        }
+        lastUpdateTime = now;
+        
+        const pose = { x, y, theta, confidence: localizationSDK.currentState?.confidence || 0 };
         actions.updatePose(pose);
         actions.addTrajectoryPoint({
-          x, y, timestamp: Date.now(),
+          x, y, timestamp: now,
           confidence: pose.confidence
         });
         
-        // Mise à jour des métriques PDR
+        // Mise à jour des métriques PDR avec détection verticale (throttled)
         const currentState = localizationSDK.currentState;
-        actions.updatePDRMetrics({
-          currentMode: mode || 'stationary',
-          stepCount: currentState.stepCount || 0,
-          distance: currentState.distance || 0,
-          sampleRate: currentState.sampleRate || 25,
-          energyLevel: currentState.energyLevel || 1.0,
-          isZUPT: currentState.isZUPT || false
-        });
+        if (currentState) {
+          const verticalMetrics = localizationSDK.pdr?.getVerticalDetectionMetrics();
+          
+          actions.updatePDRMetrics({
+            currentMode: mode || 'stationary',
+            stepCount: currentState.stepCount || 0,
+            distance: currentState.distance || 0,
+            sampleRate: currentState.sampleRate || 25,
+            energyLevel: currentState.energyLevel || 1.0,
+            isZUPT: currentState.isZUPT || false,
+            verticalDetection: currentState.verticalDetection || null,
+            verticalMetrics: verticalMetrics
+          });
+        }
       },
       onModeChanged: (mode, features) => {
         console.log(`Mode changé: ${mode}`, features);
@@ -249,6 +261,47 @@ export default function MapScreen() {
         }
       ]
     );
+  };
+
+  /**
+   * *** NOUVEAU: Basculement mode détection automatique/manuel ***
+   */
+  const toggleDetectionMode = () => {
+    const newMode = detectionMode === 'auto' ? 'manual' : 'auto';
+    setDetectionMode(newMode);
+    
+    if (newMode === 'manual') {
+      // Passer en mode manuel - forcer le mode sélectionné
+      localizationSDK.setManualMode(manualMode);
+      setModeControlVisible(true);
+    } else {
+      // Passer en mode automatique - réactiver la détection
+      localizationSDK.setAutoMode();
+      setModeControlVisible(false);
+    }
+    
+    console.log(`[MODE CONTROL] Basculement vers mode ${newMode}`);
+  };
+
+  /**
+   * *** NOUVEAU: Changement de mode manuel ***
+   */
+  const changeManualMode = (newMode) => {
+    setManualMode(newMode);
+    
+    if (detectionMode === 'manual') {
+      // Appliquer immédiatement si en mode manuel
+      localizationSDK.setManualMode(newMode);
+    }
+    
+    console.log(`[MODE CONTROL] Mode manuel changé vers: ${newMode}`);
+  };
+
+  /**
+   * *** NOUVEAU: Basculement visibilité panneau contrôle ***
+   */
+  const toggleModeControlPanel = () => {
+    setModeControlVisible(!modeControlVisible);
   };
 
   /**
@@ -445,6 +498,18 @@ export default function MapScreen() {
       return state.pose.confidence < 0.05 && state.isTracking;
     };
 
+    // *** NOUVEAU: Couleur du mode selon détection auto/manuel ***
+    const getModeColor = () => {
+      if (detectionMode === 'manual') return '#ffaa00'; // Orange pour manuel
+      return '#00ff88'; // Vert pour automatique
+    };
+
+    const getModeLabel = () => {
+      const baseMode = state.currentMode || 'STATIONNAIRE';
+      const prefix = detectionMode === 'manual' ? 'M:' : 'A:';
+      return `${prefix}${baseMode.toUpperCase()}`;
+    };
+
     return (
       <View style={styles.metricsPanel}>
         {/* Métriques principales */}
@@ -464,14 +529,22 @@ export default function MapScreen() {
           </View>
         </View>
 
-        {/* Métriques PDR */}
+        {/* Métriques PDR avec indicateur mode */}
         <View style={styles.metricsRow}>
-          <View style={styles.metricItem}>
+          <TouchableOpacity 
+            style={styles.metricItem} 
+            onPress={toggleModeControlPanel}
+          >
             <Text style={styles.metricLabel}>Mode</Text>
-            <Text style={[styles.metricValue, { color: '#00ff88' }]}>
-              {state.currentMode || 'STATIONNAIRE'}
+            <Text style={[styles.metricValue, { color: getModeColor() }]}>
+              {getModeLabel()}
             </Text>
-          </View>
+            <Ionicons 
+              name={detectionMode === 'manual' ? "hand-left" : "refresh"} 
+              size={12} 
+              color={getModeColor()} 
+            />
+          </TouchableOpacity>
           
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Pas</Text>
@@ -519,6 +592,116 @@ export default function MapScreen() {
             <Text style={styles.metricLabel}>Zoom</Text>
             <Text style={styles.metricValue}>x{zoom}</Text>
           </View>
+        </View>
+      </View>
+    );
+  };
+
+  /**
+   * *** NOUVEAU: Rendu du panneau de contrôle de mode ***
+   */
+  const renderModeControlPanel = () => {
+    if (!modeControlVisible) return null;
+
+    const modes = [
+      { key: 'stationary', label: 'Stationnaire', icon: 'pause' },
+      { key: 'walking', label: 'Marche', icon: 'walk' },
+      { key: 'crawling', label: 'Ramper', icon: 'body' },
+      { key: 'running', label: 'Course', icon: 'fitness' }
+    ];
+
+    const getModeColor = () => {
+      if (detectionMode === 'manual') return '#ffaa00'; // Orange pour manuel
+      return '#00ff88'; // Vert pour automatique
+    };
+
+    return (
+      <View style={styles.modeControlPanel}>
+        <View style={styles.modeControlContent}>
+          <View style={styles.modeControlHeader}>
+            <Text style={styles.modeControlTitle}>Contrôle de Mode</Text>
+            <TouchableOpacity onPress={toggleModeControlPanel}>
+              <Ionicons name="close" size={20} color="#ffffff" />
+            </TouchableOpacity>
+          </View>
+
+        {/* Basculement Auto/Manuel */}
+        <View style={styles.detectionModeRow}>
+          <TouchableOpacity
+            style={[
+              styles.detectionModeButton,
+              detectionMode === 'auto' && styles.detectionModeActive
+            ]}
+            onPress={() => {
+              if (detectionMode !== 'auto') toggleDetectionMode();
+            }}
+          >
+            <Ionicons name="refresh" size={16} color={detectionMode === 'auto' ? "#000000" : "#00ff88"} />
+            <Text style={[
+              styles.detectionModeText,
+              { color: detectionMode === 'auto' ? "#000000" : "#00ff88" }
+            ]}>
+              AUTO
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.detectionModeButton,
+              detectionMode === 'manual' && styles.detectionModeActive
+            ]}
+            onPress={() => {
+              if (detectionMode !== 'manual') toggleDetectionMode();
+            }}
+          >
+            <Ionicons name="hand-left" size={16} color={detectionMode === 'manual' ? "#000000" : "#ffaa00"} />
+            <Text style={[
+              styles.detectionModeText,
+              { color: detectionMode === 'manual' ? "#000000" : "#ffaa00" }
+            ]}>
+              MANUEL
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Sélection mode manuel */}
+        {detectionMode === 'manual' && (
+          <View style={styles.manualModeGrid}>
+            {modes.map(mode => (
+              <TouchableOpacity
+                key={mode.key}
+                style={[
+                  styles.manualModeButton,
+                  manualMode === mode.key && styles.manualModeActive
+                ]}
+                onPress={() => changeManualMode(mode.key)}
+              >
+                <Ionicons 
+                  name={mode.icon} 
+                  size={20} 
+                  color={manualMode === mode.key ? "#000000" : "#ffffff"} 
+                />
+                <Text style={[
+                  styles.manualModeText,
+                  { color: manualMode === mode.key ? "#000000" : "#ffffff" }
+                ]}>
+                  {mode.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        {/* Informations mode actuel */}
+        <View style={styles.currentModeInfo}>
+          <Text style={styles.currentModeLabel}>Mode actuel:</Text>
+          <Text style={[styles.currentModeValue, { color: getModeColor() }]}>
+            {detectionMode === 'auto' ? 
+              `Automatique (${(state.currentMode || 'stationnaire').toUpperCase()})` :
+              `Manuel (${manualMode.toUpperCase()})`
+            }
+          </Text>
+        </View>
         </View>
       </View>
     );
@@ -690,6 +873,9 @@ export default function MapScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Rendu du panneau de contrôle de mode */}
+      {renderModeControlPanel()}
     </SafeAreaView>
   );
 }
@@ -867,5 +1053,100 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
     marginLeft: 8,
+  },
+  modeControlPanel: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
+  modeControlContent: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 25,
+    minWidth: 300,
+    maxWidth: '90%',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+  },
+  modeControlHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  modeControlTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  detectionModeRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  detectionModeButton: {
+    width: 100,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginHorizontal: 5,
+  },
+  detectionModeActive: {
+    backgroundColor: '#00ff88',
+  },
+  detectionModeText: {
+    color: '#00ff88',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  manualModeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  manualModeButton: {
+    width: 100,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginHorizontal: 5,
+  },
+  manualModeActive: {
+    backgroundColor: '#00ff88',
+  },
+  manualModeText: {
+    color: '#00ff88',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  currentModeInfo: {
+    marginTop: 10,
+  },
+  currentModeLabel: {
+    color: '#888888',
+    fontSize: 12,
+    fontFamily: 'monospace',
+  },
+  currentModeValue: {
+    color: '#00ff88',
+    fontSize: 14,
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
   },
 }); 
