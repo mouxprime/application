@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -107,82 +107,92 @@ export default function MapScreen() {
     };
   }, []);
 
-  // Configuration des callbacks du SDK
+  // Configuration des callbacks du SDK avec useCallback pour éviter les boucles infinies
+  const onPositionUpdate = useCallback((x, y, theta, mode) => {
+    const pose = { x, y, theta, confidence: localizationSDK.currentState?.confidence || 0 };
+    actions.updatePose(pose);
+    actions.addTrajectoryPoint({
+      x, y, timestamp: Date.now(),
+      confidence: pose.confidence
+    });
+    
+    // Mise à jour des métriques PDR
+    const currentState = localizationSDK.currentState;
+    if (currentState) {
+      actions.updatePDRMetrics({
+        currentMode: mode || 'stationary',
+        stepCount: currentState.stepCount || 0,
+        distance: currentState.distance || 0,
+        sampleRate: currentState.sampleRate || 25,
+        energyLevel: currentState.energyLevel || 1.0,
+        isZUPT: currentState.isZUPT || false
+      });
+    }
+  }, [actions, localizationSDK]);
+
+  const onModeChanged = useCallback((mode, features) => {
+    console.log(`Mode changé: ${mode}`, features);
+    actions.updatePDRMetrics({ currentMode: mode });
+  }, [actions]);
+
+  const onEnergyStatusChanged = useCallback((energyStatus) => {
+    console.log('État énergétique:', energyStatus);
+    actions.updatePDRMetrics({ energyLevel: energyStatus.energyLevel || 1.0 });
+  }, [actions]);
+
+  const onCalibrationProgress = useCallback((progress) => {
+    console.log('Progression calibration:', progress);
+    
+    // Afficher le modal de calibration
+    setCalibrationModal({
+      visible: progress.isCalibrating || !progress.isComplete,
+      progress: progress.progress || 0,
+      message: progress.message || 'Calibration en cours...',
+      step: progress.step || 'unknown'
+    });
+    
+    // Cacher le modal quand calibration terminée
+    if (progress.isComplete) {
+      setTimeout(() => {
+        setCalibrationModal(prev => ({ ...prev, visible: false }));
+      }, 1500); // Afficher "Terminé" pendant 1.5s
+    }
+  }, []);
+
+  const onDataUpdate = useCallback((sensorData) => {
+    // Mise à jour du contexte avec les données capteurs en temps réel
+    // Gestion des données enrichies d'AdvancedSensorManager
+    const accelerometer = sensorData.accelerometer || { x: 0, y: 0, z: 0 };
+    const gyroscope = sensorData.gyroscope || { x: 0, y: 0, z: 0 };
+    const magnetometer = sensorData.magnetometer || { x: 0, y: 0, z: 0 };
+    
+    // Ajout de la magnitude pour l'accéléromètre si pas déjà présente
+    if (accelerometer && !accelerometer.magnitude) {
+      accelerometer.magnitude = Math.sqrt(
+        accelerometer.x ** 2 + accelerometer.y ** 2 + accelerometer.z ** 2
+      );
+    }
+    
+    actions.updateSensors({
+      accelerometer,
+      gyroscope,
+      magnetometer,
+      metadata: sensorData.metadata || {},
+      timestamp: Date.now()
+    });
+  }, [actions]);
+
   useEffect(() => {
     if (!localizationSDK) return;
     
     localizationSDK.setCallbacks({
-      onPositionUpdate: (x, y, theta, mode) => {
-        const pose = { x, y, theta, confidence: localizationSDK.currentState?.confidence || 0 };
-        actions.updatePose(pose);
-        actions.addTrajectoryPoint({
-          x, y, timestamp: Date.now(),
-          confidence: pose.confidence
-        });
-        
-        // Mise à jour des métriques PDR
-        const currentState = localizationSDK.currentState;
-        if (currentState) {
-          actions.updatePDRMetrics({
-            currentMode: mode || 'stationary',
-            stepCount: currentState.stepCount || 0,
-            distance: currentState.distance || 0,
-            sampleRate: currentState.sampleRate || 25,
-            energyLevel: currentState.energyLevel || 1.0,
-            isZUPT: currentState.isZUPT || false
-          });
-        }
-      },
-      onModeChanged: (mode, features) => {
-        console.log(`Mode changé: ${mode}`, features);
-        actions.updatePDRMetrics({ currentMode: mode });
-      },
-      onEnergyStatusChanged: (energyStatus) => {
-        console.log('État énergétique:', energyStatus);
-        actions.updatePDRMetrics({ energyLevel: energyStatus.energyLevel || 1.0 });
-      },
-      onCalibrationProgress: (progress) => {
-        console.log('Progression calibration:', progress);
-        
-        // Afficher le modal de calibration
-        setCalibrationModal({
-          visible: progress.isCalibrating || !progress.isComplete,
-          progress: progress.progress || 0,
-          message: progress.message || 'Calibration en cours...',
-          step: progress.step || 'unknown'
-        });
-        
-        // Cacher le modal quand calibration terminée
-        if (progress.isComplete) {
-          setTimeout(() => {
-            setCalibrationModal(prev => ({ ...prev, visible: false }));
-          }, 1500); // Afficher "Terminé" pendant 1.5s
-        }
-      },
-      onDataUpdate: (sensorData) => {
-        // Mise à jour du contexte avec les données capteurs en temps réel
-        // Gestion des données enrichies d'AdvancedSensorManager
-        const accelerometer = sensorData.accelerometer || { x: 0, y: 0, z: 0 };
-        const gyroscope = sensorData.gyroscope || { x: 0, y: 0, z: 0 };
-        const magnetometer = sensorData.magnetometer || { x: 0, y: 0, z: 0 };
-        
-        // Ajout de la magnitude pour l'accéléromètre si pas déjà présente
-        if (accelerometer && !accelerometer.magnitude) {
-          accelerometer.magnitude = Math.sqrt(
-            accelerometer.x ** 2 + accelerometer.y ** 2 + accelerometer.z ** 2
-          );
-        }
-        
-        actions.updateSensors({
-          accelerometer,
-          gyroscope,
-          magnetometer,
-          metadata: sensorData.metadata || {},
-          timestamp: Date.now()
-        });
-      }
+      onPositionUpdate,
+      onModeChanged,
+      onEnergyStatusChanged,
+      onCalibrationProgress,
+      onDataUpdate
     });
-  }, []); // Dépendances vides pour éviter les re-rendus
+  }, [localizationSDK, onPositionUpdate, onModeChanged, onEnergyStatusChanged, onCalibrationProgress, onDataUpdate]);
 
   /**
    * Initialisation de la batterie

@@ -80,9 +80,40 @@ export class PedestrianDeadReckoning {
     
     // *** NOUVEAU: Système de classification stable ***
     this.lastModeUpdate = 0;
-    this.modeUpdateInterval = 10000; // 10 secondes
+    this.modeUpdateInterval = 1000; // *** CORRIGÉ: Réduit à 1 seconde pour transitions plus rapides ***
     this.modeVotes = []; // Historique des votes pour stabilité
-    this.maxVotes = 50; // Nombre maximum de votes à conserver
+    this.maxVotes = 20; // *** CORRIGÉ: Réduit de 50 à 20 votes ***
+    
+    // *** NOUVEAU: Système de calibration adaptative pour coefficient k ***
+    this.calibrationState = {
+      isWarmingUp: true,
+      warmupSamples: 0,
+      warmupTarget: 100, // Nombre d'échantillons pour calibration initiale
+      amplitudeHistory: [], // Historique des amplitudes pour calibration
+      baselineStd: null, // Écart-type de référence après warm-up
+      adaptiveK: {
+        walking: 0.3,
+        running: 0.2,
+        crawling: 0.5,
+        default: 0.4
+      },
+      // *** NOUVEAU: Calibration utilisateur avancée ***
+      userCalibration: {
+        isActive: false,
+        phase: 'idle', // 'idle', 'normal_walk', 'slow_walk', 'completed'
+        normalWalkData: [],
+        slowWalkData: [],
+        personalizedThresholds: {
+          varianceMin: 0.025,
+          amplitudeMin: 0.2,
+          frequencyMin: 0.2,
+          normalWalkVariance: null,
+          slowWalkVariance: null,
+          normalWalkAmplitude: null,
+          slowWalkAmplitude: null
+        }
+      }
+    };
   }
 
   /**
@@ -128,6 +159,18 @@ export class PedestrianDeadReckoning {
       const timeUntilNextUpdate = Math.max(0, this.modeUpdateInterval - (now - this.lastModeUpdate));
       const secondsUntilUpdate = Math.ceil(timeUntilNextUpdate / 1000);
       console.log(`[STATUS] Mode: ${this.currentMode}, Pas: ${this.stepCount}, Prochaine éval: ${secondsUntilUpdate}s`);
+      
+      // *** NOUVEAU: Log des métriques de classification pour debug ***
+      if (this.activityFeatures.accelerationVariance > 0) {
+        console.log(`[METRICS] Variance: ${this.activityFeatures.accelerationVariance.toFixed(3)}, Freq: ${this.activityFeatures.stepFrequency.toFixed(2)}, Amp: ${this.activityFeatures.peakAmplitude.toFixed(3)}`);
+      }
+      
+      // *** NOUVEAU: Log des valeurs brutes des capteurs pour debug ***
+      if (this.accelerationBuffer.length > 0) {
+        const lastAcc = this.accelerationBuffer[this.accelerationBuffer.length - 1];
+        console.log(`[SENSORS] Acc: x=${lastAcc.x.toFixed(3)}, y=${lastAcc.y.toFixed(3)}, z=${lastAcc.z.toFixed(3)}, mag=${lastAcc.magnitude.toFixed(3)}`);
+      }
+      
       this.lastLogTime = now;
     }
     
@@ -217,27 +260,35 @@ export class PedestrianDeadReckoning {
     this.activityFeatures.stepFrequency = peaks.length / (this.config.stepDetectionWindow / this.currentSampleRate);
     this.activityFeatures.peakAmplitude = peaks.length > 0 ? Math.max(...peaks) : 0;
     
-    // *** NOUVEAU: Classification avec système de vote ***
+    // *** NOUVEAU: Collecter les données de calibration utilisateur ***
+    this.collectCalibrationData();
+    
+    // *** NOUVEAU: Utiliser les seuils personnalisés ***
+    const thresholds = this.getPersonalizedThresholds();
+    
+    // *** NOUVEAU: Classification avec système de vote et seuils personnalisés ***
     const variance = this.activityFeatures.accelerationVariance;
     const frequency = this.activityFeatures.stepFrequency;
     const amplitude = this.activityFeatures.peakAmplitude;
     
-    // Déterminer le mode candidat
+    // Déterminer le mode candidat avec seuils adaptatifs
     let candidateMode;
-    if (variance < 0.1) {
+    if (variance < thresholds.varianceMin) { // *** Seuil personnalisé ***
       candidateMode = 'stationary';
-    } else if (amplitude < 0.2 && variance < 0.8 && frequency < 1.2) {
+    } else if (amplitude < 0.5 && variance < 0.1 && frequency < 1.0) { // *** CORRIGÉ: Seuils très bas ***
       candidateMode = 'crawling';
-    } else if (frequency >= 0.5 && frequency < 2.5) {
-      if (amplitude > 1.2 && frequency > 1.8) {
+    } else if (frequency >= thresholds.frequencyMin && frequency < 2.5) { // *** Seuil personnalisé ***
+      if (amplitude > 1.0 && frequency > 1.6) { // *** CORRIGÉ: Seuils très bas pour running ***
         candidateMode = 'running';
-      } else {
+      } else if (amplitude >= thresholds.amplitudeMin && frequency >= thresholds.frequencyMin) { // *** Seuils personnalisés ***
         candidateMode = 'walking';
+      } else {
+        candidateMode = 'stationary'; // *** CORRIGÉ: Amplitudes trop faibles → stationary ***
       }
-    } else if (frequency >= 2.5 || (amplitude > 1.0 && frequency > 1.8)) {
+    } else if (frequency >= 2.5 || (amplitude > 0.8 && frequency > 1.6)) { // *** CORRIGÉ: Seuils très bas ***
       candidateMode = 'running';
     } else {
-      candidateMode = 'walking';
+      candidateMode = 'walking'; // *** CORRIGÉ: Par défaut walking au lieu de stationary ***
     }
     
     // Ajouter le vote
@@ -254,7 +305,7 @@ export class PedestrianDeadReckoning {
       this.modeVotes.shift();
     }
     
-    // *** NOUVEAU: Mise à jour du mode seulement toutes les 10 secondes ***
+    // *** NOUVEAU: Mise à jour du mode seulement toutes les 2 secondes ***
     const now = Date.now();
     if (now - this.lastModeUpdate >= this.modeUpdateInterval) {
       const newMode = this.determineFinalMode();
@@ -268,21 +319,21 @@ export class PedestrianDeadReckoning {
           this.onModeChanged(this.currentMode, this.activityFeatures);
         }
         
-        console.log(`[MODE STABLE] ${previousMode} → ${this.currentMode} (décision toutes les 10s)`);
+        console.log(`[MODE STABLE] ${previousMode} → ${this.currentMode} (décision toutes les 2s)`);
       } else {
         this.lastModeUpdate = now;
-        console.log(`[MODE STABLE] ${this.currentMode} confirmé (décision toutes les 10s)`);
+        console.log(`[MODE STABLE] ${this.currentMode} confirmé (décision toutes les 2s)`);
       }
     }
   }
 
   /**
-   * Détermine le mode final basé sur les votes des 10 dernières secondes
+   * Détermine le mode final basé sur les votes pondérés de la dernière seconde
    */
   determineFinalMode() {
     if (this.modeVotes.length === 0) return this.currentMode;
     
-    // Compter les votes des 10 dernières secondes
+    // Compter les votes de la dernière seconde
     const now = Date.now();
     const recentVotes = this.modeVotes.filter(vote => 
       now - vote.timestamp <= this.modeUpdateInterval
@@ -290,28 +341,57 @@ export class PedestrianDeadReckoning {
     
     if (recentVotes.length === 0) return this.currentMode;
     
-    // Compter les occurrences de chaque mode
-    const modeCounts = {};
+    // *** NOUVEAU: Système de vote pondéré ***
+    const weightedCounts = {};
+    
     recentVotes.forEach(vote => {
-      modeCounts[vote.mode] = (modeCounts[vote.mode] || 0) + 1;
+      let weight = 1.0; // Poids de base
+      
+      // *** Pondération spéciale pour favoriser la détection de marche douce ***
+      if (vote.mode === 'walking') {
+        // Si amplitude et fréquence sont proches des seuils minimums, augmenter le poids
+        if (vote.amplitude >= 0.15 && vote.amplitude <= 0.3 && 
+            vote.frequency >= 0.15 && vote.frequency <= 0.4) {
+          weight = 1.5; // Favoriser la marche douce
+        }
+        // Si variance proche du seuil stationary, légèrement favoriser
+        if (vote.variance > 0.02 && vote.variance < 0.05) {
+          weight *= 1.3;
+        }
+      }
+      
+      // Favoriser les transitions depuis stationary vers walking
+      if (vote.mode === 'walking' && this.currentMode === 'stationary') {
+        weight *= 1.4;
+      }
+      
+      // Pénaliser légèrement les votes stationary si il y a un minimum d'activité
+      if (vote.mode === 'stationary' && vote.variance > 0.015) {
+        weight *= 0.8;
+      }
+      
+      weightedCounts[vote.mode] = (weightedCounts[vote.mode] || 0) + weight;
     });
     
-    // Trouver le mode le plus voté
+    // Trouver le mode avec le score pondéré le plus élevé
     let winningMode = this.currentMode;
-    let maxCount = 0;
+    let maxScore = 0;
     
-    for (const [mode, count] of Object.entries(modeCounts)) {
-      if (count > maxCount) {
-        maxCount = count;
+    for (const [mode, score] of Object.entries(weightedCounts)) {
+      if (score > maxScore) {
+        maxScore = score;
         winningMode = mode;
       }
     }
     
-    // Exiger une majorité claire (au moins 60% des votes) pour changer de mode
-    const totalVotes = recentVotes.length;
-    const winningPercentage = maxCount / totalVotes;
+    // *** Seuil adaptatif pour changement de mode ***
+    const totalWeight = Object.values(weightedCounts).reduce((sum, w) => sum + w, 0);
+    const winningPercentage = maxScore / totalWeight;
     
-    if (winningPercentage >= 0.6) {
+    // Seuil plus bas pour transitions vers walking (40% au lieu de 50%)
+    const requiredThreshold = (winningMode === 'walking' && this.currentMode === 'stationary') ? 0.4 : 0.5;
+    
+    if (winningPercentage >= requiredThreshold) {
       return winningMode;
     } else {
       // Pas de majorité claire, garder le mode actuel
@@ -350,23 +430,49 @@ export class PedestrianDeadReckoning {
     // 3. Détection de pics sans seuil fixe (calcul automatique)
     const peaks = this.detectPeaks(detrended);
     
+    // *** NOUVEAU: Log de debug pour voir les pics détectés ***
+    if (peaks.length > 0) {
+      const maxPeak = Math.max(...peaks);
+      const threshold = this.getLastAdaptiveThreshold();
+      console.log(`[PEAKS] Détectés: ${peaks.length}, Max: ${maxPeak.toFixed(2)}, Seuil: ${threshold.toFixed(2)}, Mode: ${this.currentMode}`);
+    }
+    
     const now = Date.now();
     
-    // 4. Validation temporelle anti-rebond (ajusté)
-    const minStepInterval = this.currentMode === 'running' ? 200 : 250; // Ajusté pour course
+    // 4. Validation temporelle anti-rebond (adaptatif selon fréquence)
+    let minStepInterval;
+    if (this.currentMode === 'running') {
+      minStepInterval = 200; // Course rapide
+    } else {
+      // *** NOUVEAU: Intervalle adaptatif selon la fréquence détectée ***
+      const detectedFreq = this.activityFeatures.stepFrequency;
+      if (detectedFreq > 0 && detectedFreq < 1.0) {
+        // Marche très lente : permettre jusqu'à 1.5s entre pas
+        minStepInterval = Math.max(400, Math.min(1500, 1000 / detectedFreq * 0.8));
+      } else if (detectedFreq >= 1.0 && detectedFreq < 1.5) {
+        // Marche lente : 400-600ms
+        minStepInterval = 400;
+      } else {
+        // Marche normale : 250ms
+        minStepInterval = 250;
+      }
+    }
     
     if (peaks.length > 0 && (now - this.lastStepTime) > minStepInterval) {
       // Vérifier que l'amplitude du pic est significative
       const peakAmplitude = Math.max(...peaks);
-      if (peakAmplitude > 0.1) { // Seuil minimum d'amplitude
+      if (peakAmplitude > 0.005) { // *** CORRIGÉ: Seuil très bas abaissé de 0.02 à 0.005 pour pas légers ***
         // Pas détecté validé
         this.handleStepDetected(peakAmplitude, mags[mags.length - 1]);
         
         // *** DEBUG: Log périodique avec nouvelles métriques ***
-        if (this.stepCount % 5 === 0) {
+        if (this.stepCount % 5 === 0 || this.stepCount < 10) { // *** CORRIGÉ: Log plus fréquent au début ***
           const adaptiveThreshold = this.getLastAdaptiveThreshold();
-          console.log(`[STEP] Pas ${this.stepCount}: peak=${peakAmplitude.toFixed(2)}, seuil=${adaptiveThreshold.toFixed(2)}, mode=${this.currentMode}`);
+          console.log(`[STEP] Pas ${this.stepCount}: peak=${peakAmplitude.toFixed(3)}, seuil=${adaptiveThreshold.toFixed(3)}, mode=${this.currentMode}`);
         }
+      } else {
+        // *** NOUVEAU: Log des pics rejetés pour debug ***
+        console.log(`[STEP-REJETÉ] Peak trop faible: ${peakAmplitude.toFixed(3)} < 0.005`);
       }
     }
   }
@@ -404,10 +510,193 @@ export class PedestrianDeadReckoning {
   }
 
   /**
+   * *** NOUVEAU: Calibration adaptative du coefficient k ***
+   */
+  updateAdaptiveCalibration(data) {
+    if (!this.calibrationState.isWarmingUp) return;
+    
+    // Collecter les amplitudes pendant le warm-up
+    const magnitudes = data.map(val => Math.abs(val));
+    this.calibrationState.amplitudeHistory.push(...magnitudes);
+    this.calibrationState.warmupSamples += magnitudes.length;
+    
+    // Vérifier si le warm-up est terminé
+    if (this.calibrationState.warmupSamples >= this.calibrationState.warmupTarget) {
+      this.finalizeCalibration();
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Finaliser la calibration après warm-up ***
+   */
+  finalizeCalibration() {
+    const amplitudes = this.calibrationState.amplitudeHistory;
+    
+    if (amplitudes.length > 0) {
+      // Calculer l'écart-type de référence
+      const mean = amplitudes.reduce((sum, val) => sum + val, 0) / amplitudes.length;
+      const variance = amplitudes.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / amplitudes.length;
+      this.calibrationState.baselineStd = Math.sqrt(variance);
+      
+      // Adapter les coefficients k selon l'écart-type observé
+      const stdFactor = Math.max(0.5, Math.min(2.0, this.calibrationState.baselineStd / 0.5)); // Normalisation autour de 0.5
+      
+      this.calibrationState.adaptiveK = {
+        walking: Math.max(0.1, Math.min(0.8, 0.3 * stdFactor)),
+        running: Math.max(0.1, Math.min(0.6, 0.2 * stdFactor)),
+        crawling: Math.max(0.2, Math.min(1.0, 0.5 * stdFactor)),
+        default: Math.max(0.2, Math.min(0.8, 0.4 * stdFactor))
+      };
+      
+      this.calibrationState.isWarmingUp = false;
+      
+      console.log(`[CALIBRATION] Terminée - Std baseline: ${this.calibrationState.baselineStd.toFixed(3)}, K adaptatifs: walking=${this.calibrationState.adaptiveK.walking.toFixed(2)}, running=${this.calibrationState.adaptiveK.running.toFixed(2)}`);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Démarrer la calibration utilisateur personnalisée ***
+   */
+  startUserCalibration() {
+    this.calibrationState.userCalibration.isActive = true;
+    this.calibrationState.userCalibration.phase = 'normal_walk';
+    this.calibrationState.userCalibration.normalWalkData = [];
+    this.calibrationState.userCalibration.slowWalkData = [];
+    
+    console.log('[USER_CALIBRATION] Démarrage - Phase 1: Marchez normalement pendant 10 secondes');
+    return {
+      phase: 'normal_walk',
+      instruction: 'Marchez normalement pendant 10 secondes',
+      duration: 10000
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Passer à la phase suivante de calibration ***
+   */
+  nextCalibrationPhase() {
+    const cal = this.calibrationState.userCalibration;
+    
+    if (cal.phase === 'normal_walk') {
+      cal.phase = 'slow_walk';
+      console.log('[USER_CALIBRATION] Phase 2: Marchez lentement pendant 10 secondes');
+      return {
+        phase: 'slow_walk',
+        instruction: 'Marchez lentement pendant 10 secondes',
+        duration: 10000
+      };
+    } else if (cal.phase === 'slow_walk') {
+      this.finalizeUserCalibration();
+      return {
+        phase: 'completed',
+        instruction: 'Calibration terminée',
+        duration: 0
+      };
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Collecter les données pendant la calibration utilisateur ***
+   */
+  collectCalibrationData() {
+    if (!this.calibrationState.userCalibration.isActive) return;
+    
+    const cal = this.calibrationState.userCalibration;
+    const features = this.activityFeatures;
+    
+    const dataPoint = {
+      variance: features.accelerationVariance,
+      amplitude: features.peakAmplitude,
+      frequency: features.stepFrequency,
+      timestamp: Date.now()
+    };
+    
+    if (cal.phase === 'normal_walk') {
+      cal.normalWalkData.push(dataPoint);
+    } else if (cal.phase === 'slow_walk') {
+      cal.slowWalkData.push(dataPoint);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Finaliser la calibration utilisateur ***
+   */
+  finalizeUserCalibration() {
+    const cal = this.calibrationState.userCalibration;
+    
+    // Analyser les données de marche normale
+    if (cal.normalWalkData.length > 0) {
+      const normalVariances = cal.normalWalkData.map(d => d.variance).filter(v => v > 0);
+      const normalAmplitudes = cal.normalWalkData.map(d => d.amplitude).filter(a => a > 0);
+      
+      if (normalVariances.length > 0) {
+        cal.personalizedThresholds.normalWalkVariance = 
+          normalVariances.reduce((sum, v) => sum + v, 0) / normalVariances.length;
+      }
+      if (normalAmplitudes.length > 0) {
+        cal.personalizedThresholds.normalWalkAmplitude = 
+          normalAmplitudes.reduce((sum, a) => sum + a, 0) / normalAmplitudes.length;
+      }
+    }
+    
+    // Analyser les données de marche lente
+    if (cal.slowWalkData.length > 0) {
+      const slowVariances = cal.slowWalkData.map(d => d.variance).filter(v => v > 0);
+      const slowAmplitudes = cal.slowWalkData.map(d => d.amplitude).filter(a => a > 0);
+      
+      if (slowVariances.length > 0) {
+        cal.personalizedThresholds.slowWalkVariance = 
+          slowVariances.reduce((sum, v) => sum + v, 0) / slowVariances.length;
+      }
+      if (slowAmplitudes.length > 0) {
+        cal.personalizedThresholds.slowWalkAmplitude = 
+          slowAmplitudes.reduce((sum, a) => sum + a, 0) / slowAmplitudes.length;
+      }
+    }
+    
+    // Ajuster les seuils personnalisés
+    if (cal.personalizedThresholds.slowWalkVariance) {
+      // Utiliser 80% de la variance de marche lente comme seuil minimum
+      cal.personalizedThresholds.varianceMin = cal.personalizedThresholds.slowWalkVariance * 0.8;
+    }
+    
+    if (cal.personalizedThresholds.slowWalkAmplitude) {
+      // Utiliser 70% de l'amplitude de marche lente comme seuil minimum
+      cal.personalizedThresholds.amplitudeMin = cal.personalizedThresholds.slowWalkAmplitude * 0.7;
+    }
+    
+    cal.phase = 'completed';
+    cal.isActive = false;
+    
+    console.log(`[USER_CALIBRATION] Terminée - Seuils personnalisés: variance=${cal.personalizedThresholds.varianceMin.toFixed(3)}, amplitude=${cal.personalizedThresholds.amplitudeMin.toFixed(3)}`);
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir les seuils personnalisés ou par défaut ***
+   */
+  getPersonalizedThresholds() {
+    const cal = this.calibrationState.userCalibration;
+    
+    if (cal.phase === 'completed') {
+      return cal.personalizedThresholds;
+    } else {
+      // Retourner les seuils par défaut
+      return {
+        varianceMin: 0.025,
+        amplitudeMin: 0.2,
+        frequencyMin: 0.2
+      };
+    }
+  }
+
+  /**
    * Détection de pics avec seuil adaptatif amélioré
    */
   detectPeaks(data, threshold = null) {
     if (data.length < 5) return [];
+    
+    // *** NOUVEAU: Mise à jour de la calibration pendant le warm-up ***
+    this.updateAdaptiveCalibration(data);
     
     // Si pas de seuil fourni, calcul automatique
     if (!threshold) {
@@ -415,26 +704,41 @@ export class PedestrianDeadReckoning {
       const variance = data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / data.length;
       const std = Math.sqrt(variance);
       
-      // *** SEUIL ADAPTATIF SELON MODE ***
-      let k = 0.8; // Coefficient multiplicateur par défaut réduit de 1.0 à 0.8
-      switch (this.currentMode) {
-        case 'running':
-          k = 0.6; // Plus sensible pour la course (réduit de 0.8)
-          break;
-        case 'walking':
-          k = 0.8; // Standard pour la marche (réduit de 1.0)
-          break;
-        case 'crawling':
-          k = 1.2; // Moins sensible pour ramper (réduit de 1.5)
-          break;
-        default:
-          k = 1.0;
+      // *** NOUVEAU: SEUIL ADAPTATIF AVEC CALIBRATION ***
+      let k;
+      if (this.calibrationState.isWarmingUp) {
+        // Pendant le warm-up, utiliser les valeurs par défaut
+        switch (this.currentMode) {
+          case 'running':
+            k = 0.2;
+            break;
+          case 'walking':
+            k = 0.3;
+            break;
+          case 'crawling':
+            k = 0.5;
+            break;
+          default:
+            k = 0.4;
+        }
+      } else {
+        // Après calibration, utiliser les coefficients adaptatifs
+        k = this.calibrationState.adaptiveK[this.currentMode] || this.calibrationState.adaptiveK.default;
       }
       
       threshold = mean + k * std;
       
-      // Contraintes pour éviter les extrêmes
-      threshold = Math.max(0.05, Math.min(1.5, threshold)); // Seuils réduits
+      // *** AMÉLIORÉ: Contraintes adaptatives selon la calibration ***
+      let minThreshold = 0.01;
+      let maxThreshold = 2.0;
+      
+      if (!this.calibrationState.isWarmingUp && this.calibrationState.baselineStd) {
+        // Ajuster les bornes selon l'écart-type de référence
+        minThreshold = Math.max(0.01, this.calibrationState.baselineStd * 0.1);
+        maxThreshold = Math.min(2.0, this.calibrationState.baselineStd * 4.0);
+      }
+      
+      threshold = Math.max(minThreshold, Math.min(maxThreshold, threshold));
       this._lastAdaptiveThreshold = threshold; // Stockage pour debug
     }
     
@@ -762,7 +1066,25 @@ export class PedestrianDeadReckoning {
    */
   handleStepDetected(peakAmplitude, originalMagnitude) {
     const now = Date.now();
-    const minStepInterval = this.currentMode === 'running' ? 200 : 250; // Cohérent avec detectSteps
+    
+    // *** NOUVEAU: Utiliser le même calcul d'intervalle adaptatif ***
+    let minStepInterval;
+    if (this.currentMode === 'running') {
+      minStepInterval = 200; // Course rapide
+    } else {
+      // Intervalle adaptatif selon la fréquence détectée
+      const detectedFreq = this.activityFeatures.stepFrequency;
+      if (detectedFreq > 0 && detectedFreq < 1.0) {
+        // Marche très lente : permettre jusqu'à 1.5s entre pas
+        minStepInterval = Math.max(400, Math.min(1500, 1000 / detectedFreq * 0.8));
+      } else if (detectedFreq >= 1.0 && detectedFreq < 1.5) {
+        // Marche lente : 400-600ms
+        minStepInterval = 400;
+      } else {
+        // Marche normale : 250ms
+        minStepInterval = 250;
+      }
+    }
     
     // Vérification intervalle temporel
     if ((now - this.lastStepTime) <= minStepInterval) {

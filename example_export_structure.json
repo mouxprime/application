@@ -1,0 +1,203 @@
+{
+  "sessionId": "session_1703123456789",
+  "startTime": "2024-01-15T10:30:00.000Z",
+  "endTime": "2024-01-15T10:35:30.000Z",
+  "duration": 330000,
+  "totalEntries": 330,
+  "logs": [
+    {
+      "timestamp": 1703123456789,
+      "relativeTime": 0,
+      "sensors": {
+        "accelerometer": {
+          "x": 0.12,
+          "y": 9.81,
+          "z": 0.05,
+          "magnitude": 9.82
+        },
+        "gyroscope": {
+          "x": 0.001,
+          "y": -0.002,
+          "z": 0.003,
+          "magnitude": 0.0037
+        },
+        "magnetometer": {
+          "x": 25.4,
+          "y": -12.8,
+          "z": 45.2,
+          "magnitude": 52.1,
+          "heading": 315.2
+        },
+        "barometer": {
+          "pressure": 1013.25,
+          "altitude": 150.5
+        }
+      },
+      "algorithm": {
+        "pdr": {
+          "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+          "orientation": { "theta": 0.0, "pitch": 0.0, "roll": 0.0 },
+          "mode": "stationary",
+          "stepCount": 0,
+          "features": {
+            "variance": 0.02,
+            "peakCount": 0,
+            "zeroCrossings": 1
+          }
+        },
+        "ekf": {
+          "state": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+          "covariance": [
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+          ],
+          "confidence": 0.95,
+          "zuptActive": true
+        },
+        "attitude": {
+          "quaternion": [1.0, 0.0, 0.0, 0.0],
+          "isStable": true,
+          "magneticConfidence": 0.85
+        },
+        "sdk": {
+          "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+          "orientation": { "theta": 0.0, "pitch": 0.0, "roll": 0.0 },
+          "confidence": 0.95,
+          "isTracking": true
+        }
+      }
+    },
+    {
+      "timestamp": 1703123457789,
+      "relativeTime": 1000,
+      "sensors": {
+        "accelerometer": {
+          "x": 2.45,
+          "y": 8.12,
+          "z": 1.23,
+          "magnitude": 8.65
+        },
+        "gyroscope": {
+          "x": 0.15,
+          "y": -0.08,
+          "z": 0.22,
+          "magnitude": 0.28
+        },
+        "magnetometer": {
+          "x": 26.1,
+          "y": -13.2,
+          "z": 44.8,
+          "magnitude": 52.3,
+          "heading": 316.1
+        },
+        "barometer": {
+          "pressure": 1013.20,
+          "altitude": 150.8
+        }
+      },
+      "algorithm": {
+        "pdr": {
+          "position": { "x": 0.15, "y": 0.08, "z": 0.0 },
+          "orientation": { "theta": 0.05, "pitch": 0.02, "roll": -0.01 },
+          "mode": "walking",
+          "stepCount": 1,
+          "features": {
+            "variance": 1.25,
+            "peakCount": 1,
+            "zeroCrossings": 3
+          }
+        },
+        "ekf": {
+          "state": [0.15, 0.08, 0.0, 0.12, 0.05, 0.0],
+          "covariance": [
+            [0.8, 0.1, 0.0, 0.0, 0.0, 0.0],
+            [0.1, 0.9, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.7, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.8, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+          ],
+          "confidence": 0.88,
+          "zuptActive": false
+        },
+        "attitude": {
+          "quaternion": [0.998, 0.025, -0.005, 0.011],
+          "isStable": false,
+          "magneticConfidence": 0.82
+        },
+        "sdk": {
+          "position": { "x": 0.15, "y": 0.08, "z": 0.0 },
+          "orientation": { "theta": 0.05, "pitch": 0.02, "roll": -0.01 },
+          "confidence": 0.88,
+          "isTracking": true
+        }
+      }
+    }
+  ],
+  "statistics": {
+    "totalLogs": 330,
+    "stepCount": 45,
+    "distance": 32.5,
+    "averageSpeed": 1.2,
+    "maxSpeed": 2.1,
+    "averageAccuracy": 0.87,
+    "modes": {
+      "stationary": 120,
+      "walking": 180,
+      "running": 30
+    },
+    "sensorRanges": {
+      "accelerometer": {
+        "min": { "x": -2.1, "y": 7.8, "z": -1.5 },
+        "max": { "x": 3.2, "y": 12.1, "z": 2.8 },
+        "avg": { "x": 0.5, "y": 9.9, "z": 0.2 }
+      },
+      "gyroscope": {
+        "min": { "x": -0.8, "y": -0.6, "z": -0.9 },
+        "max": { "x": 0.7, "y": 0.5, "z": 0.8 },
+        "avg": { "x": 0.02, "y": -0.01, "z": 0.03 }
+      },
+      "magnetometer": {
+        "min": { "x": 20.1, "y": -18.5, "z": 38.2 },
+        "max": { "x": 32.8, "y": -8.1, "z": 52.1 },
+        "avg": { "x": 26.5, "y": -13.2, "z": 45.1 }
+      }
+    }
+  },
+  "exportMetadata": {
+    "exportDate": "2024-01-15T10:36:00.000Z",
+    "exportType": "session",
+    "analyticsData": {
+      "totalDistance": 32.5,
+      "averageSpeed": 1.2,
+      "maxSpeed": 2.1,
+      "averageAccuracy": 0.87,
+      "sessionDuration": 330
+    },
+    "trajectoryData": [
+      { "x": 0.0, "y": 0.0, "timestamp": 1703123456789, "confidence": 0.95 },
+      { "x": 0.15, "y": 0.08, "timestamp": 1703123457789, "confidence": 0.88 }
+    ],
+    "currentPose": { "x": 32.1, "y": 15.8, "theta": 1.25, "confidence": 0.91 },
+    "systemInfo": {
+      "platform": "android",
+      "screenDimensions": { "width": 393 },
+      "appVersion": "1.0.0"
+    }
+  },
+  "analysisReady": {
+    "sensorDataPoints": 330,
+    "timeRange": "330.0s",
+    "dataQuality": {
+      "score": 92,
+      "issues": ["Données de bonne qualité"],
+      "sensorCoverage": 98.5,
+      "algorithmCoverage": 100.0,
+      "sampleRate": 1.0
+    }
+  }
+} 

@@ -1,0 +1,89 @@
+{
+  "sessionId": "test_simple",
+  "startTime": "2025-05-26T13:57:50.943Z",
+  "version": "1.0",
+  "config": {
+    "logDirectory": "./logs",
+    "logInterval": 1000,
+    "enableConsole": true,
+    "maxLogFiles": 50
+  },
+  "logs": [
+    {
+      "timestamp": 1748267871945,
+      "relativeTime": 1002,
+      "sensors": {
+        "accelerometer": {
+          "x": 0.1,
+          "y": 0.2,
+          "z": 9.8,
+          "magnitude": 9.802550688468793
+        },
+        "gyroscope": {
+          "x": 0.01,
+          "y": 0.02,
+          "z": 0.03,
+          "magnitude": 0.03741657386773942
+        },
+        "magnetometer": {
+          "x": 25,
+          "y": 15,
+          "z": -40,
+          "magnitude": 49.49747468305833,
+          "heading": 30.96375653207352
+        },
+        "barometer": null,
+        "timestamp": 1748267870944
+      },
+      "algorithm": {
+        "pdr": {
+          "position": {
+            "x": 1,
+            "y": 2,
+            "z": 0
+          },
+          "mode": "walking",
+          "stepCount": 5,
+          "adaptiveWindowInfo": null
+        },
+        "ekf": {
+          "state": null,
+          "covariance": null,
+          "confidence": 0.8
+        },
+        "attitude": {
+          "isStable": false
+        },
+        "sdk": {
+          "isTracking": true
+        },
+        "timestamp": 1748267870945
+      }
+    }
+  ],
+  "endTime": "2025-05-26T13:57:52.948Z",
+  "duration": 2005,
+  "totalEntries": 1,
+  "statistics": {
+    "totalLogs": 1,
+    "duration": 1002,
+    "stepCount": 5,
+    "modes": {
+      "walking": 1
+    },
+    "sensorRanges": {
+      "accelerometer": {
+        "min": 9.802550688468793,
+        "max": 9.802550688468793
+      },
+      "gyroscope": {
+        "min": null,
+        "max": null
+      },
+      "magnetometer": {
+        "min": null,
+        "max": null
+      }
+    }
+  }
+}

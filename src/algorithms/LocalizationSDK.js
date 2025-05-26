@@ -2,6 +2,7 @@ import { PedestrianDeadReckoning } from './PedestrianDeadReckoning.js';
 import { AdvancedExtendedKalmanFilter } from './AdvancedEKF.js';
 import { AdvancedSensorManager } from '../sensors/AdvancedSensorManager.js';
 import { AttitudeTracker } from './AttitudeTracker.js';
+import { Logger } from '../utils/Logger.js';
 import { create, all } from 'mathjs';
 
 const math = create(all);
@@ -78,6 +79,14 @@ export class LocalizationSDK {
 
     // *** NOUVEAU: AttitudeTracker pour orientation adaptative ***
     this.attitudeTracker = new AttitudeTracker(this.config.attitudeConfig);
+    
+    // *** NOUVEAU: Logger pour l'enregistrement des données ***
+    this.logger = new Logger({
+      sessionPrefix: 'pdr_session',
+      maxLogSize: 50 * 1024 * 1024, // 50MB max par session
+      autoCleanup: true,
+      retentionDays: 7
+    });
     
     // État du SDK
     this.isInitialized = false;
@@ -221,6 +230,12 @@ export class LocalizationSDK {
       // Configuration du timer de mise à jour utilisateur
       this.startUserUpdateTimer();
 
+      // *** NOUVEAU: Démarrage de la session de logging ***
+      if (this.logger) {
+        await this.logger.startSession();
+        console.log('Session de logging démarrée');
+      }
+
       this.isTracking = true;
       console.log('Tracking démarré');
 
@@ -256,6 +271,12 @@ export class LocalizationSDK {
       this.updateTimer = null;
     }
 
+    // *** NOUVEAU: Arrêt de la session de logging ***
+    if (this.logger) {
+      this.logger.endSession();
+      console.log('Session de logging terminée');
+    }
+
     console.log('Tracking arrêté');
   }
 
@@ -284,8 +305,8 @@ export class LocalizationSDK {
 
     // Callbacks gestionnaire de capteurs
     this.sensorManager.setCallbacks({
-      onDataUpdate: (sensorData) => {
-        this.processSensorUpdate(sensorData);
+      onDataUpdate: async (sensorData) => {
+        await this.processSensorUpdate(sensorData);
       },
       onModeChanged: (modeInfo) => {
         const now = Date.now();
@@ -305,10 +326,15 @@ export class LocalizationSDK {
   /**
    * Traitement principal des mises à jour de capteurs
    */
-  processSensorUpdate(sensorData) {
+  async processSensorUpdate(sensorData) {
     if (!this.isTracking) return;
 
     const startTime = performance.now();
+
+    // *** NOUVEAU: Logging des données capteurs ***
+    if (this.logger && this.isTracking) {
+      this.logger.logSensorData(sensorData);
+    }
 
     // Callback pour mise à jour des données capteurs dans le contexte
     if (this.callbacks.onDataUpdate) {
@@ -345,6 +371,55 @@ export class LocalizationSDK {
 
         // 6. Mise à jour de l'état global
         this.updateCurrentState(pdrState);
+        
+        // *** NOUVEAU: Logging des états algorithmes ***
+        if (this.logger && this.isTracking) {
+          const ekfPose = this.ekf.getPose();
+          const ekfState = this.ekf.getFullState();
+          const attitudeStatus = this.attitudeTracker.getStatus();
+          
+          this.logger.logAlgorithmState(
+            // PDR State
+            {
+              position: pdrState.position,
+              orientation: pdrState.orientation,
+              velocity: pdrState.velocity,
+              mode: pdrState.mode,
+              stepCount: pdrState.stepCount,
+              features: pdrState.features,
+              sampleRate: pdrState.sampleRate,
+              isZUPT: pdrState.isZUPT
+            },
+            // EKF State
+            {
+              state: ekfState.state,
+              covariance: ekfState.covariance,
+              confidence: ekfPose.confidence,
+              zuptActive: ekfState.zuptActive,
+              lastUpdate: Date.now()
+            },
+            // Attitude State
+            {
+              quaternion: attitudeStatus.quaternion,
+              isStable: attitudeStatus.isStable,
+              stabilityDuration: attitudeStatus.stabilityDuration,
+              magneticConfidence: attitudeStatus.magneticConfidence,
+              isRecalibrating: attitudeStatus.isRecalibrating
+            },
+            // SDK State
+            {
+              position: this.currentState.position,
+              orientation: this.currentState.orientation,
+              mode: this.currentState.mode,
+              confidence: this.currentState.confidence,
+              stepCount: this.currentState.stepCount,
+              distance: this.currentState.distance
+            }
+          );
+          
+          // *** FIX CRITIQUE: Écrire l'entrée de log après avoir mis à jour les états ***
+          await this.logger.writeLogEntry();
+        }
       }
 
     } catch (error) {
@@ -658,14 +733,10 @@ export class LocalizationSDK {
   /**
    * Configuration des callbacks utilisateur
    */
-  setCallbacks({ onPositionUpdate, onModeChanged, onCalibrationRequired, onEnergyStatusChanged, onDataUpdate, onCalibrationProgress }) {
+  setCallbacks(userCallbacks) {
     this.callbacks = {
-      onPositionUpdate: onPositionUpdate || this.callbacks.onPositionUpdate,
-      onModeChanged: onModeChanged || this.callbacks.onModeChanged,
-      onCalibrationRequired: onCalibrationRequired || this.callbacks.onCalibrationRequired,
-      onEnergyStatusChanged: onEnergyStatusChanged || this.callbacks.onEnergyStatusChanged,
-      onDataUpdate: onDataUpdate || this.callbacks.onDataUpdate,
-      onCalibrationProgress: onCalibrationProgress || this.callbacks.onCalibrationProgress
+      ...this.callbacks,
+      ...userCallbacks
     };
   }
 
@@ -1153,5 +1224,67 @@ export class LocalizationSDK {
     this.ekf.state.set([6, 0], this.pdr.orientation.yaw);
     
     console.log(`[CALIBRATION DYNAMIQUE] Trajectoire corrigée: (${correctedX.toFixed(2)}, ${correctedY.toFixed(2)})`);
+  }
+
+  /**
+   * *** NOUVEAU: Méthodes d'export et gestion des logs ***
+   */
+
+  /**
+   * Export des logs de la session courante
+   */
+  async exportCurrentSession(format = 'json') {
+    if (!this.logger) {
+      throw new Error('Logger non initialisé');
+    }
+    return await this.logger.exportSession(null, format);
+  }
+
+  /**
+   * Export d'une session spécifique
+   */
+  async exportSession(sessionId, format = 'json') {
+    if (!this.logger) {
+      throw new Error('Logger non initialisé');
+    }
+    return await this.logger.exportSession(sessionId, format);
+  }
+
+  /**
+   * Liste des sessions de logs disponibles
+   */
+  async getLogSessions() {
+    if (!this.logger) {
+      return [];
+    }
+    return await this.logger.listSessions();
+  }
+
+  /**
+   * Statut du système de logging
+   */
+  getLoggingStatus() {
+    if (!this.logger) {
+      return { isLogging: false, currentSession: null };
+    }
+    return this.logger.getStatus();
+  }
+
+  /**
+   * Activation/désactivation des logs console
+   */
+  setConsoleLogging(enabled) {
+    if (this.logger) {
+      this.logger.setConsoleLogging(enabled);
+    }
+  }
+
+  /**
+   * Nettoyage manuel des logs
+   */
+  async cleanupLogs() {
+    if (this.logger) {
+      await this.logger.cleanupOldLogs();
+    }
   }
 } 
