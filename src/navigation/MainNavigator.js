@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import MapScreen from '../screens/MapScreen';
 import SensorsScreen from '../screens/SensorsScreen';
 import AnalyticsScreen from '../screens/AnalyticsScreen';
+import AccountScreen from '../screens/AccountScreen';
 
 const Tab = createBottomTabNavigator();
 
@@ -21,6 +22,8 @@ export default function MainNavigator() {
             iconName = focused ? 'hardware-chip' : 'hardware-chip-outline';
           } else if (route.name === 'Analytique') {
             iconName = focused ? 'analytics' : 'analytics-outline';
+          } else if (route.name === 'Mon Compte') {
+            iconName = focused ? 'person' : 'person-outline';
           }
 
           return <Ionicons name={iconName} size={size} color={color} />;
@@ -61,6 +64,14 @@ export default function MainNavigator() {
         component={AnalyticsScreen}
         options={{
           headerTitle: 'Analyse Performance'
+        }}
+      />
+
+      <Tab.Screen 
+        name="Mon Compte" 
+        component={AccountScreen}
+        options={{
+          headerTitle: 'Mon Compte'
         }}
       />
     </Tab.Navigator>

@@ -9,6 +9,7 @@ import {
   PanResponder,
   Modal,
   ActivityIndicator,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, Pattern } from 'react-native-svg';
@@ -16,6 +17,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Battery from 'expo-battery';
 
 import { useLocalization } from '../context/LocalizationContext';
+import { useAuth } from '../context/AuthContext';
 import { LocalizationSDK } from '../algorithms/LocalizationSDK';
 import { ScaleConverter } from '../utils/ScaleConverter';
 
@@ -31,6 +33,7 @@ const MAX_ZOOM = 15;
 
 export default function MapScreen() {
   const { state, actions } = useLocalization();
+  const { state: authState, actions: authActions } = useAuth();
   const [localizationSDK] = useState(() => new LocalizationSDK({
     userHeight: 1.7,
     adaptiveSampling: true,
@@ -67,6 +70,13 @@ export default function MapScreen() {
     progress: 0,
     message: '',
     step: ''
+  });
+
+  // *** NOUVEAU: État pour la sauvegarde de trajet ***
+  const [saveTrajectoryModal, setSaveTrajectoryModal] = useState({
+    visible: false,
+    trajectoryName: '',
+    isLoading: false
   });
   
   // Référence pour les gestes de pan
@@ -305,6 +315,93 @@ export default function MapScreen() {
     scaleConverter.setViewOffset(targetOffset);
     
     console.log(`[VIEW] Centré sur trajectoire: centre=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), offset=(${targetOffset.x.toFixed(1)}, ${targetOffset.y.toFixed(1)})`);
+  };
+
+  /**
+   * *** NOUVEAU: Sauvegarder le trajet actuel ***
+   */
+  const handleSaveTrajectory = () => {
+    if (!authState.isAuthenticated) {
+      Alert.alert(
+        'Connexion requise',
+        'Vous devez être connecté pour sauvegarder vos trajets.',
+        [
+          { text: 'Annuler', style: 'cancel' },
+          { text: 'Se connecter', onPress: () => {
+            // L'utilisateur peut naviguer vers l'onglet Mon Compte
+            Alert.alert('Info', 'Rendez-vous dans l\'onglet "Mon Compte" pour vous connecter.');
+          }}
+        ]
+      );
+      return;
+    }
+
+    if (!state.trajectory || state.trajectory.length === 0) {
+      Alert.alert('Erreur', 'Aucun trajet à sauvegarder');
+      return;
+    }
+
+    // Ouvrir le modal de sauvegarde
+    setSaveTrajectoryModal({
+      visible: true,
+      trajectoryName: `Trajet ${new Date().toLocaleDateString()}`,
+      isLoading: false
+    });
+  };
+
+  /**
+   * *** NOUVEAU: Confirmer la sauvegarde du trajet ***
+   */
+  const confirmSaveTrajectory = async () => {
+    if (!saveTrajectoryModal.trajectoryName.trim()) {
+      Alert.alert('Erreur', 'Veuillez donner un nom au trajet');
+      return;
+    }
+
+    setSaveTrajectoryModal(prev => ({ ...prev, isLoading: true }));
+
+    try {
+      // Générer le chemin SVG
+      const svgPath = generateSVGPath();
+      
+      // Préparer les données du trajet
+      const trajectoryData = {
+        name: saveTrajectoryModal.trajectoryName.trim(),
+        points: state.trajectory,
+        svgPath: svgPath,
+        stepCount: state.stepCount || 0,
+        distance: state.distance || 0,
+        duration: 0 // TODO: calculer la durée réelle
+      };
+
+      // Sauvegarder via le contexte d'authentification
+      const result = await authActions.saveTrajectory(trajectoryData);
+
+      if (result.success) {
+        setSaveTrajectoryModal({ visible: false, trajectoryName: '', isLoading: false });
+        Alert.alert('Succès', `Trajet "${trajectoryData.name}" sauvegardé !`);
+      } else {
+        throw new Error(result.error || 'Erreur de sauvegarde');
+      }
+    } catch (error) {
+      console.error('Erreur sauvegarde trajet:', error);
+      Alert.alert('Erreur', error.message || 'Impossible de sauvegarder le trajet');
+      setSaveTrajectoryModal(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Générer le chemin SVG de la trajectoire ***
+   */
+  const generateSVGPath = () => {
+    if (!state.trajectory || state.trajectory.length < 2) {
+      return '';
+    }
+
+    return state.trajectory.map((point, index) => {
+      const svgPos = worldToSVG({ x: point.x, y: point.y });
+      return `${index === 0 ? 'M' : 'L'} ${svgPos.x.toFixed(2)} ${svgPos.y.toFixed(2)}`;
+    }).join(' ');
   };
 
   /**
@@ -784,6 +881,15 @@ export default function MapScreen() {
           <Ionicons name="refresh" size={24} color="#00ff88" />
         </TouchableOpacity>
         
+        {/* *** NOUVEAU: Bouton sauvegarder trajet *** */}
+        <TouchableOpacity 
+          style={[styles.controlButton, (!state.trajectory || state.trajectory.length === 0) && styles.disabledControlButton]} 
+          onPress={handleSaveTrajectory}
+          disabled={!state.trajectory || state.trajectory.length === 0}
+        >
+          <Ionicons name="save" size={24} color={(!state.trajectory || state.trajectory.length === 0) ? "#666666" : "#00ff88"} />
+        </TouchableOpacity>
+        
         {/* *** NOUVEAU: Bouton centrer sur trajectoire *** */}
         <TouchableOpacity 
           style={styles.controlButton} 
@@ -847,6 +953,82 @@ export default function MapScreen() {
                 <Text style={styles.successText}>Calibration terminée !</Text>
               </View>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* *** NOUVEAU: Modal de sauvegarde de trajet *** */}
+      <Modal
+        visible={saveTrajectoryModal.visible}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.saveModalOverlay}>
+          <View style={styles.saveModalContent}>
+            <View style={styles.saveModalHeader}>
+              <Ionicons name="save" size={32} color="#00ff88" />
+              <Text style={styles.saveModalTitle}>Sauvegarder le trajet</Text>
+            </View>
+            
+            <Text style={styles.saveModalSubtitle}>
+              Donnez un nom à votre trajet pour le retrouver facilement
+            </Text>
+            
+            <View style={styles.saveInputContainer}>
+              <Ionicons name="map" size={20} color="#666666" style={styles.saveInputIcon} />
+              <TextInput
+                style={styles.saveTextInput}
+                placeholder="Nom du trajet"
+                placeholderTextColor="#666666"
+                value={saveTrajectoryModal.trajectoryName}
+                onChangeText={(text) => setSaveTrajectoryModal(prev => ({ ...prev, trajectoryName: text }))}
+                autoFocus={true}
+                selectTextOnFocus={true}
+              />
+            </View>
+
+            <View style={styles.trajectoryPreview}>
+              <Text style={styles.previewTitle}>Aperçu du trajet :</Text>
+              <View style={styles.previewStats}>
+                <View style={styles.previewStat}>
+                  <Ionicons name="footsteps" size={16} color="#00ff88" />
+                  <Text style={styles.previewStatText}>{state.stepCount || 0} pas</Text>
+                </View>
+                <View style={styles.previewStat}>
+                  <Ionicons name="resize" size={16} color="#00ff88" />
+                  <Text style={styles.previewStatText}>{(state.distance || 0).toFixed(1)} m</Text>
+                </View>
+                <View style={styles.previewStat}>
+                  <Ionicons name="location" size={16} color="#00ff88" />
+                  <Text style={styles.previewStatText}>{state.trajectory?.length || 0} points</Text>
+                </View>
+              </View>
+            </View>
+            
+            <View style={styles.saveModalActions}>
+              <TouchableOpacity
+                style={styles.saveModalCancelButton}
+                onPress={() => setSaveTrajectoryModal({ visible: false, trajectoryName: '', isLoading: false })}
+                disabled={saveTrajectoryModal.isLoading}
+              >
+                <Text style={styles.saveModalCancelText}>Annuler</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.saveModalSaveButton, saveTrajectoryModal.isLoading && styles.disabledButton]}
+                onPress={confirmSaveTrajectory}
+                disabled={saveTrajectoryModal.isLoading}
+              >
+                {saveTrajectoryModal.isLoading ? (
+                  <ActivityIndicator color="#000000" size="small" />
+                ) : (
+                  <>
+                    <Ionicons name="checkmark" size={20} color="#000000" />
+                    <Text style={styles.saveModalSaveText}>Sauvegarder</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1032,5 +1214,121 @@ const styles = StyleSheet.create({
     borderColor: '#00ff88',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  disabledControlButton: {
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
+    borderWidth: 2,
+    borderColor: '#666666',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  saveModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  saveModalContent: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 25,
+    margin: 20,
+    minWidth: 300,
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    alignItems: 'center',
+  },
+  saveModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  saveModalTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginLeft: 10,
+  },
+  saveModalSubtitle: {
+    color: '#cccccc',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 15,
+    fontFamily: 'monospace',
+  },
+  saveInputContainer: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  saveInputIcon: {
+    marginRight: 10,
+  },
+  saveTextInput: {
+    flex: 1,
+    color: '#ffffff',
+    fontSize: 14,
+    fontFamily: 'monospace',
+  },
+  trajectoryPreview: {
+    width: '100%',
+    marginBottom: 20,
+  },
+  previewTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  previewStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  previewStat: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  previewStatText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontFamily: 'monospace',
+  },
+  saveModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  saveModalCancelButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    borderRadius: 12,
+    padding: 10,
+  },
+  saveModalCancelText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  saveModalSaveButton: {
+    backgroundColor: '#00ff88',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    borderRadius: 12,
+    padding: 10,
+  },
+  disabledButton: {
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
+    borderWidth: 2,
+    borderColor: '#666666',
+    borderRadius: 12,
+    padding: 10,
+  },
+  saveModalSaveText: {
+    color: '#000000',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
 }); 

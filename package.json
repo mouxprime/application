@@ -17,8 +17,10 @@
     "@react-navigation/stack": "^7.3.2",
     "expo": "~53.0.9",
     "expo-battery": "~9.1.4",
+    "expo-file-system": "~18.1.10",
     "expo-haptics": "^14.1.4",
     "expo-sensors": "^14.1.4",
+    "expo-sharing": "~13.1.5",
     "expo-status-bar": "~2.2.3",
     "mathjs": "^14.5.0",
     "react": "19.0.0",
@@ -26,9 +28,7 @@
     "react-native-safe-area-context": "5.4.0",
     "react-native-screens": "^4.10.0",
     "react-native-svg": "15.11.2",
-    "react-native-vector-icons": "^10.2.0",
-    "expo-file-system": "~18.1.10",
-    "expo-sharing": "~13.1.5"
+    "react-native-vector-icons": "^10.2.0"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
