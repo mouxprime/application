@@ -69,7 +69,7 @@ const initialState = {
     kalmanMeasurementNoise: 0.5,
     deadReckoningThreshold: 0.05, // m/s²
     headingSmoothing: 0.9,
-    trajectoryMaxLength: 1000
+    trajectoryMaxLength: 5000
   }
 };
 

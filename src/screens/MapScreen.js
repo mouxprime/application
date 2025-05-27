@@ -108,32 +108,18 @@ export default function MapScreen() {
 
   // Configuration des callbacks du SDK
   useEffect(() => {
-    // *** CORRECTION: Throttling des mises à jour pour éviter les boucles infinies ***
-    let lastUpdateTime = 0;
-    const UPDATE_THROTTLE = 100; // Limiter à 10Hz maximum
-    
     localizationSDK.setCallbacks({
       onPositionUpdate: (x, y, theta, mode) => {
-        const now = Date.now();
-        if (now - lastUpdateTime < UPDATE_THROTTLE) {
-          return; // Ignorer si trop fréquent
-        }
-        lastUpdateTime = now;
-        
         // *** NOUVEAU: Stabiliser l'orientation avant mise à jour ***
         stabilizeOrientation(theta);
         
         const pose = { x, y, theta, confidence: localizationSDK.currentState?.confidence || 0 };
         actions.updatePose(pose);
         
-        // *** AMÉLIORATION: Forcer l'ajout de points de trajectoire ***
-        console.log(`[TRAJECTORY ADD] Ajout point: (${x.toFixed(2)}, ${y.toFixed(2)}) - Total: ${(state.trajectory?.length || 0) + 1}`);
-        actions.addTrajectoryPoint({
-          x, y, timestamp: now,
-          confidence: pose.confidence
-        });
+        // *** SUPPRIMÉ: Ajout automatique de points de trajectoire ***
+        // Les points seront ajoutés seulement lors de la détection de pas
         
-        // Mise à jour des métriques PDR avec détection verticale (throttled)
+        // Mise à jour des métriques PDR avec détection verticale
         const currentState = localizationSDK.currentState;
         if (currentState) {
           const verticalMetrics = localizationSDK.pdr?.getVerticalDetectionMetrics();
@@ -157,6 +143,18 @@ export default function MapScreen() {
       onEnergyStatusChanged: (energyStatus) => {
         console.log('État énergétique:', energyStatus);
         actions.updatePDRMetrics({ energyLevel: energyStatus.energyLevel || 1.0 });
+      },
+      // *** NOUVEAU: Callback spécifique pour les pas détectés ***
+      onStepDetected: (stepCount, stepLength, x, y, theta) => {
+        console.log(`[STEP DÉTECTÉ] #${stepCount} - Ajout point trajectoire: (${x.toFixed(2)}, ${y.toFixed(2)})`);
+        
+        // Ajouter un point de trajectoire seulement lors d'un pas
+        const now = Date.now();
+        actions.addTrajectoryPoint({
+          x, y, timestamp: now,
+          confidence: localizationSDK.currentState?.confidence || 0,
+          stepNumber: stepCount
+        });
       },
       onCalibrationProgress: (progress) => {
         console.log('Progression calibration:', progress);
@@ -276,6 +274,40 @@ export default function MapScreen() {
   };
 
   /**
+   * *** NOUVEAU: Centrer la vue sur la trajectoire ***
+   */
+  const centerOnTrajectory = () => {
+    if (!state.trajectory || state.trajectory.length === 0) return;
+    
+    // Calculer les limites de la trajectoire
+    const xs = state.trajectory.map(p => p.x);
+    const ys = state.trajectory.map(p => p.y);
+    
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    
+    // Centre de la trajectoire
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    
+    // Convertir en coordonnées écran
+    const centerScreen = scaleConverter.worldToScreen(centerX, centerY);
+    
+    // Calculer l'offset nécessaire pour centrer
+    const targetOffset = {
+      x: (svgWidth / 2) - centerScreen.x + viewOffset.x,
+      y: (svgHeight / 2) - centerScreen.y + viewOffset.y
+    };
+    
+    setViewOffset(targetOffset);
+    scaleConverter.setViewOffset(targetOffset);
+    
+    console.log(`[VIEW] Centré sur trajectoire: centre=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), offset=(${targetOffset.x.toFixed(1)}, ${targetOffset.y.toFixed(1)})`);
+  };
+
+  /**
    * Conversion des coordonnées monde vers l'écran SVG
    */
   const worldToSVG = (worldPos) => {
@@ -373,29 +405,25 @@ export default function MapScreen() {
    */
   const renderTrajectory = () => {
     if (!state.trajectory || state.trajectory.length < 2) {
-      console.log(`[TRAJECTORY DEBUG] Trajectoire vide ou insuffisante: ${state.trajectory?.length || 0} points`);
       return null;
     }
     
-    console.log(`[TRAJECTORY DEBUG] Rendu ${state.trajectory.length} points de trajectoire`);
-    console.log(`[TRAJECTORY DEBUG] Premiers points:`, state.trajectory.slice(0, 3).map(p => `(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`));
-    console.log(`[TRAJECTORY DEBUG] Derniers points:`, state.trajectory.slice(-3).map(p => `(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`));
+    // *** LOGS RÉDUITS: Seulement pour les changements significatifs ***
+    if (state.trajectory.length % 5 === 0) { // Log seulement tous les 5 points
+      console.log(`[TRAJECTORY] ${state.trajectory.length} points - Dernier: (${state.trajectory[state.trajectory.length - 1].x.toFixed(2)}, ${state.trajectory[state.trajectory.length - 1].y.toFixed(2)})`);
+    }
     
     const pathData = state.trajectory.map((point, index) => {
       const svgPos = worldToSVG({ x: point.x, y: point.y });
       return `${index === 0 ? 'M' : 'L'} ${svgPos.x} ${svgPos.y}`;
     }).join(' ');
     
-    // Debug des coordonnées SVG
-    const firstSvgPos = worldToSVG({ x: state.trajectory[0].x, y: state.trajectory[0].y });
-    const lastSvgPos = worldToSVG({ x: state.trajectory[state.trajectory.length - 1].x, y: state.trajectory[state.trajectory.length - 1].y });
-    console.log(`[TRAJECTORY DEBUG] SVG coords - Premier: (${firstSvgPos.x}, ${firstSvgPos.y}), Dernier: (${lastSvgPos.x}, ${lastSvgPos.y})`);
-    
     return (
       <G>
         {/* *** AMÉLIORATION: Cercles plus visibles pour marquer chaque point *** */}
         {state.trajectory.map((point, index) => {
           const svgPos = worldToSVG({ x: point.x, y: point.y });
+          
           return (
             <Circle
               key={`trajectory-point-${index}`}
@@ -754,6 +782,15 @@ export default function MapScreen() {
         
         <TouchableOpacity style={styles.controlButton} onPress={resetPosition}>
           <Ionicons name="refresh" size={24} color="#00ff88" />
+        </TouchableOpacity>
+        
+        {/* *** NOUVEAU: Bouton centrer sur trajectoire *** */}
+        <TouchableOpacity 
+          style={styles.controlButton} 
+          onPress={centerOnTrajectory}
+          disabled={!state.trajectory || state.trajectory.length === 0}
+        >
+          <Ionicons name="locate" size={24} color="#00ff88" />
         </TouchableOpacity>
         
         <TouchableOpacity style={styles.controlButton} onPress={handleZoomOut}>

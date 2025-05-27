@@ -246,7 +246,8 @@ export class PedestrianDeadReckoning {
     if (magnitudes.length > 0) {
       const lastMagnitude = magnitudes[magnitudes.length - 1];
       const maxMagnitude = Math.max(...magnitudes);
-      //console.log(`[STEP DEBUG] Magnitude actuelle: ${lastMagnitude.toFixed(3)}, Max: ${maxMagnitude.toFixed(3)}, Échantillons: ${magnitudes.length}`);
+      // *** SUPPRIMÉ: Log trop verbeux ***
+      // console.log(`[STEP DEBUG] Magnitude actuelle: ${lastMagnitude.toFixed(3)}, Max: ${maxMagnitude.toFixed(3)}, Échantillons: ${magnitudes.length}`);
     }
     
     // 2. Filtrage passe-haut (supprimer composante quasi-statique)
@@ -259,31 +260,34 @@ export class PedestrianDeadReckoning {
     
     // *** DEBUG: Log des pics détectés ***
     if (peaks.length > 0) {
-      console.log(`[STEP DEBUG] ${peaks.length} pics détectés:`, peaks.map(p => p.toFixed(3)));
+      // *** SUPPRIMÉ: Log trop verbeux ***
+      // console.log(`[STEP DEBUG] ${peaks.length} pics détectés:`, peaks.map(p => p.toFixed(3)));
     }
     
     // 4. *** SIMPLIFICATION: Validation temporelle basique ***
-    const minStepInterval = 100; // *** RÉDUIT ENCORE: 100ms minimum entre pas ***
+    const minStepInterval = 500; // *** AUGMENTÉ: 500ms minimum entre pas (plus réaliste) ***
     const timeSinceLastStep = now - this.lastStepTime;
     
     if (peaks.length > 0 && timeSinceLastStep > minStepInterval) {
       const bestPeak = peaks[peaks.length - 1];
       
-      // *** SEUIL TRÈS BAS pour test ***
-      const minPeakThreshold = 0.03; // *** RÉDUIT ENCORE: 0.03g minimum ***
+      // *** SEUIL PLUS STRICT pour éviter les faux positifs ***
+      const minPeakThreshold = 0.08; // *** AUGMENTÉ: de 0.03 à 0.08g ***
       
       console.log(`[STEP DEBUG] Meilleur pic: ${bestPeak.toFixed(3)}, Seuil: ${minPeakThreshold}, Temps: ${timeSinceLastStep}ms`);
       
       if (bestPeak >= minPeakThreshold) {
-        console.log(`[STEP DÉTECTÉ] pic=${bestPeak.toFixed(3)}, interval=${timeSinceLastStep}ms`);
+        console.log(`[STEP DÉTECTÉ] #${this.stepCount + 1} - pic=${bestPeak.toFixed(3)}, interval=${timeSinceLastStep}ms`);
         
         // Pas détecté validé
         this.handleStepDetected(bestPeak, magnitudes[magnitudes.length - 1]);
       } else {
-        console.log(`[STEP REJETÉ] Pic trop faible: ${bestPeak.toFixed(3)} < ${minPeakThreshold}`);
+        // *** SUPPRIMÉ: Log trop verbeux pour les rejets de seuil ***
+        // console.log(`[STEP REJETÉ] Pic trop faible: ${bestPeak.toFixed(3)} < ${minPeakThreshold}`);
       }
     } else if (peaks.length > 0) {
-      console.log(`[STEP REJETÉ] Intervalle trop court: ${timeSinceLastStep}ms < ${minStepInterval}ms (pic=${peaks[peaks.length - 1].toFixed(3)})`);
+      // *** SUPPRIMÉ: Log trop verbeux pour les rejets d'intervalle ***
+      // console.log(`[STEP REJETÉ] Intervalle trop court: ${timeSinceLastStep}ms < ${minStepInterval}ms (pic=${peaks[peaks.length - 1].toFixed(3)})`);
     }
   }
 
@@ -298,27 +302,31 @@ export class PedestrianDeadReckoning {
     const variance = data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / data.length;
     const std = Math.sqrt(variance);
     
-    // Seuil simple: moyenne + 1.5 * écart-type
-    const threshold = mean + 1.5 * std;
+    // *** SEUIL PLUS STRICT: moyenne + 2.5 * écart-type au lieu de 1.5 ***
+    const threshold = mean + 2.5 * std;
     
-    // Contraintes raisonnables
-    const finalThreshold = Math.max(0.1, Math.min(0.8, threshold));
+    // Contraintes plus strictes
+    const finalThreshold = Math.max(0.15, Math.min(1.2, threshold)); // *** AUGMENTÉ: min de 0.1 à 0.15 ***
     
-    // Détection de pics locaux simples
+    // Détection de pics locaux plus stricte
     const peaks = [];
-    for (let i = 2; i < data.length - 2; i++) {
+    for (let i = 3; i < data.length - 3; i++) { // *** FENÊTRE PLUS LARGE: de 2 à 3 ***
       const current = data[i];
       const prev1 = data[i - 1];
       const prev2 = data[i - 2];
+      const prev3 = data[i - 3];
       const next1 = data[i + 1];
       const next2 = data[i + 2];
+      const next3 = data[i + 3];
       
-      // Conditions simples pour un pic
+      // Conditions plus strictes pour un pic
       const isLocalMaximum = current > prev1 && current > next1 && 
-                            current > prev2 && current > next2;
+                            current > prev2 && current > next2 &&
+                            current > prev3 && current > next3; // *** PLUS STRICT ***
       const isAboveThreshold = current > finalThreshold;
+      const isSignificantPeak = current > (mean + 1.5 * std); // *** VALIDATION SUPPLÉMENTAIRE ***
       
-      if (isLocalMaximum && isAboveThreshold) {
+      if (isLocalMaximum && isAboveThreshold && isSignificantPeak) {
         peaks.push(current);
       }
     }

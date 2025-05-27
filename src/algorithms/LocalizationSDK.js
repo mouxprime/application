@@ -115,7 +115,8 @@ export class LocalizationSDK {
       onCalibrationRequired: null,
       onEnergyStatusChanged: null,
       onDataUpdate: null,
-      onCalibrationProgress: null
+      onCalibrationProgress: null,
+      onStepDetected: null        // *** NOUVEAU: Callback pour détection de pas ***
     };
 
     // Timer pour les callbacks utilisateur
@@ -230,8 +231,9 @@ export class LocalizationSDK {
       // Démarrage des capteurs
       await this.sensorManager.startAll();
 
+      // *** CORRECTION: Timer redondant - callbacks immédiats depuis PDR ***
       // Configuration du timer de mise à jour utilisateur
-      this.startUserUpdateTimer();
+      // this.startUserUpdateTimer();
 
       this.isTracking = true;
       console.log('Tracking démarré');
@@ -280,6 +282,19 @@ export class LocalizationSDK {
       onStepDetected: (stepCount, stepLength) => {
         this.currentState.stepCount = stepCount;
         this.performance.updateCount++;
+        
+        // *** NOUVEAU: Transmettre la position lors de la détection de pas ***
+        if (this.callbacks.onStepDetected) {
+          const currentPos = this.currentState.position;
+          const currentTheta = this.currentState.orientation.yaw;
+          this.callbacks.onStepDetected(
+            stepCount, 
+            stepLength, 
+            currentPos.x, 
+            currentPos.y, 
+            currentTheta
+          );
+        }
       },
       onModeChanged: (mode, features) => {
         this.currentState.mode = mode;
@@ -290,7 +305,17 @@ export class LocalizationSDK {
         }
       },
       onPositionUpdate: (x, y, theta, mode) => {
-        // Mise à jour via PDR - sera fusionnée dans l'EKF
+        // *** CORRECTION: Transmettre immédiatement la mise à jour de position ***
+        // Mettre à jour l'état interne
+        this.currentState.position.x = x;
+        this.currentState.position.y = y;
+        this.currentState.orientation.yaw = theta;
+        this.currentState.mode = mode;
+        
+        // *** NOUVEAU: Callback immédiat vers MapScreen pour traçage temps réel ***
+        if (this.callbacks.onPositionUpdate) {
+          this.callbacks.onPositionUpdate(x, y, theta, mode);
+        }
       }
     });
 
@@ -685,14 +710,15 @@ export class LocalizationSDK {
   /**
    * Configuration des callbacks utilisateur
    */
-  setCallbacks({ onPositionUpdate, onModeChanged, onCalibrationRequired, onEnergyStatusChanged, onDataUpdate, onCalibrationProgress }) {
+  setCallbacks({ onPositionUpdate, onModeChanged, onCalibrationRequired, onEnergyStatusChanged, onDataUpdate, onCalibrationProgress, onStepDetected }) {
     this.callbacks = {
       onPositionUpdate: onPositionUpdate || this.callbacks.onPositionUpdate,
       onModeChanged: onModeChanged || this.callbacks.onModeChanged,
       onCalibrationRequired: onCalibrationRequired || this.callbacks.onCalibrationRequired,
       onEnergyStatusChanged: onEnergyStatusChanged || this.callbacks.onEnergyStatusChanged,
       onDataUpdate: onDataUpdate || this.callbacks.onDataUpdate,
-      onCalibrationProgress: onCalibrationProgress || this.callbacks.onCalibrationProgress
+      onCalibrationProgress: onCalibrationProgress || this.callbacks.onCalibrationProgress,
+      onStepDetected: onStepDetected || this.callbacks.onStepDetected    // *** NOUVEAU ***
     };
   }
 
