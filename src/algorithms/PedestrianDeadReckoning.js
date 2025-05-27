@@ -1,7 +1,3 @@
-import { create, all } from 'mathjs';
-
-const math = create(all);
-
 /**
  * Système de Dead Reckoning Piéton (PDR) avancé avec détection d'activité et ZUPT
  * Intégration AttitudeTracker pour orientation adaptative (plus d'OrientationCalibrator fixe)
@@ -11,7 +7,7 @@ export class PedestrianDeadReckoning {
     this.config = {
       // Paramètres de détection de pas adaptés pour poche
       stepDetectionWindow: config.stepDetectionWindow || 30, // 30 échantillons (augmenté)
-      stepThreshold: config.stepThreshold || 1.0, // 1.0 m/s² (réduit pour plus de sensibilité)
+      stepThreshold: config.stepThreshold || 0.5, // 0.5 m/s² (réduit pour plus de sensibilité)
       
       // Paramètres de longueur de pas
       defaultStepLength: config.defaultStepLength || 0.7, // mètres
@@ -49,7 +45,7 @@ export class PedestrianDeadReckoning {
     };
 
     // État du système
-    this.currentMode = 'stationary'; // stationary, walking, running (crawling supprimé)
+    this.currentMode = 'walking'; // *** CORRECTION: Démarrer en walking au lieu de stationary ***
     this.currentSampleRate = this.config.baseSampleRate;
     this.lastStepTime = 0;
     this.stepCount = 0;
@@ -152,11 +148,9 @@ export class PedestrianDeadReckoning {
     // Adaptation du taux d'échantillonnage
     this.adaptSampleRate();
     
-    // *** MODIFICATION 1: Détection de pas conditionnelle après calcul des métriques ***
-    // Les métriques sont maintenant calculées avant la classification
-    if (this.currentMode === 'walking' || this.currentMode === 'running') {
-      this.detectSteps(accelerometer);
-    }
+    // *** CORRECTION CRITIQUE: Toujours essayer de détecter des pas pour sortir du cercle vicieux ***
+    // La détection doit être active même en mode stationary pour permettre la transition
+    this.detectSteps(accelerometer);
     
     // Zero-Velocity Updates
     this.processZUPT();
@@ -365,7 +359,9 @@ export class PedestrianDeadReckoning {
       sample => sample.timestamp > cutoffTime
     );
 
-    if (this.accelerationHistory.length < 20) return; // Pas assez de données
+    if (this.accelerationHistory.length < 20) {
+      return; // Pas assez de données
+    }
 
     // *** NOUVEAU: Choix de la méthode de détection ***
     const shouldUseVerticalDetection = this.shouldUseVerticalDetection();
@@ -468,18 +464,21 @@ export class PedestrianDeadReckoning {
     
     const now = Date.now();
     
-    // 4. Validation temporelle anti-rebond
-    const minStepInterval = this.currentMode === 'running' ? 250 : 400; // ms
+    // 4. *** CORRECTION RENFORCÉE: Validation temporelle anti-rebond beaucoup plus stricte ***
+    const minStepInterval = this.currentMode === 'running' ? 400 : 600; // Augmenté: 400ms course, 600ms marche
+    const timeSinceLastStep = now - this.lastStepTime;
     
-    if (peaks.length > 0 && (now - this.lastStepTime) > minStepInterval) {
-      // Pas détecté validé
-      this.handleStepDetected(peaks[peaks.length - 1], magnitudes[magnitudes.length - 1]);
+    if (peaks.length > 0 && timeSinceLastStep > minStepInterval) {
+      const bestPeak = peaks[peaks.length - 1];
       
-      // *** DEBUG: Log périodique avec nouvelles métriques ***
-      if (this.stepCount % 5 === 0) {
-        const adaptiveThreshold = this.getLastAdaptiveThreshold();
-        const method = this.verticalDetectionState.fallbackActive ? 'MAGNITUDE (fallback)' : 'MAGNITUDE';
-        console.log(`[STEP ${method}] Pas ${this.stepCount}: peak=${peaks[peaks.length - 1].toFixed(2)}, seuil=${adaptiveThreshold.toFixed(2)}, mode=${this.currentMode}`);
+      // *** NOUVEAU: Filtrage supplémentaire des pics trop faibles renforcé ***
+      const minPeakThreshold = this.currentMode === 'running' ? 0.20 : 0.12; // Augmenté: seuils minimums plus élevés
+      
+      if (bestPeak >= minPeakThreshold) {
+        console.log(`[STEP CANDIDATE] pic=${bestPeak.toFixed(3)}, interval=${timeSinceLastStep}ms`);
+        
+        // Pas détecté validé
+        this.handleStepDetected(bestPeak, magnitudes[magnitudes.length - 1]);
       }
     }
   }
@@ -524,45 +523,61 @@ export class PedestrianDeadReckoning {
     
     // Si pas de seuil fourni, calcul automatique
     if (!threshold) {
+      // *** CORRECTION: Calcul natif JavaScript au lieu de mathjs ***
       const mean = data.reduce((a, b) => a + b) / data.length;
       const variance = data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / data.length;
       const std = Math.sqrt(variance);
       
-      // *** SEUIL ADAPTATIF SELON MODE ***
+      // *** SEUIL ADAPTATIF SELON MODE (ENCORE PLUS RENFORCÉ CONTRE SUR-DÉTECTION) ***
       let k = 1.0; // Coefficient multiplicateur par défaut
       switch (this.currentMode) {
         case 'running':
-          k = 0.8; // Plus sensible pour la course
+          k = 1.2; // Plus conservateur pour la course (était 1.0)
           break;
         case 'walking':
-          k = 1.0; // Standard pour la marche
+          k = 1.1; // *** CORRECTION: Plus conservateur pour marche (était 0.9) ***
           break;
         case 'crawling':
           k = 1.5; // Moins sensible pour ramper
           break;
         default:
-          k = 1.2;
+          k = 1.2; // *** CORRECTION: Beaucoup plus conservateur par défaut (était 1.0) ***
+      }
+      
+      // *** CORRECTION: Seuil encore moins permissif pour les premiers pas ***
+      if (this.stepCount < 10) {
+        k *= 0.9; // Réduire de 10% au lieu de 20%
       }
       
       threshold = mean + k * std;
       
-      // Contraintes pour éviter les extrêmes
-      threshold = Math.max(0.1, Math.min(2.0, threshold));
+      // *** CORRECTION: Contraintes encore plus strictes pour éviter extrêmes ***
+      threshold = Math.max(0.12, Math.min(1.0, threshold)); // Plus strict: 0.12-1.0 au lieu de 0.08-1.2
       this._lastAdaptiveThreshold = threshold; // Stockage pour debug
     }
     
+    // *** CORRECTION: Calcul natif de la moyenne pour isStrongPeak ***
+    const mean = data.reduce((a, b) => a + b) / data.length;
+    const variance = data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / data.length;
+    const std = Math.sqrt(variance);
+    
     // Détection de pics locaux
     const peaks = [];
-    for (let i = 1; i < data.length - 1; i++) {
+    for (let i = 2; i < data.length - 2; i++) { // *** CORRECTION: Fenêtre plus large (i=2 au lieu de i=1) ***
       const current = data[i];
-      const prev = data[i - 1];
-      const next = data[i + 1];
+      const prev1 = data[i - 1];
+      const prev2 = data[i - 2];
+      const next1 = data[i + 1];
+      const next2 = data[i + 2];
       
-      // Conditions pour un pic valide
-      const isLocalMaximum = current > prev && current > next;
+      // *** CONDITIONS ENCORE PLUS RENFORCÉES pour un pic valide ***
+      const isLocalMaximum = current > prev1 && current > next1 && 
+                            current > prev2 && current > next2; // Pic sur 5 points
       const isAboveThreshold = current > threshold;
+      const isSignificantPeak = current > (prev1 + next1) / 2 * 1.2; // 20% plus haut que ses voisins (était 10%)
+      const isStrongPeak = current > mean + 1.5 * std; // *** CORRECTION: Utilise les variables calculées ci-dessus ***
       
-      if (isLocalMaximum && isAboveThreshold) {
+      if (isLocalMaximum && isAboveThreshold && isSignificantPeak && isStrongPeak) {
         peaks.push(current);
       }
     }
@@ -616,8 +631,6 @@ export class PedestrianDeadReckoning {
       }
     }
   }
-
-
 
   /**
    * *** NOUVEAU: Gestion des transitions de mode (crawling supprimé) ***
@@ -948,22 +961,14 @@ export class PedestrianDeadReckoning {
   handleStepDetected(peakAmplitude, originalMagnitude) {
     const now = Date.now();
     
-    // *** NOUVEAU: Garde-fous physiologiques ***
-    if (!this.validateStepPhysiologically(now)) {
+    // *** CORRECTION: Garde-fous physiologiques uniquement après beaucoup plus de pas ***
+    if (this.stepCount > 10 && !this.validateStepPhysiologically(now)) {
       console.log(`[STEP REJECTED] Garde-fou physiologique - Fréquence trop élevée ou gyro non confirmé`);
       return; // Pas rejeté par les contraintes physiologiques
     }
     
-    // Vérification intervalle temporel (garde-fou existant amélioré)
-    const minInterval = Math.max(
-      this.getPhysiologicalMinInterval(),
-      this.config.physiologicalConstraints.minStepInterval
-    );
-    
-    if ((now - this.lastStepTime) <= minInterval) {
-      console.log(`[STEP REJECTED] Intervalle trop court: ${now - this.lastStepTime}ms < ${minInterval}ms`);
-      return; // Trop tôt pour un nouveau pas
-    }
+    // *** CORRECTION: Supprimer la double vérification d'intervalle ***
+    // L'intervalle est déjà vérifié dans detectStepsMagnitude
     
     this.stepCount++;
     this.lastStepTime = now;
@@ -1216,8 +1221,6 @@ export class PedestrianDeadReckoning {
     return stepDistance;
   }
 
-
-
   /**
    * *** NOUVEAU: Activation/désactivation de la classification automatique ***
    */
@@ -1307,7 +1310,7 @@ export class PedestrianDeadReckoning {
      const MAX_FREQ = {
        walking: 4.0,   // Augmenté de 3.0 à 4.0 Hz - permet marche rapide jusqu'à 3.5 Hz
        running: 8.0,   // Augmenté de 5.0 à 8.0 Hz - coureur rapide
-       stationary: 0.5 // Très faible pour stationnaire
+       stationary: 3.0 // *** CORRECTION: Augmenté de 0.5 à 3.0 Hz pour permettre marche ***
      }[this.currentMode] || 4.0; // Défaut plus permissif
     
     // Vérifier si la fréquence dépasse la limite
@@ -1351,7 +1354,7 @@ export class PedestrianDeadReckoning {
      const MAX_FREQ = {
        walking: 4.0,   // Augmenté de 3.0 à 4.0 Hz
        running: 8.0,   // Augmenté de 5.0 à 8.0 Hz
-       stationary: 0.5 // Très faible pour stationnaire
+       stationary: 3.0 // *** CORRECTION: Augmenté de 0.5 à 3.0 Hz pour permettre marche ***
      }[this.currentMode] || 4.0;
     
     // Convertir fréquence max en intervalle min (ms)
@@ -1421,7 +1424,7 @@ export class PedestrianDeadReckoning {
      const MAX_FREQ = {
        walking: 4.0,   // Augmenté de 3.0 à 4.0 Hz
        running: 8.0,   // Augmenté de 5.0 à 8.0 Hz
-       stationary: 0.5 // Très faible pour stationnaire
+       stationary: 3.0 // *** CORRECTION: Augmenté de 0.5 à 3.0 Hz pour permettre marche ***
      }[this.currentMode] || 4.0;
     
     return MAX_FREQ;
