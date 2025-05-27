@@ -2,6 +2,7 @@ import { PedestrianDeadReckoning } from './PedestrianDeadReckoning.js';
 import { AdvancedExtendedKalmanFilter } from './AdvancedEKF.js';
 import { AdvancedSensorManager } from '../sensors/AdvancedSensorManager.js';
 import { AttitudeTracker } from './AttitudeTracker.js';
+import { ContinuousOrientationService } from '../services/ContinuousOrientationService.js';
 import { create, all } from 'mathjs';
 
 const math = create(all);
@@ -45,6 +46,39 @@ export class LocalizationSDK {
         minStepsRequired: config.dynamicOrientationCalibration?.minStepsRequired || 3,
         maxOffsetAngle: config.dynamicOrientationCalibration?.maxOffsetAngle || 1.2, // ~70°
         straightLineThreshold: config.dynamicOrientationCalibration?.straightLineThreshold || 0.3 // 30cm de déviation max
+      },
+      
+      // *** NOUVEAU: Configuration orientation continue unifiée ***
+      continuousOrientation: {
+        enabled: config.continuousOrientation?.enabled !== false, // Activé par défaut
+        mode: config.continuousOrientation?.mode || 'continuous_fusion', // Mode par défaut
+        fallbackToSteps: config.continuousOrientation?.fallbackToSteps !== false, // Fallback activé
+        
+        // Configuration fusion continue
+        fusion: {
+          updateRate: config.continuousOrientation?.fusion?.updateRate || 50,
+          smoothingAlpha: config.continuousOrientation?.fusion?.smoothingAlpha || 0.1,
+          magneticConfidenceThreshold: config.continuousOrientation?.fusion?.magneticConfidenceThreshold || 0.3
+        },
+        
+        // Configuration détection posture
+        postureDetection: {
+          enabled: config.continuousOrientation?.postureDetection?.enabled !== false,
+          orientationChangeThreshold: config.continuousOrientation?.postureDetection?.orientationChangeThreshold || Math.PI / 4,
+          accelerationChangeThreshold: config.continuousOrientation?.postureDetection?.accelerationChangeThreshold || 2.0,
+          detectionWindow: config.continuousOrientation?.postureDetection?.detectionWindow || 1000,
+          stabilityRequiredAfterChange: config.continuousOrientation?.postureDetection?.stabilityRequiredAfterChange || 500
+        },
+        
+        // Configuration calibration immédiate
+        immediateCalibration: {
+          enabled: config.continuousOrientation?.immediateCalibration?.enabled !== false,
+          duration: config.continuousOrientation?.immediateCalibration?.duration || 2000,
+          samplesRequired: config.continuousOrientation?.immediateCalibration?.samplesRequired || 20,
+          gravityThreshold: config.continuousOrientation?.immediateCalibration?.gravityThreshold || 0.5,
+          gyroThreshold: config.continuousOrientation?.immediateCalibration?.gyroThreshold || 0.3,
+          autoTriggerOnPostureChange: config.continuousOrientation?.immediateCalibration?.autoTriggerOnPostureChange !== false
+        }
       },
       
       ...config
@@ -145,9 +179,23 @@ export class LocalizationSDK {
     this.manualModeOverride = null; // Mode forcé en manuel
     this.autoModeEnabled = true; // Classification automatique activée
 
+    // *** NOUVEAU: Service d'orientation continue unifié ***
+    this.continuousOrientationService = new ContinuousOrientationService({
+      continuousFusion: this.config.continuousOrientation.fusion,
+      postureDetection: this.config.continuousOrientation.postureDetection,
+      immediateCalibration: this.config.continuousOrientation.immediateCalibration
+    });
+
+    // *** MODIFICATION: AttitudeTracker maintenu pour compatibilité mais délégué au service ***
+    this.attitudeTracker = this.continuousOrientationService.attitudeTracker;
+    
+    // Configuration des callbacks orientation continue
+    this.setupContinuousOrientationCallbacks();
+    
+    // Configuration des callbacks internes existants
     this.setupInternalCallbacks();
-    this.setupAttitudeCallbacks();
-    console.log('LocalizationSDK initialisé avec orientation adaptative et calibration dynamique');
+    
+    console.log('LocalizationSDK initialisé avec orientation continue unifiée');
   }
 
   /**
@@ -858,52 +906,215 @@ export class LocalizationSDK {
   }
 
   /**
-   * Mise à jour principale avec données capteurs
+   * *** NOUVEAU: Configuration des callbacks orientation continue ***
+   */
+  setupContinuousOrientationCallbacks() {
+    // Mise à jour d'orientation continue
+    this.continuousOrientationService.onOrientationUpdate = (orientationData) => {
+      // Mettre à jour l'état courant avec l'orientation continue
+      this.currentState.orientation.yaw = orientationData.heading;
+      this.currentState.orientationConfidence = orientationData.confidence;
+      this.currentState.orientationSource = orientationData.source;
+      
+      // Informer le PDR de la nouvelle orientation si mode continu activé
+      if (this.config.continuousOrientation.enabled && this.config.continuousOrientation.mode === 'continuous_fusion') {
+        this.pdr.orientation.yaw = orientationData.heading;
+      }
+      
+      // Notification callback externe
+      if (this.callbacks.onOrientationUpdate) {
+        this.callbacks.onOrientationUpdate({
+          ...orientationData,
+          timestamp: Date.now()
+        });
+      }
+    };
+
+    // Détection changement de posture
+    this.continuousOrientationService.onPostureChange = (postureData) => {
+      console.log('Changement de posture détecté par le service continu');
+      
+      if (this.callbacks.onPostureChange) {
+        this.callbacks.onPostureChange({
+          ...postureData,
+          action: 'immediate_calibration_triggered'
+        });
+      }
+    };
+
+    // Début de calibration immédiate
+    this.continuousOrientationService.onCalibrationStart = (calibrationData) => {
+      console.log(`Calibration immédiate démarrée: ${calibrationData.reason}`);
+      
+      if (this.callbacks.onCalibrationProgress) {
+        this.callbacks.onCalibrationProgress({
+          step: 'immediate_calibration_start',
+          progress: 0,
+          message: `Calibration immédiate (${calibrationData.reason})`,
+          type: calibrationData.type,
+          estimatedDuration: calibrationData.estimatedDuration
+        });
+      }
+    };
+
+    // Fin de calibration immédiate
+    this.continuousOrientationService.onCalibrationComplete = (calibrationResult) => {
+      console.log(`Calibration immédiate terminée: ${calibrationResult.reason}`);
+      
+      // Appliquer la correction d'orientation si nécessaire
+      if (calibrationResult.type === 'immediate_static' && calibrationResult.rotationMatrix) {
+        this.applyImmediateOrientationCorrection(calibrationResult);
+      }
+      
+      if (this.callbacks.onCalibrationProgress) {
+        this.callbacks.onCalibrationProgress({
+          step: 'immediate_calibration_complete',
+          progress: 1.0,
+          message: `Calibration terminée (${calibrationResult.reason})`,
+          type: calibrationResult.type,
+          duration: calibrationResult.duration
+        });
+      }
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Application correction d'orientation immédiate ***
+   */
+  applyImmediateOrientationCorrection(calibrationResult) {
+    try {
+      // Calculer l'offset d'orientation à partir de la matrice de rotation
+      const rotationMatrix = calibrationResult.rotationMatrix;
+      
+      // Extraire l'angle de rotation autour de l'axe Z (yaw)
+      const yawOffset = Math.atan2(rotationMatrix.get([1, 0]), rotationMatrix.get([0, 0]));
+      
+      // Appliquer la correction à l'état courant
+      this.currentState.orientation.yaw += yawOffset;
+      this.currentState.orientation.yaw = this.normalizeAngle(this.currentState.orientation.yaw);
+      
+      // Corriger le PDR
+      this.pdr.orientation.yaw += yawOffset;
+      this.pdr.orientation.yaw = this.normalizeAngle(this.pdr.orientation.yaw);
+      
+      // Corriger l'EKF
+      const currentEKFYaw = this.ekf.state.get([6, 0]);
+      this.ekf.state.set([6, 0], this.normalizeAngle(currentEKFYaw + yawOffset));
+      
+      console.log(`Correction d'orientation appliquée: ${(yawOffset * 180 / Math.PI).toFixed(1)}°`);
+      
+    } catch (error) {
+      console.error('Erreur application correction orientation:', error);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir l'état de l'orientation continue ***
+   */
+  getContinuousOrientationStatus() {
+    if (!this.config.continuousOrientation.enabled) {
+      return { enabled: false };
+    }
+    
+    return {
+      enabled: true,
+      mode: this.config.continuousOrientation.mode,
+      current: this.continuousOrientationService.getCurrentOrientation(),
+      detailed: this.continuousOrientationService.getDetailedStatus()
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Forcer calibration immédiate ***
+   */
+  forceImmediateCalibration() {
+    if (!this.config.continuousOrientation.enabled) {
+      console.warn('Orientation continue désactivée');
+      return false;
+    }
+    
+    return this.continuousOrientationService.forceCalibration();
+  }
+
+  /**
+   * *** NOUVEAU: Basculer mode orientation ***
+   */
+  setOrientationMode(mode) {
+    const validModes = ['continuous_fusion', 'pdr_gyro', 'dynamic_calibration'];
+    
+    if (!validModes.includes(mode)) {
+      console.error(`Mode orientation invalide: ${mode}`);
+      return false;
+    }
+    
+    this.config.continuousOrientation.mode = mode;
+    
+    // Activer/désactiver le service continu selon le mode
+    const continuousEnabled = mode === 'continuous_fusion';
+    this.continuousOrientationService.setContinuousMode(continuousEnabled);
+    
+    console.log(`Mode orientation changé: ${mode}`);
+    return true;
+  }
+
+  /**
+   * *** NOUVEAU: Mise à jour avec orientation continue ***
    */
   async updateSensorData(sensorData) {
     if (!this.isInitialized) {
-      console.warn('SDK non initialisé - ignoré');
+      console.warn('SDK non initialisé');
       return;
     }
 
     try {
       const timestamp = Date.now();
-      
-      // *** NOUVEAU: Détection de changement de posture ***
-      if (sensorData.accelerometer && sensorData.gyroscope) {
-        const postureChanged = this.detectPostureChange(sensorData.accelerometer, sensorData.gyroscope);
+
+      // *** NOUVEAU: Mise à jour service orientation continue en priorité ***
+      if (this.config.continuousOrientation.enabled && 
+          sensorData.accelerometer && sensorData.gyroscope) {
         
-        // Si changement de posture détecté et déjà calibré, déclencher recalibration
-        if (postureChanged && this.dynamicOrientationState.isCalibrated) {
-          this.triggerRecalibration('posture_change');
-        }
-      }
-      
-      // *** NOUVEAU: Alimenter AttitudeTracker pour orientation adaptative ***
-      if (sensorData.accelerometer && sensorData.gyroscope) {
-        this.attitudeTracker.update(
+        this.continuousOrientationService.update(
           sensorData.accelerometer,
           sensorData.gyroscope,
           sensorData.magnetometer
         );
       }
 
+      // Mise à jour capteurs
+      this.sensorManager.updateSensorData(sensorData);
+
+      // *** MODIFICATION: Utiliser l'orientation du service continu si disponible ***
+      let orientationSource = 'pdr_gyro'; // Par défaut
+      
+      if (this.config.continuousOrientation.enabled && 
+          this.config.continuousOrientation.mode === 'continuous_fusion') {
+        
+        const continuousOrientation = this.continuousOrientationService.getCurrentOrientation();
+        
+        // Utiliser l'orientation continue si confiance suffisante
+        if (continuousOrientation.confidence > this.config.continuousOrientation.fusion.magneticConfidenceThreshold) {
+          this.currentState.orientation.yaw = continuousOrientation.heading;
+          orientationSource = 'continuous_fusion';
+        } else if (this.config.continuousOrientation.fallbackToSteps) {
+          // Fallback vers orientation PDR classique
+          orientationSource = 'pdr_fallback';
+        }
+      }
+
       // Mise à jour PDR avec orientation adaptative
       if (sensorData.accelerometer && sensorData.gyroscope) {
-        // Utiliser l'orientation adaptative si disponible
+        // *** MODIFICATION: Utiliser transformation AttitudeTracker si disponible ***
         let correctedAcceleration = sensorData.accelerometer;
         let correctedGyroscope = sensorData.gyroscope;
         
         // Appliquer transformation d'orientation adaptative si AttitudeTracker est prêt
         const attitudeStatus = this.attitudeTracker.getStatus();
         if (attitudeStatus.quaternion.w !== 1 || attitudeStatus.quaternion.x !== 0) {
-          // AttitudeTracker a une orientation valide
           try {
             correctedAcceleration = this.attitudeTracker.transformAcceleration(sensorData.accelerometer);
             correctedGyroscope = this.attitudeTracker.transformGyroscope(sensorData.gyroscope);
           } catch (error) {
             console.warn('Erreur transformation AttitudeTracker:', error);
-            // Utiliser données brutes en fallback
           }
         }
         
@@ -917,15 +1128,16 @@ export class LocalizationSDK {
       // Obtenir état PDR
       const pdrState = this.pdr.getState();
       
-      // *** NOUVEAU: Traiter la calibration dynamique d'orientation ***
-      this.processDynamicOrientationCalibration(pdrState, sensorData);
+      // *** MODIFICATION: Traiter la calibration dynamique seulement si mode continu désactivé ***
+      if (!this.config.continuousOrientation.enabled || 
+          this.config.continuousOrientation.mode !== 'continuous_fusion') {
+        this.processDynamicOrientationCalibration(pdrState, sensorData);
+      }
       
       // *** AMÉLIORATION: Utiliser le cap compensé du SensorManager ***
       if (sensorData.magnetometer && this.magneticOffset !== undefined) {
-        // Utiliser le cap compensé d'inclinaison si disponible
         const advancedOrientation = this.sensorManager?.getAdvancedOrientation?.();
         if (advancedOrientation && advancedOrientation.isReliable) {
-          // Utiliser l'orientation compensée d'inclinaison
           const correctedHeading = advancedOrientation.headingRad + this.magneticOffset;
           sensorData.magnetometer = {
             ...sensorData.magnetometer,
@@ -934,7 +1146,6 @@ export class LocalizationSDK {
             confidence: advancedOrientation.overallConfidence
           };
         } else {
-          // Fallback vers correction simple
           const originalHeading = Math.atan2(sensorData.magnetometer.y, sensorData.magnetometer.x);
           const correctedHeading = originalHeading + this.magneticOffset;
           sensorData.magnetometer = {
@@ -956,10 +1167,52 @@ export class LocalizationSDK {
       await this.updateEKFMeasurements(sensorData, pdrState, timestamp);
 
       // Fusion finale et notification
-      this.fuseAndNotify(pdrState, timestamp);
+      this.fuseAndNotify(pdrState, timestamp, orientationSource);
 
     } catch (error) {
       console.error('Erreur mise à jour données capteurs:', error);
+    }
+  }
+
+  /**
+   * *** MODIFICATION: Fusion finale avec source d'orientation ***
+   */
+  fuseAndNotify(pdrState, timestamp, orientationSource = 'pdr_gyro') {
+    // Fusion EKF + PDR
+    const ekfState = this.ekf.getState();
+    
+    // *** MODIFICATION: Prioriser l'orientation continue si disponible ***
+    let finalOrientation = ekfState.orientation;
+    
+    if (this.config.continuousOrientation.enabled && orientationSource === 'continuous_fusion') {
+      const continuousOrientation = this.continuousOrientationService.getCurrentOrientation();
+      finalOrientation = continuousOrientation.heading;
+    }
+    
+    // Mise à jour état courant
+    this.currentState = {
+      position: {
+        x: ekfState.position.x,
+        y: ekfState.position.y,
+        z: ekfState.position.z
+      },
+      orientation: {
+        yaw: finalOrientation,
+        pitch: ekfState.orientation.pitch || 0,
+        roll: ekfState.orientation.roll || 0
+      },
+      velocity: ekfState.velocity,
+      mode: pdrState.mode,
+      confidence: ekfState.confidence,
+      orientationSource: orientationSource, // *** NOUVEAU: Source d'orientation ***
+      orientationConfidence: this.config.continuousOrientation.enabled ? 
+        this.continuousOrientationService.getCurrentOrientation().confidence : 0.5,
+      timestamp: timestamp
+    };
+
+    // Notification
+    if (this.callbacks.onPositionUpdate) {
+      this.callbacks.onPositionUpdate(this.currentState);
     }
   }
 
@@ -972,11 +1225,12 @@ export class LocalizationSDK {
   }
 
   /**
-   * Fusion finale et notification (méthode simplifiée pour compatibilité)
+   * Normalisation d'angle [-π, π]
    */
-  fuseAndNotify(pdrState, timestamp) {
-    // Mettre à jour l'état global
-    this.updateCurrentState(pdrState);
+  normalizeAngle(angle) {
+    while (angle > Math.PI) angle -= 2 * Math.PI;
+    while (angle < -Math.PI) angle += 2 * Math.PI;
+    return angle;
   }
 
   /**

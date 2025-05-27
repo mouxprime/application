@@ -137,31 +137,23 @@ export default function AccountScreen() {
 
   // Exporter un trajet
   const handleExportTrajectory = async (trajectory) => {
-    // Ouvrir le modal d'options d'export
-    setExportModal({
-      visible: true,
-      trajectory: trajectory,
-      options: {
+    try {
+      // Afficher un indicateur de chargement
+      Alert.alert('Export en cours', 'Création du fichier SVG...', [], { cancelable: false });
+      
+      // Options par défaut pour l'export
+      const exportOptions = {
         width: 1200,
         height: 800,
         showGrid: false,
         backgroundColor: '#000000',
-        trajectoryColor: '#00ff00'
-      }
-    });
-  };
-
-  // *** NOUVEAU: Confirmer l'export avec les options choisies ***
-  const confirmExportTrajectory = async () => {
-    const { trajectory, options } = exportModal;
-    
-    try {
-      // Fermer le modal et afficher un indicateur de chargement
-      setExportModal({ visible: false, trajectory: null, options: {} });
-      Alert.alert('Export en cours', 'Création du fichier SVG...', [], { cancelable: false });
+        trajectoryColor: '#00ff00',
+        pointColor: '#00ff00',
+        textColor: '#00ff88'
+      };
       
       // Exporter le trajet en fichier SVG
-      const result = await actions.exportTrajectoryAsSVG(trajectory, options);
+      const result = await actions.exportTrajectoryAsSVG(trajectory, exportOptions);
       
       if (result.success) {
         Alert.alert(
@@ -188,7 +180,7 @@ export default function AccountScreen() {
             { text: 'OK' },
             {
               text: 'Réessayer',
-              onPress: () => setExportModal({ ...exportModal, visible: true })
+              onPress: () => handleExportTrajectory(trajectory)
             }
           ]
         );
@@ -202,7 +194,7 @@ export default function AccountScreen() {
           { text: 'OK' },
           {
             text: 'Réessayer',
-            onPress: () => setExportModal({ ...exportModal, visible: true })
+            onPress: () => handleExportTrajectory(trajectory)
           }
         ]
       );

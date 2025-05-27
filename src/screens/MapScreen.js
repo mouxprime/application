@@ -11,7 +11,7 @@ import {
   TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, Pattern } from 'react-native-svg';
+import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
 import * as Battery from 'expo-battery';
 import { Magnetometer, Accelerometer, Gyroscope } from 'expo-sensors';
@@ -59,16 +59,12 @@ export default function MapScreen() {
   // *** NOUVEAU: État pour masquer/afficher le panneau de métriques ***
   const [isMetricsPanelVisible, setIsMetricsPanelVisible] = useState(true);
   
-  // *** NOUVEAU: État pour stabilisation de l'orientation ***
-  const [stableOrientation, setStableOrientation] = useState(0);
-  const orientationHistoryRef = useRef([]);
-  const lastOrientationUpdateRef = useRef(0);
-  
-  // *** NOUVEAU: États pour l'orientation permanente ***
-  const [permanentOrientation, setPermanentOrientation] = useState(0);
-  const [isOrientationActive, setIsOrientationActive] = useState(false);
-  const permanentOrientationRef = useRef(0);
-  const orientationSubscriptions = useRef({});
+  // *** NOUVEAU: États pour l'orientation continue unifiée ***
+  const [continuousOrientation, setContinuousOrientation] = useState(0);
+  const [orientationConfidence, setOrientationConfidence] = useState(0);
+  const [orientationSource, setOrientationSource] = useState('pdr_gyro');
+  const [isOrientationActive, setIsOrientationActive] = useState(true); // Activé par défaut
+  const continuousOrientationRef = useRef(0);
   
   // État de la calibration
   const [calibrationModal, setCalibrationModal] = useState({
@@ -93,8 +89,8 @@ export default function MapScreen() {
     initializeSystem();
     initializeBattery();
     
-    // *** NOUVEAU: Démarrer l'orientation permanente ***
-    startPermanentOrientation();
+    // *** CORRECTION: Utiliser les bonnes fonctions d'orientation continue ***
+    // startPermanentOrientation(); // SUPPRIMÉ - fonction inexistante
     
     // *** CORRECTION: Suppression de la mise à jour périodique qui cause la boucle infinie ***
     // Les métriques sont maintenant mises à jour via les callbacks du SDK
@@ -103,8 +99,11 @@ export default function MapScreen() {
       if (localizationSDK) {
         localizationSDK.stopTracking();
       }
-      // *** NOUVEAU: Arrêter l'orientation permanente ***
-      stopPermanentOrientation();
+      // *** CORRECTION: Utiliser la bonne fonction d'arrêt ***
+      // stopPermanentOrientation(); // SUPPRIMÉ - fonction inexistante
+      if (isOrientationActive) {
+        stopContinuousOrientation();
+      }
     };
   }, []);
 
@@ -268,7 +267,17 @@ export default function MapScreen() {
   };
 
   /**
-   * *** NOUVEAU: Centrer la vue sur la trajectoire ***
+   * *** NOUVEAU: Centrer la vue sur la position de l'utilisateur ***
+   * SIMPLIFIÉ: Utilise seulement les coordonnées de base sans ScaleConverter
+   */
+  const centerOnUser = () => {
+    console.log(`[VIEW] Centrage sur utilisateur: position=(${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})`);
+    // Note: Le centrage est maintenant géré par ZoomableView
+    // Cette fonction sert principalement de feedback visuel
+  };
+
+  /**
+   * *** ANCIEN: Centrer la vue sur la trajectoire (gardé pour référence) ***
    */
   const centerOnTrajectory = () => {
     if (!state.trajectory || state.trajectory.length === 0) return;
@@ -389,36 +398,45 @@ export default function MapScreen() {
 
   /**
    * Conversion des coordonnées monde vers l'écran SVG
+   * SIMPLIFIÉ: Pas de zoom/offset car géré par ZoomableView
    */
   const worldToSVG = (worldPos) => {
-    return scaleConverter.worldToScreen(worldPos.x, worldPos.y);
+    // Conversion simple mètres -> pixels avec échelle de base uniquement
+    const pixelX = worldPos.x * scaleConverter.BASE_SCALE;
+    const pixelY = -worldPos.y * scaleConverter.BASE_SCALE; // Inversion Y pour SVG
+    
+    // Centre de l'écran comme origine
+    const centerX = svgWidth / 2;
+    const centerY = svgHeight / 2;
+    
+    return {
+      x: centerX + pixelX,
+      y: centerY + pixelY
+    };
   };
 
   /**
    * Rendu de la grille noire
+   * SIMPLIFIÉ: Grille fixe sans dépendance au ScaleConverter
    */
   const renderGrid = () => {
-    const gridSize = scaleConverter.getGridSize(); // Taille adaptative selon le zoom
+    const gridSpacing = 50; // Espacement fixe en pixels
     const lines = [];
     
-    // Calculer les limites visibles en utilisant le convertisseur
-    const visibleBounds = scaleConverter.getVisibleBounds();
-    const minX = Math.floor(visibleBounds.minX / gridSize) * gridSize;
-    const maxX = Math.ceil(visibleBounds.maxX / gridSize) * gridSize;
-    const minY = Math.floor(visibleBounds.minY / gridSize) * gridSize;
-    const maxY = Math.ceil(visibleBounds.maxY / gridSize) * gridSize;
+    // Grille centrée sur l'écran
+    const centerX = svgWidth / 2;
+    const centerY = svgHeight / 2;
     
     // Lignes verticales
-    for (let x = minX; x <= maxX; x += gridSize) {
-      const svgStart = worldToSVG({ x, y: minY });
-      const svgEnd = worldToSVG({ x, y: maxY });
+    for (let i = -10; i <= 10; i++) {
+      const x = centerX + (i * gridSpacing);
       lines.push(
         <Line
-          key={`v-${x}`}
-          x1={svgStart.x}
-          y1={svgStart.y}
-          x2={svgEnd.x}
-          y2={svgEnd.y}
+          key={`v-${i}`}
+          x1={x}
+          y1={0}
+          x2={x}
+          y2={svgHeight}
           stroke="#333333"
           strokeWidth="1"
           opacity="0.3"
@@ -427,16 +445,15 @@ export default function MapScreen() {
     }
     
     // Lignes horizontales
-    for (let y = minY; y <= maxY; y += gridSize) {
-      const svgStart = worldToSVG({ x: minX, y });
-      const svgEnd = worldToSVG({ x: maxX, y });
+    for (let i = -10; i <= 10; i++) {
+      const y = centerY + (i * gridSpacing);
       lines.push(
         <Line
-          key={`h-${y}`}
-          x1={svgStart.x}
-          y1={svgStart.y}
-          x2={svgEnd.x}
-          y2={svgEnd.y}
+          key={`h-${i}`}
+          x1={0}
+          y1={y}
+          x2={svgWidth}
+          y2={y}
           stroke="#333333"
           strokeWidth="1"
           opacity="0.3"
@@ -448,68 +465,211 @@ export default function MapScreen() {
   };
 
   /**
-   * Rendu de la trajectoire en vert fluo
+   * Rendu de la trajectoire avec trait affiné
    */
   const renderTrajectory = () => {
     if (!state.trajectory || state.trajectory.length < 2) {
       return null;
     }
     
-    const pathData = state.trajectory.map((point, index) => {
-      const svgPos = worldToSVG({ x: point.x, y: point.y });
-      return `${index === 0 ? 'M' : 'L'} ${svgPos.x} ${svgPos.y}`;
-    }).join(' ');
+    // *** NOUVEAU: Génération d'un chemin lissé avec courbes de Bézier ***
+    const generateSmoothPath = () => {
+      const points = state.trajectory.map(point => worldToSVG({ x: point.x, y: point.y }));
+      
+      if (points.length < 3) {
+        // Pas assez de points pour lisser, utiliser une ligne droite
+        return points.map((point, index) => 
+          `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`
+        ).join(' ');
+      }
+      
+      let path = `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
+      
+      // Utiliser des courbes quadratiques pour lisser le chemin
+      for (let i = 1; i < points.length - 1; i++) {
+        const current = points[i];
+        const next = points[i + 1];
+        
+        // Point de contrôle pour la courbe (milieu entre points actuels)
+        const controlX = (current.x + next.x) / 2;
+        const controlY = (current.y + next.y) / 2;
+        
+        // Courbe quadratique vers le point de contrôle
+        path += ` Q ${current.x.toFixed(2)} ${current.y.toFixed(2)} ${controlX.toFixed(2)} ${controlY.toFixed(2)}`;
+      }
+      
+      // Ligne finale vers le dernier point
+      const lastPoint = points[points.length - 1];
+      path += ` L ${lastPoint.x.toFixed(2)} ${lastPoint.y.toFixed(2)}`;
+      
+      return path;
+    };
+
+    const smoothPath = generateSmoothPath();
     
     return (
       <G>
-        {/* *** AMÉLIORATION: Cercles plus visibles pour marquer chaque point *** */}
+        {/* *** NOUVEAU: Définition des filtres SVG pour effets avancés *** */}
+        <Defs>
+          {/* Gradient pour la trajectoire */}
+          <LinearGradient id="trajectoryGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+            <Stop offset="0%" stopColor="#00ff88" stopOpacity="1" />
+            <Stop offset="50%" stopColor="#00ff00" stopOpacity="1" />
+            <Stop offset="100%" stopColor="#88ff00" stopOpacity="1" />
+          </LinearGradient>
+        </Defs>
+
+        {/* *** NOUVEAU: Ombre portée de la trajectoire *** */}
+        <Path
+          d={smoothPath}
+          stroke="#000000"
+          strokeWidth="2.5"
+          fill="none"
+          opacity="0.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          transform="translate(1,1)"
+        />
+        
+        {/* *** NOUVEAU: Ligne de base épaisse pour la profondeur *** */}
+        <Path
+          d={smoothPath}
+          stroke="#004400"
+          strokeWidth="3"
+          fill="none"
+          opacity="0.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        
+        {/* *** NOUVEAU: Ligne principale affinée avec gradient *** */}
+        <Path
+          d={smoothPath}
+          stroke="url(#trajectoryGradient)"
+          strokeWidth="1.5"
+          fill="none"
+          opacity="1.0"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        
+        {/* *** NOUVEAU: Effet de lueur avec ligne plus large *** */}
+        <Path
+          d={smoothPath}
+          stroke="#00ff00"
+          strokeWidth="4"
+          fill="none"
+          opacity="0.3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        
+        {/* *** NOUVEAU: Points de trajectoire affinés *** */}
         {state.trajectory.map((point, index) => {
           const svgPos = worldToSVG({ x: point.x, y: point.y });
+          const isStartPoint = index === 0;
+          const isEndPoint = index === state.trajectory.length - 1;
           
           return (
-            <Circle
-              key={`trajectory-point-${index}`}
-              cx={svgPos.x}
-              cy={svgPos.y}
-              r="4"              // *** AUGMENTÉ: de 3 à 4 pixels ***
-              fill="#00ff00"
-              opacity="0.8"      // *** AUGMENTÉ: de 0.7 à 0.8 ***
-              stroke="#ffffff"   // *** NOUVEAU: Contour blanc pour visibilité ***
-              strokeWidth="1"
-            />
+            <G key={`trajectory-point-${index}`}>
+              {/* Ombre du point */}
+              <Circle
+                cx={svgPos.x + 0.5}
+                cy={svgPos.y + 0.5}
+                r={isStartPoint || isEndPoint ? "3" : "2"}
+                fill="#000000"
+                opacity="0.3"
+              />
+              
+              {/* Point principal */}
+              <Circle
+                cx={svgPos.x}
+                cy={svgPos.y}
+                r={isStartPoint || isEndPoint ? "3" : "2"}
+                fill={isStartPoint ? "#00ff88" : isEndPoint ? "#ff4400" : "#00ff00"}
+                stroke="#ffffff"
+                strokeWidth="0.5"
+                opacity="0.9"
+              />
+              
+              {/* Indicateur spécial pour début et fin */}
+              {isStartPoint && (
+                <Circle
+                  cx={svgPos.x}
+                  cy={svgPos.y}
+                  r="5"
+                  fill="none"
+                  stroke="#00ff88"
+                  strokeWidth="1"
+                  strokeDasharray="2,2"
+                  opacity="0.7"
+                />
+              )}
+              
+              {isEndPoint && (
+                <Circle
+                  cx={svgPos.x}
+                  cy={svgPos.y}
+                  r="5"
+                  fill="none"
+                  stroke="#ff4400"
+                  strokeWidth="1"
+                  strokeDasharray="2,2"
+                  opacity="0.7"
+                />
+              )}
+            </G>
           );
         })}
         
-        {/* Ligne de trajectoire - plus épaisse */}
-        <Path
-          d={pathData}
-          stroke="#00ff00"      // Vert fluo
-          strokeWidth="4"       // *** AUGMENTÉ: de 3 à 4 pixels ***
-          fill="none"
-          opacity="0.9"
-        />
-        
-        {/* *** NOUVEAU: Ligne de trajectoire avec effet de lueur *** */}
-        <Path
-          d={pathData}
-          stroke="#00ff00"
-          strokeWidth="8"       // Ligne plus large pour l'effet de lueur
-          fill="none"
-          opacity="0.3"         // Transparente pour l'effet
-        />
+        {/* *** NOUVEAU: Flèche directionnelle sur le dernier segment *** */}
+        {state.trajectory.length >= 2 && (() => {
+          const lastPoint = worldToSVG({ 
+            x: state.trajectory[state.trajectory.length - 1].x, 
+            y: state.trajectory[state.trajectory.length - 1].y 
+          });
+          const secondLastPoint = worldToSVG({ 
+            x: state.trajectory[state.trajectory.length - 2].x, 
+            y: state.trajectory[state.trajectory.length - 2].y 
+          });
+          
+          // Calculer l'angle de direction
+          const dx = lastPoint.x - secondLastPoint.x;
+          const dy = lastPoint.y - secondLastPoint.y;
+          const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+          
+          return (
+            <G transform={`translate(${lastPoint.x}, ${lastPoint.y}) rotate(${angle})`}>
+              <Path
+                d="M -8 -3 L 0 0 L -8 3 Z"
+                fill="#00ff00"
+                stroke="#ffffff"
+                strokeWidth="0.5"
+                opacity="0.8"
+              />
+            </G>
+          );
+        })()}
       </G>
     );
   };
 
   /**
-   * Rendu de la position actuelle avec orientation permanente
+   * Rendu de la position actuelle avec orientation permanente et taille fixe
+   * SIMPLIFIÉ: Taille constante sans calculs de zoom complexes
    */
   const renderCurrentPosition = () => {
     const svgPos = worldToSVG({ x: state.pose.x, y: state.pose.y });
     
     // *** NOUVEAU: Utiliser l'orientation permanente ***
-    const currentOrientation = isOrientationActive ? permanentOrientation : stableOrientation;
-    const headingLength = 15;
+    const currentOrientation = isOrientationActive ? continuousOrientation : 0;
+    
+    // *** SIMPLIFIÉ: Taille fixe pour éviter les problèmes de zoom ***
+    const radius = 8;
+    const headingLength = 20;
+    const strokeWidth = 2;
+    const confidenceRadius = 20;
+    
     const headingX = svgPos.x + Math.cos(currentOrientation) * headingLength;
     const headingY = svgPos.y - Math.sin(currentOrientation) * headingLength;
     
@@ -519,14 +679,14 @@ export default function MapScreen() {
     
     return (
       <G>
-        {/* Ligne de direction - toujours visible */}
+        {/* Ligne de direction */}
         <Line
           x1={svgPos.x}
           y1={svgPos.y}
           x2={headingX}
           y2={headingY}
           stroke={orientationColor}
-          strokeWidth="3"
+          strokeWidth={strokeWidth}
           opacity={isOrientationActive ? "1.0" : "0.5"}
         />
         
@@ -534,10 +694,10 @@ export default function MapScreen() {
         <Circle
           cx={svgPos.x}
           cy={svgPos.y}
-          r="7.5"
+          r={radius}
           fill={positionColor}
           stroke="#ffffff"
-          strokeWidth="2"
+          strokeWidth={strokeWidth}
           opacity={state.isTracking ? "1.0" : "0.7"}
         />
         
@@ -546,10 +706,10 @@ export default function MapScreen() {
           <Circle
             cx={svgPos.x}
             cy={svgPos.y}
-            r={7.5 + (1 - state.pose.confidence) * 15}
+            r={radius + (1 - state.pose.confidence) * confidenceRadius}
             fill="none"
             stroke="rgba(0, 255, 0, 0.3)"
-            strokeWidth="1"
+            strokeWidth={1}
           />
         )}
         
@@ -558,11 +718,11 @@ export default function MapScreen() {
           <Circle
             cx={svgPos.x}
             cy={svgPos.y}
-            r="12"
+            r={radius * 2}
             fill="none"
             stroke="#00ff88"
-            strokeWidth="1"
-            strokeDasharray="3,3"
+            strokeWidth={1}
+            strokeDasharray="4,4"
             opacity="0.8"
           />
         )}
@@ -627,18 +787,40 @@ export default function MapScreen() {
           </View>
           
           <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Orientation</Text>
+            <Text style={styles.metricLabel}>Orientation:</Text>
             <Text style={[styles.metricValue, { color: isOrientationActive ? '#00ff88' : '#666666' }]}>
               {isOrientationActive 
-                ? (permanentOrientation * 180 / Math.PI).toFixed(1) + '°'
+                ? (continuousOrientation * 180 / Math.PI).toFixed(1) + '°'
                 : (state.pose.theta * 180 / Math.PI).toFixed(1) + '°'
               }
             </Text>
-            {isOrientationActive && (
-              <Ionicons name="compass" size={12} color="#00ff88" />
-            )}
           </View>
         </View>
+
+        {/* *** NOUVEAU: Affichage confiance et source orientation *** */}
+        {isOrientationActive && (
+          <>
+            <View style={styles.metricItem}>
+              <Text style={styles.metricLabel}>Confiance:</Text>
+              <Text style={[styles.metricValue, { 
+                color: orientationConfidence > 0.7 ? '#00ff88' : 
+                       orientationConfidence > 0.4 ? '#ffaa00' : '#ff4444' 
+              }]}>
+                {(orientationConfidence * 100).toFixed(0)}%
+              </Text>
+            </View>
+            
+            <View style={styles.metricItem}>
+              <Text style={styles.metricLabel}>Source:</Text>
+              <Text style={[styles.metricValue, { 
+                color: orientationSource === 'continuous_fusion' ? '#00ff88' : '#ffaa00' 
+              }]}>
+                {orientationSource === 'continuous_fusion' ? 'Fusion' : 
+                 orientationSource === 'pdr_fallback' ? 'PDR' : 'Gyro'}
+              </Text>
+            </View>
+          </>
+        )}
 
         {/* Métriques PDR avec indicateur mode */}
         <View style={styles.metricsRow}>
@@ -733,53 +915,12 @@ export default function MapScreen() {
     
     const normalizedTheta = normalizeAngle(newTheta);
     
-    // Ajouter à l'historique
-    orientationHistoryRef.current.push({
-      angle: normalizedTheta,
-      timestamp: now
-    });
+    // Filtrage simple pour stabiliser l'orientation
+    const alpha = 0.1; // Facteur de lissage
+    const currentOrientation = continuousOrientation;
     
-    // Garder seulement les 10 dernières mesures (sur ~1 seconde)
-    if (orientationHistoryRef.current.length > 10) {
-      orientationHistoryRef.current.shift();
-    }
-    
-    // Filtrage seulement si on a assez de données
-    if (orientationHistoryRef.current.length < 3) {
-      setStableOrientation(normalizedTheta);
-      return;
-    }
-    
-    // Calculer la moyenne pondérée (plus de poids aux mesures récentes)
-    let weightedSum = 0;
-    let totalWeight = 0;
-    
-    orientationHistoryRef.current.forEach((entry, index) => {
-      const weight = index + 1; // Poids croissant
-      const angleDiff = normalizedTheta - entry.angle;
-      
-      // Gérer le passage par ±π (ex: de -179° à +179°)
-      let adjustedAngle = entry.angle;
-      if (Math.abs(angleDiff) > Math.PI) {
-        if (angleDiff > 0) {
-          adjustedAngle += 2 * Math.PI;
-        } else {
-          adjustedAngle -= 2 * Math.PI;
-        }
-      }
-      
-      weightedSum += adjustedAngle * weight;
-      totalWeight += weight;
-    });
-    
-    const filteredAngle = normalizeAngle(weightedSum / totalWeight);
-    
-    // Mise à jour avec lissage exponentiel pour éviter les à-coups
-    const alpha = 0.3; // Facteur de lissage (0 = pas de changement, 1 = changement immédiat)
-    const currentStable = stableOrientation;
-    
-    // Gérer le passage par ±π pour le lissage
-    let angleDiff = filteredAngle - currentStable;
+    // Gérer le passage par ±π
+    let angleDiff = normalizedTheta - currentOrientation;
     if (Math.abs(angleDiff) > Math.PI) {
       if (angleDiff > 0) {
         angleDiff -= 2 * Math.PI;
@@ -788,10 +929,12 @@ export default function MapScreen() {
       }
     }
     
-    const newStableOrientation = normalizeAngle(currentStable + alpha * angleDiff);
-    setStableOrientation(newStableOrientation);
+    const newOrientation = currentOrientation + alpha * angleDiff;
     
-    lastOrientationUpdateRef.current = now;
+    // Normaliser entre 0 et 2π
+    const normalizedOrientation = ((newOrientation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    
+    setContinuousOrientation(normalizedOrientation);
   };
 
   /**
@@ -836,153 +979,150 @@ export default function MapScreen() {
   };
 
   /**
-   * *** NOUVEAU: Démarrer l'orientation permanente ***
+   * *** NOUVEAU: Démarrer l'orientation continue via le SDK ***
    */
-  const startPermanentOrientation = async () => {
+  const startContinuousOrientation = async () => {
     try {
-      // Vérifier la disponibilité des capteurs
-      const magnetometerAvailable = await Magnetometer.isAvailableAsync();
-      const accelerometerAvailable = await Accelerometer.isAvailableAsync();
+      // Activer le mode orientation continue dans le SDK
+      const success = localizationSDK.setOrientationMode('continuous_fusion');
       
-      if (!magnetometerAvailable || !accelerometerAvailable) {
-        console.warn('Capteurs d\'orientation non disponibles');
-        return;
+      if (success) {
+        setIsOrientationActive(true);
+        console.log('Orientation continue activée via SDK');
+        
+        // Configurer le callback pour recevoir les mises à jour d'orientation
+        localizationSDK.callbacks.onOrientationUpdate = (orientationData) => {
+          setContinuousOrientation(orientationData.heading);
+          setOrientationConfidence(orientationData.confidence);
+          setOrientationSource(orientationData.source);
+        };
+        
+      } else {
+        console.warn('Impossible d\'activer l\'orientation continue');
       }
-
-      // Configurer les taux d'échantillonnage
-      Magnetometer.setUpdateInterval(100); // 10 Hz
-      Accelerometer.setUpdateInterval(100); // 10 Hz
-
-      // Variables pour le calcul d'orientation
-      let lastMagnetometer = { x: 0, y: 0, z: 0 };
-      let lastAccelerometer = { x: 0, y: 0, z: 0 };
-
-      // Abonnement au magnétomètre
-      orientationSubscriptions.current.magnetometer = Magnetometer.addListener((data) => {
-        lastMagnetometer = data;
-        calculatePermanentOrientation(lastAccelerometer, lastMagnetometer);
-      });
-
-      // Abonnement à l'accéléromètre
-      orientationSubscriptions.current.accelerometer = Accelerometer.addListener((data) => {
-        lastAccelerometer = data;
-        calculatePermanentOrientation(lastAccelerometer, lastMagnetometer);
-      });
-
-      setIsOrientationActive(true);
-      console.log('Orientation permanente démarrée');
       
     } catch (error) {
-      console.error('Erreur démarrage orientation permanente:', error);
+      console.error('Erreur démarrage orientation continue:', error);
     }
   };
 
   /**
-   * *** NOUVEAU: Arrêter l'orientation permanente ***
+   * *** NOUVEAU: Arrêter l'orientation continue ***
    */
-  const stopPermanentOrientation = () => {
+  const stopContinuousOrientation = () => {
     try {
-      // Désabonner de tous les capteurs
-      Object.values(orientationSubscriptions.current).forEach(subscription => {
-        if (subscription && subscription.remove) {
-          subscription.remove();
-        }
-      });
-      orientationSubscriptions.current = {};
+      // Désactiver le mode orientation continue dans le SDK
+      localizationSDK.setOrientationMode('pdr_gyro');
       
       setIsOrientationActive(false);
-      console.log('Orientation permanente arrêtée');
+      setOrientationConfidence(0);
+      setOrientationSource('pdr_gyro');
+      
+      // Supprimer le callback d'orientation
+      if (localizationSDK.callbacks.onOrientationUpdate) {
+        delete localizationSDK.callbacks.onOrientationUpdate;
+      }
+      
+      console.log('Orientation continue arrêtée');
       
     } catch (error) {
-      console.error('Erreur arrêt orientation permanente:', error);
+      console.error('Erreur arrêt orientation continue:', error);
     }
   };
 
   /**
-   * *** NOUVEAU: Calculer l'orientation permanente ***
+   * *** NOUVEAU: Basculer l'orientation continue ***
    */
-  const calculatePermanentOrientation = (accelerometer, magnetometer) => {
-    try {
-      // Normaliser l'accélération pour obtenir la gravité
-      const accNorm = Math.sqrt(
-        accelerometer.x * accelerometer.x + 
-        accelerometer.y * accelerometer.y + 
-        accelerometer.z * accelerometer.z
-      );
-      
-      if (accNorm === 0) return;
-      
-      const ax = accelerometer.x / accNorm;
-      const ay = accelerometer.y / accNorm;
-      const az = accelerometer.z / accNorm;
-
-      // Normaliser le champ magnétique
-      const magNorm = Math.sqrt(
-        magnetometer.x * magnetometer.x + 
-        magnetometer.y * magnetometer.y + 
-        magnetometer.z * magnetometer.z
-      );
-      
-      if (magNorm === 0) return;
-      
-      const mx = magnetometer.x / magNorm;
-      const my = magnetometer.y / magNorm;
-      const mz = magnetometer.z / magNorm;
-
-      // Compensation d'inclinaison pour le magnétomètre
-      // Calculer les angles de rotation (pitch et roll)
-      const pitch = Math.asin(-ax);
-      const roll = Math.atan2(ay, az);
-
-      // Appliquer la compensation d'inclinaison
-      const magX = mx * Math.cos(pitch) + mz * Math.sin(pitch);
-      const magY = mx * Math.sin(roll) * Math.sin(pitch) + 
-                   my * Math.cos(roll) - 
-                   mz * Math.sin(roll) * Math.cos(pitch);
-
-      // Calculer l'azimut (orientation)
-      let azimuth = Math.atan2(-magY, magX);
-      
-      // Normaliser entre 0 et 2π
-      if (azimuth < 0) {
-        azimuth += 2 * Math.PI;
-      }
-
-      // Filtrage simple pour stabiliser l'orientation
-      const alpha = 0.1; // Facteur de lissage
-      const currentOrientation = permanentOrientationRef.current;
-      
-      // Gérer le passage par 0/2π
-      let angleDiff = azimuth - currentOrientation;
-      if (angleDiff > Math.PI) {
-        angleDiff -= 2 * Math.PI;
-      } else if (angleDiff < -Math.PI) {
-        angleDiff += 2 * Math.PI;
-      }
-      
-      const newOrientation = currentOrientation + alpha * angleDiff;
-      
-      // Normaliser entre 0 et 2π
-      const normalizedOrientation = ((newOrientation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-      
-      permanentOrientationRef.current = normalizedOrientation;
-      setPermanentOrientation(normalizedOrientation);
-      
-    } catch (error) {
-      console.error('Erreur calcul orientation:', error);
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Basculer l'orientation permanente ***
-   */
-  const togglePermanentOrientation = () => {
+  const toggleContinuousOrientation = () => {
     if (isOrientationActive) {
-      stopPermanentOrientation();
+      stopContinuousOrientation();
     } else {
-      startPermanentOrientation();
+      startContinuousOrientation();
     }
   };
+
+  /**
+   * *** NOUVEAU: Forcer calibration immédiate ***
+   */
+  const forceImmediateCalibration = () => {
+    try {
+      const success = localizationSDK.forceImmediateCalibration();
+      
+      if (success) {
+        console.log('Calibration immédiate déclenchée');
+        // Afficher un indicateur de calibration en cours
+        setCalibrationModal({
+          visible: true,
+          progress: 0,
+          message: 'Calibration immédiate en cours...',
+          step: 'immediate_calibration'
+        });
+      } else {
+        console.warn('Impossible de déclencher la calibration immédiate');
+      }
+      
+    } catch (error) {
+      console.error('Erreur calibration immédiate:', error);
+    }
+  };
+
+  // Effet pour démarrer l'orientation continue automatiquement
+  useEffect(() => {
+    if (isMapLoaded && state.isTracking) {
+      // Démarrer l'orientation continue automatiquement
+      startContinuousOrientation();
+    }
+    
+    // Nettoyage à la fermeture
+    return () => {
+      if (isOrientationActive) {
+        stopContinuousOrientation();
+      }
+    };
+  }, [isMapLoaded, state.isTracking, isOrientationActive]);
+
+  // Effet pour gérer les callbacks de calibration du SDK
+  useEffect(() => {
+    // Configurer les callbacks de calibration
+    localizationSDK.callbacks.onCalibrationProgress = (calibrationData) => {
+      if (calibrationData.step === 'immediate_calibration_start') {
+        setCalibrationModal({
+          visible: true,
+          progress: calibrationData.progress,
+          message: calibrationData.message,
+          step: calibrationData.step
+        });
+      } else if (calibrationData.step === 'immediate_calibration_complete') {
+        setCalibrationModal({
+          visible: false,
+          progress: 1.0,
+          message: calibrationData.message,
+          step: calibrationData.step
+        });
+        
+        // Afficher un message de succès temporaire
+        setTimeout(() => {
+          console.log('Calibration immédiate terminée avec succès');
+        }, 500);
+      }
+    };
+
+    // Configurer le callback de changement de posture
+    localizationSDK.callbacks.onPostureChange = (postureData) => {
+      console.log('Changement de posture détecté:', postureData.reason);
+      
+      // Optionnel : afficher une notification à l'utilisateur
+      if (postureData.action === 'immediate_calibration_triggered') {
+        console.log('Calibration automatique déclenchée suite au changement de posture');
+      }
+    };
+
+    return () => {
+      // Nettoyage des callbacks
+      delete localizationSDK.callbacks.onCalibrationProgress;
+      delete localizationSDK.callbacks.onPostureChange;
+    };
+  }, []);
 
   if (!isMapLoaded) {
     return (
@@ -1051,7 +1191,7 @@ export default function MapScreen() {
           />
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.controlButton} onPress={centerOnTrajectory}>
+        <TouchableOpacity style={styles.controlButton} onPress={centerOnUser}>
           <Ionicons name="locate" size={24} color="#00ff88" />
         </TouchableOpacity>
         
@@ -1075,12 +1215,24 @@ export default function MapScreen() {
         {/* *** NOUVEAU: Bouton orientation permanente *** */}
         <TouchableOpacity 
           style={[styles.controlButton, isOrientationActive && styles.activeButton]} 
-          onPress={togglePermanentOrientation}
+          onPress={toggleContinuousOrientation}
         >
           <Ionicons 
-            name="navigate" 
+            name={isOrientationActive ? "compass" : "compass-outline"} 
             size={24} 
-            color={isOrientationActive ? "#000000" : "#00ff88"} 
+            color={isOrientationActive ? "#ffffff" : "#00ff88"} 
+          />
+        </TouchableOpacity>
+
+        {/* *** NOUVEAU: Bouton calibration immédiate *** */}
+        <TouchableOpacity 
+          style={styles.controlButton} 
+          onPress={forceImmediateCalibration}
+        >
+          <Ionicons 
+            name="refresh-circle-outline" 
+            size={24} 
+            color="#00ff88" 
           />
         </TouchableOpacity>
       </View>
