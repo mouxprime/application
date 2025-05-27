@@ -263,14 +263,14 @@ export class PedestrianDeadReckoning {
     }
     
     // 4. *** SIMPLIFICATION: Validation temporelle basique ***
-    const minStepInterval = 200; // *** RÉDUIT: 200ms minimum entre pas ***
+    const minStepInterval = 100; // *** RÉDUIT ENCORE: 100ms minimum entre pas ***
     const timeSinceLastStep = now - this.lastStepTime;
     
     if (peaks.length > 0 && timeSinceLastStep > minStepInterval) {
       const bestPeak = peaks[peaks.length - 1];
       
       // *** SEUIL TRÈS BAS pour test ***
-      const minPeakThreshold = 0.05; // *** RÉDUIT: 0.05g minimum ***
+      const minPeakThreshold = 0.03; // *** RÉDUIT ENCORE: 0.03g minimum ***
       
       console.log(`[STEP DEBUG] Meilleur pic: ${bestPeak.toFixed(3)}, Seuil: ${minPeakThreshold}, Temps: ${timeSinceLastStep}ms`);
       
@@ -283,7 +283,7 @@ export class PedestrianDeadReckoning {
         console.log(`[STEP REJETÉ] Pic trop faible: ${bestPeak.toFixed(3)} < ${minPeakThreshold}`);
       }
     } else if (peaks.length > 0) {
-      console.log(`[STEP REJETÉ] Intervalle trop court: ${timeSinceLastStep}ms < ${minStepInterval}ms`);
+      console.log(`[STEP REJETÉ] Intervalle trop court: ${timeSinceLastStep}ms < ${minStepInterval}ms (pic=${peaks[peaks.length - 1].toFixed(3)})`);
     }
   }
 
@@ -638,10 +638,6 @@ export class PedestrianDeadReckoning {
     
     if (this.verticalDetectionState.fallbackActive) {
       return 'magnitude_fallback';
-    }
-    
-    if (this.shouldUseVerticalDetection()) {
-      return 'vertical_projection';
     }
     
     return 'magnitude_default';

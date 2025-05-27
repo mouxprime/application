@@ -56,6 +56,11 @@ export default function MapScreen() {
   // *** NOUVEAU: État pour masquer/afficher le panneau de métriques ***
   const [isMetricsPanelVisible, setIsMetricsPanelVisible] = useState(true);
   
+  // *** NOUVEAU: État pour stabilisation de l'orientation ***
+  const [stableOrientation, setStableOrientation] = useState(0);
+  const orientationHistoryRef = useRef([]);
+  const lastOrientationUpdateRef = useRef(0);
+  
   // État de la calibration
   const [calibrationModal, setCalibrationModal] = useState({
     visible: false,
@@ -115,8 +120,14 @@ export default function MapScreen() {
         }
         lastUpdateTime = now;
         
+        // *** NOUVEAU: Stabiliser l'orientation avant mise à jour ***
+        stabilizeOrientation(theta);
+        
         const pose = { x, y, theta, confidence: localizationSDK.currentState?.confidence || 0 };
         actions.updatePose(pose);
+        
+        // *** AMÉLIORATION: Forcer l'ajout de points de trajectoire ***
+        console.log(`[TRAJECTORY ADD] Ajout point: (${x.toFixed(2)}, ${y.toFixed(2)}) - Total: ${(state.trajectory?.length || 0) + 1}`);
         actions.addTrajectoryPoint({
           x, y, timestamp: now,
           confidence: pose.confidence
@@ -362,7 +373,7 @@ export default function MapScreen() {
    */
   const renderTrajectory = () => {
     if (!state.trajectory || state.trajectory.length < 2) {
-      //console.log(`[TRAJECTORY DEBUG] Trajectoire vide ou insuffisante: ${state.trajectory?.length || 0} points`);
+      console.log(`[TRAJECTORY DEBUG] Trajectoire vide ou insuffisante: ${state.trajectory?.length || 0} points`);
       return null;
     }
     
@@ -382,7 +393,7 @@ export default function MapScreen() {
     
     return (
       <G>
-        {/* *** NOUVEAU: Petits cercles pour marquer chaque point de la trajectoire *** */}
+        {/* *** AMÉLIORATION: Cercles plus visibles pour marquer chaque point *** */}
         {state.trajectory.map((point, index) => {
           const svgPos = worldToSVG({ x: point.x, y: point.y });
           return (
@@ -390,20 +401,31 @@ export default function MapScreen() {
               key={`trajectory-point-${index}`}
               cx={svgPos.x}
               cy={svgPos.y}
-              r="3"
+              r="4"              // *** AUGMENTÉ: de 3 à 4 pixels ***
               fill="#00ff00"
-              opacity="0.7"
+              opacity="0.8"      // *** AUGMENTÉ: de 0.7 à 0.8 ***
+              stroke="#ffffff"   // *** NOUVEAU: Contour blanc pour visibilité ***
+              strokeWidth="1"
             />
           );
         })}
         
-        {/* Ligne de trajectoire */}
+        {/* Ligne de trajectoire - plus épaisse */}
         <Path
           d={pathData}
-          stroke="#00ff00"  // Vert fluo
-          strokeWidth="3"
+          stroke="#00ff00"      // Vert fluo
+          strokeWidth="4"       // *** AUGMENTÉ: de 3 à 4 pixels ***
           fill="none"
           opacity="0.9"
+        />
+        
+        {/* *** NOUVEAU: Ligne de trajectoire avec effet de lueur *** */}
+        <Path
+          d={pathData}
+          stroke="#00ff00"
+          strokeWidth="8"       // Ligne plus large pour l'effet de lueur
+          fill="none"
+          opacity="0.3"         // Transparente pour l'effet
         />
       </G>
     );
@@ -415,10 +437,10 @@ export default function MapScreen() {
   const renderCurrentPosition = () => {
     const svgPos = worldToSVG({ x: state.pose.x, y: state.pose.y });
     
-    // Indicateur de direction
-    const headingLength = 30;
-    const headingX = svgPos.x + Math.cos(state.pose.theta) * headingLength;
-    const headingY = svgPos.y - Math.sin(state.pose.theta) * headingLength;
+    // *** CORRECTION: Utiliser l'orientation stabilisée ***
+    const headingLength = 15; // *** RÉDUIT: de 30 à 15 pixels ***
+    const headingX = svgPos.x + Math.cos(stableOrientation) * headingLength;
+    const headingY = svgPos.y - Math.sin(stableOrientation) * headingLength;
     
     return (
       <G>
@@ -429,25 +451,25 @@ export default function MapScreen() {
           x2={headingX}
           y2={headingY}
           stroke="#00ff00"  // Vert fluo
-          strokeWidth="4"
+          strokeWidth="2"   // *** RÉDUIT: de 4 à 2 pixels ***
         />
-        {/* Position actuelle */}
+        {/* Position actuelle - 2x plus petite */}
         <Circle
           cx={svgPos.x}
           cy={svgPos.y}
-          r="15"
-          fill="#00ff00"  // Vert fluo
+          r="7.5"           // *** RÉDUIT: de 15 à 7.5 pixels ***
+          fill="#00ff00"    // Vert fluo
           stroke="#ffffff"
-          strokeWidth="3"
+          strokeWidth="2"   // *** RÉDUIT: de 3 à 2 pixels ***
         />
-        {/* Niveau de confiance */}
+        {/* Niveau de confiance - ajusté proportionnellement */}
         <Circle
           cx={svgPos.x}
           cy={svgPos.y}
-          r={15 + (1 - state.pose.confidence) * 30}
+          r={7.5 + (1 - state.pose.confidence) * 15}  // *** RÉDUIT: de 15+30 à 7.5+15 ***
           fill="none"
           stroke="rgba(0, 255, 0, 0.3)"
-          strokeWidth="2"
+          strokeWidth="1"   // *** RÉDUIT: de 2 à 1 pixel ***
         />
       </G>
     );
@@ -593,6 +615,82 @@ export default function MapScreen() {
 
   const getModeLabel = () => {
     return 'WALKING'; // Mode fixe
+  };
+
+  /**
+   * *** NOUVEAU: Stabilisation de l'orientation avec filtrage ***
+   */
+  const stabilizeOrientation = (newTheta) => {
+    const now = Date.now();
+    
+    // Normaliser l'angle entre -π et π
+    const normalizeAngle = (angle) => {
+      while (angle > Math.PI) angle -= 2 * Math.PI;
+      while (angle < -Math.PI) angle += 2 * Math.PI;
+      return angle;
+    };
+    
+    const normalizedTheta = normalizeAngle(newTheta);
+    
+    // Ajouter à l'historique
+    orientationHistoryRef.current.push({
+      angle: normalizedTheta,
+      timestamp: now
+    });
+    
+    // Garder seulement les 10 dernières mesures (sur ~1 seconde)
+    if (orientationHistoryRef.current.length > 10) {
+      orientationHistoryRef.current.shift();
+    }
+    
+    // Filtrage seulement si on a assez de données
+    if (orientationHistoryRef.current.length < 3) {
+      setStableOrientation(normalizedTheta);
+      return;
+    }
+    
+    // Calculer la moyenne pondérée (plus de poids aux mesures récentes)
+    let weightedSum = 0;
+    let totalWeight = 0;
+    
+    orientationHistoryRef.current.forEach((entry, index) => {
+      const weight = index + 1; // Poids croissant
+      const angleDiff = normalizedTheta - entry.angle;
+      
+      // Gérer le passage par ±π (ex: de -179° à +179°)
+      let adjustedAngle = entry.angle;
+      if (Math.abs(angleDiff) > Math.PI) {
+        if (angleDiff > 0) {
+          adjustedAngle += 2 * Math.PI;
+        } else {
+          adjustedAngle -= 2 * Math.PI;
+        }
+      }
+      
+      weightedSum += adjustedAngle * weight;
+      totalWeight += weight;
+    });
+    
+    const filteredAngle = normalizeAngle(weightedSum / totalWeight);
+    
+    // Mise à jour avec lissage exponentiel pour éviter les à-coups
+    const alpha = 0.3; // Facteur de lissage (0 = pas de changement, 1 = changement immédiat)
+    const currentStable = stableOrientation;
+    
+    // Gérer le passage par ±π pour le lissage
+    let angleDiff = filteredAngle - currentStable;
+    if (Math.abs(angleDiff) > Math.PI) {
+      if (angleDiff > 0) {
+        angleDiff -= 2 * Math.PI;
+      } else {
+        angleDiff += 2 * Math.PI;
+      }
+    }
+    
+    const newStableOrientation = normalizeAngle(currentStable + alpha * angleDiff);
+    setStableOrientation(newStableOrientation);
+    
+    lastOrientationUpdateRef.current = now;
   };
 
   if (!isMapLoaded) {
