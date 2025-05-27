@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   Text,
   Alert,
-  PanResponder,
   Modal,
   ActivityIndicator,
   TextInput,
@@ -15,11 +14,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, Pattern } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
 import * as Battery from 'expo-battery';
+import { Magnetometer, Accelerometer, Gyroscope } from 'expo-sensors';
 
 import { useLocalization } from '../context/LocalizationContext';
 import { useAuth } from '../context/AuthContext';
 import { LocalizationSDK } from '../algorithms/LocalizationSDK';
 import { ScaleConverter } from '../utils/ScaleConverter';
+import ZoomableView from '../components/ZoomableView';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
@@ -28,8 +29,8 @@ const MAP_TOTAL_WIDTH = 14629;
 const MAP_TOTAL_HEIGHT = 13764;
 
 // Zoom limites
-const MIN_ZOOM = 1;
-const MAX_ZOOM = 15;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 20;
 
 export default function MapScreen() {
   const { state, actions } = useLocalization();
@@ -51,7 +52,6 @@ export default function MapScreen() {
   
   // État de la carte
   const [isMapLoaded, setIsMapLoaded] = useState(false);
-  const [viewOffset, setViewOffset] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [batteryLevel, setBatteryLevel] = useState(1);
   const [batteryState, setBatteryState] = useState('unknown');
@@ -64,6 +64,12 @@ export default function MapScreen() {
   const orientationHistoryRef = useRef([]);
   const lastOrientationUpdateRef = useRef(0);
   
+  // *** NOUVEAU: États pour l'orientation permanente ***
+  const [permanentOrientation, setPermanentOrientation] = useState(0);
+  const [isOrientationActive, setIsOrientationActive] = useState(false);
+  const permanentOrientationRef = useRef(0);
+  const orientationSubscriptions = useRef({});
+  
   // État de la calibration
   const [calibrationModal, setCalibrationModal] = useState({
     visible: false,
@@ -72,16 +78,13 @@ export default function MapScreen() {
     step: ''
   });
 
-  // *** NOUVEAU: État pour la sauvegarde de trajet ***
+  // *** NOUVEAU: États pour la sauvegarde de trajet ***
   const [saveTrajectoryModal, setSaveTrajectoryModal] = useState({
     visible: false,
     trajectoryName: '',
     isLoading: false
   });
   
-  // Référence pour les gestes de pan
-  const panRef = useRef();
-
   // Dimensions de l'affichage SVG
   const svgWidth = screenWidth;
   const svgHeight = screenHeight - 200; // Espace pour les contrôles et métriques
@@ -90,6 +93,9 @@ export default function MapScreen() {
     initializeSystem();
     initializeBattery();
     
+    // *** NOUVEAU: Démarrer l'orientation permanente ***
+    startPermanentOrientation();
+    
     // *** CORRECTION: Suppression de la mise à jour périodique qui cause la boucle infinie ***
     // Les métriques sont maintenant mises à jour via les callbacks du SDK
     
@@ -97,6 +103,8 @@ export default function MapScreen() {
       if (localizationSDK) {
         localizationSDK.stopTracking();
       }
+      // *** NOUVEAU: Arrêter l'orientation permanente ***
+      stopPermanentOrientation();
     };
   }, []);
 
@@ -260,30 +268,6 @@ export default function MapScreen() {
   };
 
   /**
-   * Réinitialisation de la position à (0,0)
-   */
-  const resetPosition = () => {
-    Alert.alert(
-      'Réinitialiser la position',
-      'Êtes-vous sûr de vouloir réinitialiser votre position à (0,0) ?',
-      [
-        { text: 'Annuler', style: 'cancel' },
-        {
-          text: 'Réinitialiser',
-          onPress: () => {
-            const initialPose = { x: 0, y: 0, theta: 0 };
-            actions.resetPose(initialPose);
-            actions.resetTrajectory();
-            localizationSDK.resetPosition(0, 0, 0, 0);
-            setViewOffset({ x: 0, y: 0 });
-            console.log('[RESET] Position et trajectoire réinitialisées');
-          }
-        }
-      ]
-    );
-  };
-
-  /**
    * *** NOUVEAU: Centrer la vue sur la trajectoire ***
    */
   const centerOnTrajectory = () => {
@@ -307,11 +291,10 @@ export default function MapScreen() {
     
     // Calculer l'offset nécessaire pour centrer
     const targetOffset = {
-      x: (svgWidth / 2) - centerScreen.x + viewOffset.x,
-      y: (svgHeight / 2) - centerScreen.y + viewOffset.y
+      x: (svgWidth / 2) - centerScreen.x,
+      y: (svgHeight / 2) - centerScreen.y
     };
     
-    setViewOffset(targetOffset);
     scaleConverter.setViewOffset(targetOffset);
     
     console.log(`[VIEW] Centré sur trajectoire: centre=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), offset=(${targetOffset.x.toFixed(1)}, ${targetOffset.y.toFixed(1)})`);
@@ -412,39 +395,6 @@ export default function MapScreen() {
   };
 
   /**
-   * Gestionnaire de zoom
-   */
-  const handleZoomIn = () => {
-    const newZoom = Math.min(zoom + 1, MAX_ZOOM);
-    setZoom(newZoom);
-    scaleConverter.setZoom(newZoom);
-  };
-
-  const handleZoomOut = () => {
-    const newZoom = Math.max(zoom - 1, MIN_ZOOM);
-    setZoom(newZoom);
-    scaleConverter.setZoom(newZoom);
-  };
-
-  /**
-   * Gestionnaire de panoramique
-   */
-  const panResponder = PanResponder.create({
-    onMoveShouldSetPanResponder: () => true,
-    onPanResponderMove: (evt, gestureState) => {
-      const newOffset = {
-        x: viewOffset.x + gestureState.dx,
-        y: viewOffset.y + gestureState.dy
-      };
-      setViewOffset(newOffset);
-      scaleConverter.setViewOffset(newOffset);
-    },
-    onPanResponderRelease: () => {
-      // Optionnel: ajouter une logique de snap ou de limites
-    },
-  });
-
-  /**
    * Rendu de la grille noire
    */
   const renderGrid = () => {
@@ -505,11 +455,6 @@ export default function MapScreen() {
       return null;
     }
     
-    // *** LOGS RÉDUITS: Seulement pour les changements significatifs ***
-    if (state.trajectory.length % 5 === 0) { // Log seulement tous les 5 points
-      console.log(`[TRAJECTORY] ${state.trajectory.length} points - Dernier: (${state.trajectory[state.trajectory.length - 1].x.toFixed(2)}, ${state.trajectory[state.trajectory.length - 1].y.toFixed(2)})`);
-    }
-    
     const pathData = state.trajectory.map((point, index) => {
       const svgPos = worldToSVG({ x: point.x, y: point.y });
       return `${index === 0 ? 'M' : 'L'} ${svgPos.x} ${svgPos.y}`;
@@ -557,45 +502,70 @@ export default function MapScreen() {
   };
 
   /**
-   * Rendu de la position actuelle
+   * Rendu de la position actuelle avec orientation permanente
    */
   const renderCurrentPosition = () => {
     const svgPos = worldToSVG({ x: state.pose.x, y: state.pose.y });
     
-    // *** CORRECTION: Utiliser l'orientation stabilisée ***
-    const headingLength = 15; // *** RÉDUIT: de 30 à 15 pixels ***
-    const headingX = svgPos.x + Math.cos(stableOrientation) * headingLength;
-    const headingY = svgPos.y - Math.sin(stableOrientation) * headingLength;
+    // *** NOUVEAU: Utiliser l'orientation permanente ***
+    const currentOrientation = isOrientationActive ? permanentOrientation : stableOrientation;
+    const headingLength = 15;
+    const headingX = svgPos.x + Math.cos(currentOrientation) * headingLength;
+    const headingY = svgPos.y - Math.sin(currentOrientation) * headingLength;
+    
+    // Couleur selon l'état du tracking
+    const positionColor = state.isTracking ? "#00ff00" : "#ffaa00";
+    const orientationColor = isOrientationActive ? "#00ff88" : "#666666";
     
     return (
       <G>
-        {/* Ligne de direction */}
+        {/* Ligne de direction - toujours visible */}
         <Line
           x1={svgPos.x}
           y1={svgPos.y}
           x2={headingX}
           y2={headingY}
-          stroke="#00ff00"  // Vert fluo
-          strokeWidth="2"   // *** RÉDUIT: de 4 à 2 pixels ***
+          stroke={orientationColor}
+          strokeWidth="3"
+          opacity={isOrientationActive ? "1.0" : "0.5"}
         />
-        {/* Position actuelle - 2x plus petite */}
+        
+        {/* Position actuelle */}
         <Circle
           cx={svgPos.x}
           cy={svgPos.y}
-          r="7.5"           // *** RÉDUIT: de 15 à 7.5 pixels ***
-          fill="#00ff00"    // Vert fluo
+          r="7.5"
+          fill={positionColor}
           stroke="#ffffff"
-          strokeWidth="2"   // *** RÉDUIT: de 3 à 2 pixels ***
+          strokeWidth="2"
+          opacity={state.isTracking ? "1.0" : "0.7"}
         />
-        {/* Niveau de confiance - ajusté proportionnellement */}
-        <Circle
-          cx={svgPos.x}
-          cy={svgPos.y}
-          r={7.5 + (1 - state.pose.confidence) * 15}  // *** RÉDUIT: de 15+30 à 7.5+15 ***
-          fill="none"
-          stroke="rgba(0, 255, 0, 0.3)"
-          strokeWidth="1"   // *** RÉDUIT: de 2 à 1 pixel ***
-        />
+        
+        {/* Niveau de confiance - seulement en tracking */}
+        {state.isTracking && (
+          <Circle
+            cx={svgPos.x}
+            cy={svgPos.y}
+            r={7.5 + (1 - state.pose.confidence) * 15}
+            fill="none"
+            stroke="rgba(0, 255, 0, 0.3)"
+            strokeWidth="1"
+          />
+        )}
+        
+        {/* *** NOUVEAU: Indicateur d'orientation permanente *** */}
+        {isOrientationActive && !state.isTracking && (
+          <Circle
+            cx={svgPos.x}
+            cy={svgPos.y}
+            r="12"
+            fill="none"
+            stroke="#00ff88"
+            strokeWidth="1"
+            strokeDasharray="3,3"
+            opacity="0.8"
+          />
+        )}
       </G>
     );
   };
@@ -658,9 +628,15 @@ export default function MapScreen() {
           
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Orientation</Text>
-            <Text style={styles.metricValue}>
-              {(state.pose.theta * 180 / Math.PI).toFixed(1)}°
+            <Text style={[styles.metricValue, { color: isOrientationActive ? '#00ff88' : '#666666' }]}>
+              {isOrientationActive 
+                ? (permanentOrientation * 180 / Math.PI).toFixed(1) + '°'
+                : (state.pose.theta * 180 / Math.PI).toFixed(1) + '°'
+              }
             </Text>
+            {isOrientationActive && (
+              <Ionicons name="compass" size={12} color="#00ff88" />
+            )}
           </View>
         </View>
 
@@ -818,6 +794,196 @@ export default function MapScreen() {
     lastOrientationUpdateRef.current = now;
   };
 
+  /**
+   * *** NOUVEAU: Recalibration manuelle de la boussole ***
+   */
+  const handleCompassRecalibration = () => {
+    Alert.alert(
+      'Recalibrer la boussole',
+      'Cette action va réinitialiser la calibration de l\'orientation et redémarrer le processus automatique.\n\nUtilisez cette fonction si la direction semble incorrecte après avoir changé la position du téléphone (main ↔ poche).',
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Recalibrer',
+          onPress: () => {
+            try {
+              // Déclencher la recalibration dans le SDK
+              const result = localizationSDK.triggerRecalibration('manual');
+              if (result) {
+                Alert.alert(
+                  'Recalibration démarrée',
+                  'Marchez en ligne droite pendant quelques pas pour permettre la recalibration automatique de l\'orientation.',
+                  [{ text: 'Compris' }]
+                );
+              } else {
+                Alert.alert('Erreur', 'Impossible de déclencher la recalibration');
+              }
+            } catch (error) {
+              console.error('Erreur recalibration:', error);
+              Alert.alert('Erreur', 'Une erreur est survenue lors de la recalibration');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  /**
+   * *** NOUVEAU: Callback pour le changement de zoom ***
+   */
+  const handleZoomChange = (newZoom) => {
+    setZoom(newZoom);
+  };
+
+  /**
+   * *** NOUVEAU: Démarrer l'orientation permanente ***
+   */
+  const startPermanentOrientation = async () => {
+    try {
+      // Vérifier la disponibilité des capteurs
+      const magnetometerAvailable = await Magnetometer.isAvailableAsync();
+      const accelerometerAvailable = await Accelerometer.isAvailableAsync();
+      
+      if (!magnetometerAvailable || !accelerometerAvailable) {
+        console.warn('Capteurs d\'orientation non disponibles');
+        return;
+      }
+
+      // Configurer les taux d'échantillonnage
+      Magnetometer.setUpdateInterval(100); // 10 Hz
+      Accelerometer.setUpdateInterval(100); // 10 Hz
+
+      // Variables pour le calcul d'orientation
+      let lastMagnetometer = { x: 0, y: 0, z: 0 };
+      let lastAccelerometer = { x: 0, y: 0, z: 0 };
+
+      // Abonnement au magnétomètre
+      orientationSubscriptions.current.magnetometer = Magnetometer.addListener((data) => {
+        lastMagnetometer = data;
+        calculatePermanentOrientation(lastAccelerometer, lastMagnetometer);
+      });
+
+      // Abonnement à l'accéléromètre
+      orientationSubscriptions.current.accelerometer = Accelerometer.addListener((data) => {
+        lastAccelerometer = data;
+        calculatePermanentOrientation(lastAccelerometer, lastMagnetometer);
+      });
+
+      setIsOrientationActive(true);
+      console.log('Orientation permanente démarrée');
+      
+    } catch (error) {
+      console.error('Erreur démarrage orientation permanente:', error);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Arrêter l'orientation permanente ***
+   */
+  const stopPermanentOrientation = () => {
+    try {
+      // Désabonner de tous les capteurs
+      Object.values(orientationSubscriptions.current).forEach(subscription => {
+        if (subscription && subscription.remove) {
+          subscription.remove();
+        }
+      });
+      orientationSubscriptions.current = {};
+      
+      setIsOrientationActive(false);
+      console.log('Orientation permanente arrêtée');
+      
+    } catch (error) {
+      console.error('Erreur arrêt orientation permanente:', error);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Calculer l'orientation permanente ***
+   */
+  const calculatePermanentOrientation = (accelerometer, magnetometer) => {
+    try {
+      // Normaliser l'accélération pour obtenir la gravité
+      const accNorm = Math.sqrt(
+        accelerometer.x * accelerometer.x + 
+        accelerometer.y * accelerometer.y + 
+        accelerometer.z * accelerometer.z
+      );
+      
+      if (accNorm === 0) return;
+      
+      const ax = accelerometer.x / accNorm;
+      const ay = accelerometer.y / accNorm;
+      const az = accelerometer.z / accNorm;
+
+      // Normaliser le champ magnétique
+      const magNorm = Math.sqrt(
+        magnetometer.x * magnetometer.x + 
+        magnetometer.y * magnetometer.y + 
+        magnetometer.z * magnetometer.z
+      );
+      
+      if (magNorm === 0) return;
+      
+      const mx = magnetometer.x / magNorm;
+      const my = magnetometer.y / magNorm;
+      const mz = magnetometer.z / magNorm;
+
+      // Compensation d'inclinaison pour le magnétomètre
+      // Calculer les angles de rotation (pitch et roll)
+      const pitch = Math.asin(-ax);
+      const roll = Math.atan2(ay, az);
+
+      // Appliquer la compensation d'inclinaison
+      const magX = mx * Math.cos(pitch) + mz * Math.sin(pitch);
+      const magY = mx * Math.sin(roll) * Math.sin(pitch) + 
+                   my * Math.cos(roll) - 
+                   mz * Math.sin(roll) * Math.cos(pitch);
+
+      // Calculer l'azimut (orientation)
+      let azimuth = Math.atan2(-magY, magX);
+      
+      // Normaliser entre 0 et 2π
+      if (azimuth < 0) {
+        azimuth += 2 * Math.PI;
+      }
+
+      // Filtrage simple pour stabiliser l'orientation
+      const alpha = 0.1; // Facteur de lissage
+      const currentOrientation = permanentOrientationRef.current;
+      
+      // Gérer le passage par 0/2π
+      let angleDiff = azimuth - currentOrientation;
+      if (angleDiff > Math.PI) {
+        angleDiff -= 2 * Math.PI;
+      } else if (angleDiff < -Math.PI) {
+        angleDiff += 2 * Math.PI;
+      }
+      
+      const newOrientation = currentOrientation + alpha * angleDiff;
+      
+      // Normaliser entre 0 et 2π
+      const normalizedOrientation = ((newOrientation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+      
+      permanentOrientationRef.current = normalizedOrientation;
+      setPermanentOrientation(normalizedOrientation);
+      
+    } catch (error) {
+      console.error('Erreur calcul orientation:', error);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Basculer l'orientation permanente ***
+   */
+  const togglePermanentOrientation = () => {
+    if (isOrientationActive) {
+      stopPermanentOrientation();
+    } else {
+      startPermanentOrientation();
+    }
+  };
+
   if (!isMapLoaded) {
     return (
       <SafeAreaView style={styles.container}>
@@ -831,25 +997,33 @@ export default function MapScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Carte SVG avec gestes */}
-      <View style={styles.mapContainer} {...panResponder.panHandlers}>
-        <Svg width={svgWidth} height={svgHeight} style={styles.svg}>
-          {/* Fond noir */}
-          <Path
-            d={`M 0 0 L ${svgWidth} 0 L ${svgWidth} ${svgHeight} L 0 ${svgHeight} Z`}
-            fill="#000000"
-          />
-          
-          {/* Grille */}
-          {renderGrid()}
-          
-          {/* Trajectoire */}
-          {renderTrajectory()}
-          
-          {/* Position actuelle */}
-          {renderCurrentPosition()}
-        </Svg>
-      </View>
+      {/* Carte SVG avec gestes avancés */}
+      <ZoomableView 
+        onZoomChange={handleZoomChange}
+        minZoom={MIN_ZOOM}
+        maxZoom={MAX_ZOOM}
+      >
+        <View style={styles.mapContainer}>
+          <Svg width={svgWidth} height={svgHeight} style={styles.svg}>
+            <G>
+              {/* Fond noir */}
+              <Path
+                d={`M ${-svgWidth} ${-svgHeight} L ${svgWidth * 2} ${-svgHeight} L ${svgWidth * 2} ${svgHeight * 2} L ${-svgWidth} ${svgHeight * 2} Z`}
+                fill="#000000"
+              />
+              
+              {/* Grille */}
+              {renderGrid()}
+              
+              {/* Trajectoire */}
+              {renderTrajectory()}
+              
+              {/* Position actuelle */}
+              {renderCurrentPosition()}
+            </G>
+          </Svg>
+        </View>
+      </ZoomableView>
 
       {/* Métriques en temps réel */}
       {renderMetrics()}
@@ -877,8 +1051,8 @@ export default function MapScreen() {
           />
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.controlButton} onPress={resetPosition}>
-          <Ionicons name="refresh" size={24} color="#00ff88" />
+        <TouchableOpacity style={styles.controlButton} onPress={centerOnTrajectory}>
+          <Ionicons name="locate" size={24} color="#00ff88" />
         </TouchableOpacity>
         
         {/* *** NOUVEAU: Bouton sauvegarder trajet *** */}
@@ -890,21 +1064,24 @@ export default function MapScreen() {
           <Ionicons name="save" size={24} color={(!state.trajectory || state.trajectory.length === 0) ? "#666666" : "#00ff88"} />
         </TouchableOpacity>
         
-        {/* *** NOUVEAU: Bouton centrer sur trajectoire *** */}
+        {/* *** NOUVEAU: Bouton recalibrer la boussole *** */}
         <TouchableOpacity 
           style={styles.controlButton} 
-          onPress={centerOnTrajectory}
-          disabled={!state.trajectory || state.trajectory.length === 0}
+          onPress={handleCompassRecalibration}
         >
-          <Ionicons name="locate" size={24} color="#00ff88" />
+          <Ionicons name="compass" size={24} color="#00ff88" />
         </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.controlButton} onPress={handleZoomOut}>
-          <Ionicons name="remove" size={24} color="#00ff88" />
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.controlButton} onPress={handleZoomIn}>
-          <Ionicons name="add" size={24} color="#00ff88" />
+
+        {/* *** NOUVEAU: Bouton orientation permanente *** */}
+        <TouchableOpacity 
+          style={[styles.controlButton, isOrientationActive && styles.activeButton]} 
+          onPress={togglePermanentOrientation}
+        >
+          <Ionicons 
+            name="navigate" 
+            size={24} 
+            color={isOrientationActive ? "#000000" : "#00ff88"} 
+          />
         </TouchableOpacity>
       </View>
 

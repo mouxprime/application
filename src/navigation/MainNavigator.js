@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { View, ScrollView, TouchableOpacity, Text, StyleSheet, Dimensions } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -8,24 +9,47 @@ import AnalyticsScreen from '../screens/AnalyticsScreen';
 import AccountScreen from '../screens/AccountScreen';
 
 const Tab = createBottomTabNavigator();
+const { width: screenWidth } = Dimensions.get('window');
+
+// Configuration des onglets avec leurs informations
+const tabsConfig = [
+  {
+    name: 'Carte',
+    component: MapScreen,
+    headerTitle: 'Localisation Intérieure',
+    iconFocused: 'map',
+    iconUnfocused: 'map-outline',
+  },
+  {
+    name: 'Capteurs',
+    component: SensorsScreen,
+    headerTitle: 'Données Capteurs',
+    iconFocused: 'hardware-chip',
+    iconUnfocused: 'hardware-chip-outline',
+  },
+  {
+    name: 'Analytique',
+    component: AnalyticsScreen,
+    headerTitle: 'Analyse Performance',
+    iconFocused: 'analytics',
+    iconUnfocused: 'analytics-outline',
+  },
+  {
+    name: 'Mon Compte',
+    component: AccountScreen,
+    headerTitle: 'Mon Compte',
+    iconFocused: 'person',
+    iconUnfocused: 'person-outline',
+  },
+];
 
 export default function MainNavigator() {
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         tabBarIcon: ({ focused, color, size }) => {
-          let iconName;
-
-          if (route.name === 'Carte') {
-            iconName = focused ? 'map' : 'map-outline';
-          } else if (route.name === 'Capteurs') {
-            iconName = focused ? 'hardware-chip' : 'hardware-chip-outline';
-          } else if (route.name === 'Analytique') {
-            iconName = focused ? 'analytics' : 'analytics-outline';
-          } else if (route.name === 'Mon Compte') {
-            iconName = focused ? 'person' : 'person-outline';
-          }
-
+          const tabConfig = tabsConfig.find(tab => tab.name === route.name);
+          const iconName = focused ? tabConfig?.iconFocused : tabConfig?.iconUnfocused;
           return <Ionicons name={iconName} size={size} color={color} />;
         },
         tabBarActiveTintColor: '#00ff88',
@@ -34,6 +58,16 @@ export default function MainNavigator() {
           backgroundColor: '#1a1a1a',
           borderTopColor: '#333333',
           borderTopWidth: 1,
+          paddingHorizontal: 0, // Supprimer le padding pour permettre le scroll
+        },
+        tabBarScrollEnabled: true, // Activer le scroll horizontal
+        tabBarItemStyle: {
+          minWidth: 80, // Largeur minimale pour chaque onglet
+          maxWidth: screenWidth / 3, // Largeur maximale
+        },
+        tabBarLabelStyle: {
+          fontSize: 12,
+          fontWeight: '600',
         },
         headerStyle: {
           backgroundColor: '#1a1a1a',
@@ -43,37 +77,130 @@ export default function MainNavigator() {
           fontWeight: 'bold',
         },
       })}
+      tabBar={(props) => <ScrollableTabBar {...props} />}
     >
-      <Tab.Screen 
-        name="Carte" 
-        component={MapScreen}
-        options={{
-          headerTitle: 'Localisation Intérieure'
-        }}
-      />
-      <Tab.Screen 
-        name="Capteurs" 
-        component={SensorsScreen}
-        options={{
-          headerTitle: 'Données Capteurs'
-        }}
-      />
-
-      <Tab.Screen 
-        name="Analytique" 
-        component={AnalyticsScreen}
-        options={{
-          headerTitle: 'Analyse Performance'
-        }}
-      />
-
-      <Tab.Screen 
-        name="Mon Compte" 
-        component={AccountScreen}
-        options={{
-          headerTitle: 'Mon Compte'
-        }}
-      />
+      {tabsConfig.map((tab) => (
+        <Tab.Screen
+          key={tab.name}
+          name={tab.name}
+          component={tab.component}
+          options={{
+            headerTitle: tab.headerTitle,
+          }}
+        />
+      ))}
     </Tab.Navigator>
   );
-} 
+}
+
+// Composant de barre d'onglets scrollable personnalisée
+function ScrollableTabBar({ state, descriptors, navigation }) {
+  const focusedOptions = descriptors[state.routes[state.index].key].options;
+
+  if (focusedOptions.tabBarVisible === false) {
+    return null;
+  }
+
+  return (
+    <View style={styles.tabBarContainer}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        style={styles.scrollView}
+      >
+        {state.routes.map((route, index) => {
+          const { options } = descriptors[route.key];
+          const label = options.tabBarLabel !== undefined
+            ? options.tabBarLabel
+            : options.title !== undefined
+            ? options.title
+            : route.name;
+
+          const isFocused = state.index === index;
+
+          const onPress = () => {
+            const event = navigation.emit({
+              type: 'tabPress',
+              target: route.key,
+              canPreventDefault: true,
+            });
+
+            if (!isFocused && !event.defaultPrevented) {
+              navigation.navigate(route.name);
+            }
+          };
+
+          const onLongPress = () => {
+            navigation.emit({
+              type: 'tabLongPress',
+              target: route.key,
+            });
+          };
+
+          // Obtenir l'icône depuis la configuration
+          const tabConfig = tabsConfig.find(tab => tab.name === route.name);
+          const iconName = isFocused ? tabConfig?.iconFocused : tabConfig?.iconUnfocused;
+          const color = isFocused ? '#00ff88' : '#888888';
+
+          return (
+            <TouchableOpacity
+              key={route.key}
+              accessibilityRole="button"
+              accessibilityState={isFocused ? { selected: true } : {}}
+              accessibilityLabel={options.tabBarAccessibilityLabel}
+              testID={options.tabBarTestID}
+              onPress={onPress}
+              onLongPress={onLongPress}
+              style={[
+                styles.tabItem,
+                isFocused && styles.tabItemFocused
+              ]}
+            >
+              <Ionicons name={iconName} size={24} color={color} />
+              <Text style={[styles.tabLabel, { color }]}>
+                {label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  tabBarContainer: {
+    backgroundColor: '#1a1a1a',
+    borderTopColor: '#333333',
+    borderTopWidth: 1,
+    paddingBottom: 20, // Espace pour les appareils avec encoche
+  },
+  scrollView: {
+    flexGrow: 0,
+  },
+  scrollContent: {
+    paddingHorizontal: 10,
+    alignItems: 'center',
+  },
+  tabItem: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    minWidth: 80,
+    borderRadius: 12,
+    marginHorizontal: 4,
+  },
+  tabItemFocused: {
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 255, 136, 0.3)',
+  },
+  tabLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+}); 

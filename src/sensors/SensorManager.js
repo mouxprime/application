@@ -320,19 +320,109 @@ export class SensorManager {
   }
 
   /**
-   * Estimation de l'orientation à partir du magnétomètre
+   * Estimation de l'orientation à partir du magnétomètre AVEC compensation d'inclinaison
    */
   getCompassHeading() {
-    if (!this.currentData.magnetometer.timestamp) return null;
+    if (!this.currentData.magnetometer.timestamp || !this.currentData.accelerometer.timestamp) {
+      return null;
+    }
 
     const mag = this.currentData.magnetometer;
-    const heading = Math.atan2(mag.y, mag.x);
+    const acc = this.currentData.accelerometer;
     
-    // Conversion en degrés et normalisation 0-360
-    let degrees = heading * 180 / Math.PI;
-    if (degrees < 0) degrees += 360;
+    // *** SOLUTION 1: Compensation d'inclinaison pour le cap ***
+    // Calculer l'orientation du téléphone à partir de l'accéléromètre
+    const accNorm = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    if (accNorm === 0) {
+      // Fallback vers calcul simple si pas d'accélération
+      const heading = Math.atan2(mag.y, mag.x);
+      let degrees = heading * 180 / Math.PI;
+      if (degrees < 0) degrees += 360;
+      return degrees;
+    }
     
-    return degrees;
+    // Normaliser l'accélération
+    const ax = acc.x / accNorm;
+    const ay = acc.y / accNorm;
+    const az = acc.z / accNorm;
+    
+    // Calculer roll et pitch du téléphone
+    const roll = Math.atan2(ay, az);
+    const pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az));
+    
+    // Projeter le vecteur magnétique sur le plan horizontal
+    // Rotation inverse pour compenser l'inclinaison du téléphone
+    const cosRoll = Math.cos(roll);
+    const sinRoll = Math.sin(roll);
+    const cosPitch = Math.cos(pitch);
+    const sinPitch = Math.sin(pitch);
+    
+    // Transformation du magnétomètre dans le référentiel horizontal
+    const magX_compensated = mag.x * cosPitch + mag.z * sinPitch;
+    const magY_compensated = mag.x * sinRoll * sinPitch + mag.y * cosRoll - mag.z * cosPitch * sinRoll;
+    
+    // Calcul du cap compensé
+    let headingRad = Math.atan2(magY_compensated, magX_compensated);
+    if (headingRad < 0) headingRad += 2 * Math.PI;
+    
+    return headingRad * (180 / Math.PI);
+  }
+
+  /**
+   * Calcul d'orientation avancé avec informations détaillées
+   */
+  getAdvancedOrientation() {
+    if (!this.currentData.magnetometer.timestamp || !this.currentData.accelerometer.timestamp) {
+      return null;
+    }
+
+    const mag = this.currentData.magnetometer;
+    const acc = this.currentData.accelerometer;
+    
+    // Normaliser l'accélération
+    const accNorm = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    if (accNorm === 0) return null;
+    
+    const ax = acc.x / accNorm;
+    const ay = acc.y / accNorm;
+    const az = acc.z / accNorm;
+    
+    // Calculer les angles d'Euler du téléphone
+    const roll = Math.atan2(ay, az);
+    const pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az));
+    
+    // Magnitude du champ magnétique
+    const magNorm = Math.sqrt(mag.x * mag.x + mag.y * mag.y + mag.z * mag.z);
+    
+    // Projection compensée
+    const cosRoll = Math.cos(roll);
+    const sinRoll = Math.sin(roll);
+    const cosPitch = Math.cos(pitch);
+    const sinPitch = Math.sin(pitch);
+    
+    const magX_comp = mag.x * cosPitch + mag.z * sinPitch;
+    const magY_comp = mag.x * sinRoll * sinPitch + mag.y * cosRoll - mag.z * cosPitch * sinRoll;
+    
+    // Cap compensé
+    let heading = Math.atan2(magY_comp, magX_comp);
+    if (heading < 0) heading += 2 * Math.PI;
+    
+    // Estimation de la qualité de la mesure
+    const tiltMagnitude = Math.sqrt(roll * roll + pitch * pitch);
+    const tiltConfidence = Math.max(0, 1 - tiltMagnitude / (Math.PI / 2)); // Confiance diminue avec l'inclinaison
+    const magConfidence = Math.min(1, magNorm / 50); // Confiance basée sur magnitude normale (~25-65µT)
+    
+    return {
+      heading: heading * (180 / Math.PI), // En degrés
+      headingRad: heading, // En radians
+      roll: roll * (180 / Math.PI),
+      pitch: pitch * (180 / Math.PI),
+      magneticNorm: magNorm,
+      tiltConfidence: tiltConfidence,
+      magneticConfidence: magConfidence,
+      overallConfidence: tiltConfidence * magConfidence,
+      isReliable: tiltConfidence > 0.7 && magConfidence > 0.5
+    };
   }
 
   /**

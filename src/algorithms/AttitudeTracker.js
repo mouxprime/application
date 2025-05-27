@@ -117,7 +117,7 @@ export class AttitudeTracker {
   }
 
   /**
-   * Filtre Madgwick AHRS
+   * Filtre Madgwick AHRS avec intégration complète du magnétomètre
    */
   updateMadgwickFilter(acc, gyro, mag, dt) {
     // Normaliser l'accélération
@@ -142,7 +142,10 @@ export class AttitudeTracker {
     const qDot3 = 0.5 * (q0 * gy - q1 * gz + q3 * gx);
     const qDot4 = 0.5 * (q0 * gz + q1 * gy - q2 * gx);
     
-    // Fonction objective et gradient (gravité)
+    // *** SOLUTION 2: Intégration complète du magnétomètre ***
+    let s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    
+    // Correction gravitationnelle (accéléromètre)
     const _2q0 = 2 * q0;
     const _2q1 = 2 * q1;
     const _2q2 = 2 * q2;
@@ -150,18 +153,17 @@ export class AttitudeTracker {
     const _4q0 = 4 * q0;
     const _4q1 = 4 * q1;
     const _4q2 = 4 * q2;
-    const _8q1 = 8 * q1;
-    const _8q2 = 8 * q2;
     const q0q0 = q0 * q0;
     const q1q1 = q1 * q1;
     const q2q2 = q2 * q2;
     const q3q3 = q3 * q3;
     
-    // Gradient descent algorithm corrective step
+    // Fonction objective pour la gravité
     const f1 = _2q1 * q3 - _2q0 * q2 - ax;
     const f2 = _2q0 * q1 + _2q2 * q3 - ay;
     const f3 = 1 - _2q1 * q1 - _2q2 * q2 - az;
     
+    // Jacobien pour la gravité
     const J_11or24 = _2q2;
     const J_12or23 = _2q3;
     const J_13or22 = _2q0;
@@ -169,13 +171,79 @@ export class AttitudeTracker {
     const J_32 = _4q1;
     const J_33 = _4q2;
     
-    // Gradient
-    let s0 = -J_13or22 * f2 + J_14or21 * f1;
-    let s1 = J_11or24 * f2 - J_12or23 * f1 - J_32 * f3;
-    let s2 = J_12or23 * f2 + J_11or24 * f1 - J_33 * f3;
-    let s3 = J_14or21 * f2 - J_13or22 * f1;
+    // Gradient pour la gravité
+    s0 = -J_13or22 * f2 + J_14or21 * f1;
+    s1 = J_11or24 * f2 - J_12or23 * f1 - J_32 * f3;
+    s2 = J_12or23 * f2 + J_11or24 * f1 - J_33 * f3;
+    s3 = J_14or21 * f2 - J_13or22 * f1;
     
-    // Normaliser le gradient
+    // *** NOUVEAU: Correction magnétique si disponible et fiable ***
+    if (mag && this.magneticState.confidence > 0.3) { // Seuil plus bas pour utiliser le magnétomètre
+      // Normaliser le magnétomètre
+      const magNorm = Math.sqrt(mag.x * mag.x + mag.y * mag.y + mag.z * mag.z);
+      if (magNorm > 0) {
+        const mx = mag.x / magNorm;
+        const my = mag.y / magNorm;
+        const mz = mag.z / magNorm;
+        
+        // Référence magnétique dans le référentiel terrestre (nord = [1, 0, 0] dans le plan horizontal)
+        // Calculer la direction magnétique attendue dans le référentiel du capteur
+        const _2q0mx = 2 * q0 * mx;
+        const _2q0my = 2 * q0 * my;
+        const _2q0mz = 2 * q0 * mz;
+        const _2q1mx = 2 * q1 * mx;
+        const _2q1my = 2 * q1 * my;
+        const _2q1mz = 2 * q1 * mz;
+        const _2q2mx = 2 * q2 * mx;
+        const _2q2my = 2 * q2 * my;
+        const _2q2mz = 2 * q2 * mz;
+        const _2q3mx = 2 * q3 * mx;
+        const _2q3my = 2 * q3 * my;
+        const _2q3mz = 2 * q3 * mz;
+        
+        // Champ magnétique de référence (horizontal, pointant vers le nord magnétique)
+        const hx = mx * q0q0 - _2q0my * q3 + _2q0mz * q2 + mx * q1q1 + _2q1 * my * q2 + _2q1 * mz * q3 - mx * q2q2 - mx * q3q3;
+        const hy = _2q0mx * q3 + my * q0q0 - _2q0mz * q1 + _2q1mx * q2 - my * q1q1 + my * q2q2 + _2q2 * mz * q3 - my * q3q3;
+        const _2bx = Math.sqrt(hx * hx + hy * hy);
+        const _2bz = -_2q0mx * q2 + _2q0my * q1 + mz * q0q0 + _2q1mx * q3 - mz * q1q1 + _2q2 * my * q3 - mz * q2q2 + mz * q3q3;
+        const _4bx = 2 * _2bx;
+        const _4bz = 2 * _2bz;
+        
+        // Fonction objective pour le magnétomètre
+        const f4 = _2bx * (0.5 - q2q2 - q3q3) + _2bz * (q1 * q3 - q0 * q2) - mx;
+        const f5 = _2bx * (q1 * q2 - q0 * q3) + _2bz * (q0 * q1 + q2 * q3) - my;
+        const f6 = _2bx * (q0 * q2 + q1 * q3) + _2bz * (0.5 - q1q1 - q2q2) - mz;
+        
+        // Jacobien pour le magnétomètre
+        const J_14or21_mag = _2bz * q2;
+        const J_11or24_mag = _2bx * q3 + _2bz * q1;
+        const J_12or23_mag = _2bx * q2 + _2bz * q0;
+        const J_13or22_mag = _2bx * q1 - _4bz * q2;
+        const J_32_mag = -_4bx * q2 - _2bz * q0;
+        const J_33_mag = -_4bx * q3 + _2bz * q1;
+        const J_41_mag = -_2bz * q3;
+        const J_42_mag = _2bx * q3 - _2bz * q1;
+        const J_43_mag = _2bx * q2 + _2bz * q0;
+        const J_44_mag = _2bx * q1;
+        const J_51_mag = _2bz * q2;
+        const J_52_mag = _2bx * q2 + _2bz * q0;
+        const J_53_mag = _2bx * q3 - _4bz * q1;
+        const J_54_mag = _2bx * q0 - _2bz * q3;
+        const J_61_mag = _2bx * q1;
+        const J_62_mag = _2bx * q0 - _4bz * q2;
+        const J_63_mag = _2bx * q3 - _4bz * q1;
+        const J_64_mag = _2bx * q2;
+        
+        // Gradient magnétique
+        const magWeight = this.magneticState.confidence; // Pondération par la confiance
+        s0 += magWeight * (J_14or21_mag * f4 + J_11or24_mag * f5 + J_61_mag * f6);
+        s1 += magWeight * (J_12or23_mag * f4 + J_13or22_mag * f5 + J_62_mag * f6);
+        s2 += magWeight * (J_32_mag * f4 + J_33_mag * f5 + J_63_mag * f6);
+        s3 += magWeight * (J_41_mag * f4 + J_42_mag * f5 + J_64_mag * f6);
+      }
+    }
+    
+    // Normaliser le gradient total
     const norm = Math.sqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
     if (norm > 0) {
       s0 /= norm;
@@ -184,10 +252,10 @@ export class AttitudeTracker {
       s3 /= norm;
     }
     
-    // Fusion magnétomètre si disponible et fiable
+    // Gain adaptatif basé sur la confiance magnétique
     let beta = this.config.beta;
-    if (mag && this.magneticState.confidence > this.config.magConfidenceThreshold) {
-      beta *= (1 + this.magneticState.confidence); // Augmenter gain si mag fiable
+    if (mag && this.magneticState.confidence > 0.5) {
+      beta *= (1 + this.magneticState.confidence * 0.5); // Augmentation modérée du gain
     }
     
     // Appliquer feedback step

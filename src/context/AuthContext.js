@@ -10,7 +10,8 @@ const AUTH_ACTIONS = {
   SAVE_TRAJECTORY: 'SAVE_TRAJECTORY',
   DELETE_TRAJECTORY: 'DELETE_TRAJECTORY',
   SET_LOADING: 'SET_LOADING',
-  SET_ERROR: 'SET_ERROR'
+  SET_ERROR: 'SET_ERROR',
+  UPDATE_USER: 'UPDATE_USER'
 };
 
 // État initial
@@ -75,6 +76,12 @@ function authReducer(state, action) {
         ...state,
         error: action.payload,
         isLoading: false
+      };
+      
+    case AUTH_ACTIONS.UPDATE_USER:
+      return {
+        ...state,
+        user: action.payload
       };
       
     default:
@@ -318,6 +325,47 @@ export function AuthProvider({ children }) {
         throw new Error(error.message || 'Erreur lors de la génération du SVG');
       }
     }, []),
+
+    // *** NOUVEAU: Mettre à jour le profil utilisateur ***
+    updateUserProfile: useCallback(async (profileData) => {
+      if (!state.isAuthenticated || !state.user) {
+        throw new Error('Utilisateur non connecté');
+      }
+
+      try {
+        // Mettre à jour l'utilisateur avec les nouvelles données de profil
+        const updatedUser = {
+          ...state.user,
+          ...profileData,
+          updatedAt: new Date().toISOString()
+        };
+
+        // Sauvegarder dans le contexte
+        dispatch({
+          type: AUTH_ACTIONS.UPDATE_USER,
+          payload: updatedUser
+        });
+
+        // Sauvegarder dans AsyncStorage
+        await AsyncStorage.setItem('user', JSON.stringify(updatedUser));
+
+        // Mettre à jour aussi dans la liste des utilisateurs
+        const usersData = await AsyncStorage.getItem('users');
+        const users = usersData ? JSON.parse(usersData) : [];
+        const userIndex = users.findIndex(u => u.id === state.user.id);
+        
+        if (userIndex !== -1) {
+          users[userIndex] = updatedUser;
+          await AsyncStorage.setItem('users', JSON.stringify(users));
+        }
+
+        return { success: true, user: updatedUser };
+      } catch (error) {
+        console.error('Erreur mise à jour profil:', error);
+        dispatch({ type: AUTH_ACTIONS.SET_ERROR, payload: error.message });
+        return { success: false, error: error.message };
+      }
+    }, [state.isAuthenticated, state.user]),
 
     // Effacer l'erreur
     clearError: useCallback(() => {

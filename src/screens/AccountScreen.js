@@ -7,20 +7,33 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
-  ScrollView
+  ScrollView,
+  Image,
+  Modal
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
+import * as ImagePicker from 'expo-image-picker';
 
 export default function AccountScreen() {
   const { state, actions } = useAuth();
-  const [currentView, setCurrentView] = useState('main'); // 'main', 'login', 'register', 'trajectories'
+  const [currentView, setCurrentView] = useState('main'); // 'main', 'login', 'register', 'trajectories', 'profile'
   const [formData, setFormData] = useState({
     username: '',
     password: '',
     confirmPassword: ''
   });
+
+  // *** NOUVEAU: États pour le profil utilisateur ***
+  const [profileData, setProfileData] = useState({
+    height: state.user?.height || 170, // Taille en cm
+    profileImage: state.user?.profileImage || null,
+    isEditingHeight: false
+  });
+
+  // *** NOUVEAU: État pour le modal de sélection d'image ***
+  const [imagePickerModal, setImagePickerModal] = useState(false);
 
   // *** NOUVEAU: État pour les options d'export ***
   const [exportModal, setExportModal] = useState({
@@ -196,15 +209,194 @@ export default function AccountScreen() {
     }
   };
 
+  // *** NOUVEAU: Fonctions pour la gestion du profil ***
+  
+  // Sélectionner une photo de profil
+  const selectProfileImage = async () => {
+    try {
+      // Demander les permissions
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission requise', 'L\'accès à la galerie est nécessaire pour choisir une photo de profil.');
+        return;
+      }
+
+      // Ouvrir la galerie
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1], // Format carré
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        const imageUri = result.assets[0].uri;
+        setProfileData(prev => ({ ...prev, profileImage: imageUri }));
+        
+        // Sauvegarder dans le contexte utilisateur
+        await actions.updateUserProfile({ profileImage: imageUri });
+        
+        Alert.alert('Succès', 'Photo de profil mise à jour !');
+      }
+    } catch (error) {
+      console.error('Erreur sélection image:', error);
+      Alert.alert('Erreur', 'Impossible de sélectionner l\'image');
+    }
+    setImagePickerModal(false);
+  };
+
+  // Prendre une photo avec la caméra
+  const takeProfilePhoto = async () => {
+    try {
+      // Demander les permissions
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission requise', 'L\'accès à la caméra est nécessaire pour prendre une photo.');
+        return;
+      }
+
+      // Ouvrir la caméra
+      const result = await ImagePicker.launchCameraAsync({
+        allowsEditing: true,
+        aspect: [1, 1], // Format carré
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        const imageUri = result.assets[0].uri;
+        setProfileData(prev => ({ ...prev, profileImage: imageUri }));
+        
+        // Sauvegarder dans le contexte utilisateur
+        await actions.updateUserProfile({ profileImage: imageUri });
+        
+        Alert.alert('Succès', 'Photo de profil mise à jour !');
+      }
+    } catch (error) {
+      console.error('Erreur prise de photo:', error);
+      Alert.alert('Erreur', 'Impossible de prendre la photo');
+    }
+    setImagePickerModal(false);
+  };
+
+  // Supprimer la photo de profil
+  const removeProfileImage = async () => {
+    Alert.alert(
+      'Supprimer la photo',
+      'Êtes-vous sûr de vouloir supprimer votre photo de profil ?',
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Supprimer',
+          style: 'destructive',
+          onPress: async () => {
+            setProfileData(prev => ({ ...prev, profileImage: null }));
+            await actions.updateUserProfile({ profileImage: null });
+            Alert.alert('Succès', 'Photo de profil supprimée');
+          }
+        }
+      ]
+    );
+    setImagePickerModal(false);
+  };
+
+  // Modifier la taille
+  const updateHeight = async (newHeight) => {
+    const height = parseInt(newHeight);
+    if (isNaN(height) || height < 100 || height > 250) {
+      Alert.alert('Erreur', 'Veuillez entrer une taille valide entre 100 et 250 cm');
+      return;
+    }
+
+    setProfileData(prev => ({ ...prev, height, isEditingHeight: false }));
+    
+    // Sauvegarder dans le contexte utilisateur
+    await actions.updateUserProfile({ height });
+    
+    Alert.alert('Succès', `Taille mise à jour : ${height} cm\n\nCela améliorera la précision de l'algorithme de détection de pas.`);
+  };
+
   // Rendu de la vue principale (connecté)
   const renderMainView = () => (
     <ScrollView style={styles.container}>
       <View style={styles.header}>
-        <Ionicons name="person-circle" size={64} color="#00ff88" />
+        {/* Photo de profil */}
+        <TouchableOpacity 
+          style={styles.profileImageContainer}
+          onPress={() => setImagePickerModal(true)}
+        >
+          {profileData.profileImage ? (
+            <Image source={{ uri: profileData.profileImage }} style={styles.profileImage} />
+          ) : (
+            <View style={styles.defaultProfileImage}>
+              <Ionicons name="person" size={48} color="#00ff88" />
+            </View>
+          )}
+          <View style={styles.editImageBadge}>
+            <Ionicons name="camera" size={16} color="#ffffff" />
+          </View>
+        </TouchableOpacity>
+
         <Text style={styles.welcomeText}>Bonjour, {state.user.username} !</Text>
         <Text style={styles.memberSince}>
           Membre depuis le {new Date(state.user.createdAt).toLocaleDateString()}
         </Text>
+      </View>
+
+      {/* Section Profil */}
+      <View style={styles.profileSection}>
+        <Text style={styles.sectionTitle}>Mon Profil</Text>
+        
+        {/* Taille */}
+        <View style={styles.profileItem}>
+          <View style={styles.profileItemLeft}>
+            <Ionicons name="resize" size={24} color="#00ff88" />
+            <View style={styles.profileItemText}>
+              <Text style={styles.profileItemTitle}>Taille</Text>
+              <Text style={styles.profileItemSubtitle}>
+                Améliore la précision de l'algorithme
+              </Text>
+            </View>
+          </View>
+          
+          {profileData.isEditingHeight ? (
+            <View style={styles.heightEditContainer}>
+              <TextInput
+                style={styles.heightInput}
+                value={profileData.height.toString()}
+                onChangeText={(text) => setProfileData(prev => ({ ...prev, height: parseInt(text) || 170 }))}
+                keyboardType="numeric"
+                placeholder="170"
+                placeholderTextColor="#666666"
+                maxLength={3}
+              />
+              <Text style={styles.heightUnit}>cm</Text>
+              <TouchableOpacity
+                style={styles.heightSaveButton}
+                onPress={() => updateHeight(profileData.height)}
+              >
+                <Ionicons name="checkmark" size={16} color="#ffffff" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.heightCancelButton}
+                onPress={() => setProfileData(prev => ({ 
+                  ...prev, 
+                  height: state.user?.height || 170,
+                  isEditingHeight: false 
+                }))}
+              >
+                <Ionicons name="close" size={16} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={styles.profileItemRight}
+              onPress={() => setProfileData(prev => ({ ...prev, isEditingHeight: true }))}
+            >
+              <Text style={styles.profileItemValue}>{profileData.height} cm</Text>
+              <Ionicons name="pencil" size={16} color="#666666" />
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       <View style={styles.menuContainer}>
@@ -231,6 +423,44 @@ export default function AccountScreen() {
           <Ionicons name="chevron-forward" size={20} color="#666666" />
         </TouchableOpacity>
       </View>
+
+      {/* Modal de sélection d'image */}
+      <Modal
+        visible={imagePickerModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setImagePickerModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Photo de profil</Text>
+            
+            <TouchableOpacity style={styles.modalOption} onPress={selectProfileImage}>
+              <Ionicons name="images" size={24} color="#00ff88" />
+              <Text style={styles.modalOptionText}>Choisir depuis la galerie</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity style={styles.modalOption} onPress={takeProfilePhoto}>
+              <Ionicons name="camera" size={24} color="#00ff88" />
+              <Text style={styles.modalOptionText}>Prendre une photo</Text>
+            </TouchableOpacity>
+            
+            {profileData.profileImage && (
+              <TouchableOpacity style={styles.modalOption} onPress={removeProfileImage}>
+                <Ionicons name="trash" size={24} color="#ff4444" />
+                <Text style={[styles.modalOptionText, { color: '#ff4444' }]}>Supprimer la photo</Text>
+              </TouchableOpacity>
+            )}
+            
+            <TouchableOpacity 
+              style={styles.modalCancel} 
+              onPress={() => setImagePickerModal(false)}
+            >
+              <Text style={styles.modalCancelText}>Annuler</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 
@@ -838,5 +1068,142 @@ const styles = StyleSheet.create({
     padding: 8,
     borderRadius: 8,
     backgroundColor: 'rgba(255, 68, 68, 0.1)',
+  },
+
+  // Styles pour la vue principale (connecté)
+  profileImageContainer: {
+    position: 'relative',
+    marginBottom: 20,
+  },
+  profileImage: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+  },
+  defaultProfileImage: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: '#333333',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  editImageBadge: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    padding: 2,
+    borderRadius: 12,
+  },
+  profileSection: {
+    padding: 20,
+  },
+  sectionTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  profileItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  profileItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  profileItemText: {
+    marginLeft: 10,
+  },
+  profileItemTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  profileItemSubtitle: {
+    color: '#666666',
+    fontSize: 14,
+  },
+  profileItemRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  profileItemValue: {
+    color: '#ffffff',
+    fontSize: 16,
+    marginLeft: 5,
+  },
+  heightEditContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  heightInput: {
+    flex: 1,
+    color: '#ffffff',
+    fontSize: 16,
+    padding: 10,
+  },
+  heightUnit: {
+    color: '#666666',
+    fontSize: 14,
+    marginLeft: 5,
+  },
+  heightSaveButton: {
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#00ff88',
+  },
+  heightCancelButton: {
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#00ff88',
+  },
+
+  // Styles pour le modal de sélection d'image
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: '#1a1a1a',
+    padding: 20,
+    borderRadius: 12,
+    width: '80%',
+  },
+  modalTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  modalOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#333333',
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  modalOptionText: {
+    color: '#ffffff',
+    fontSize: 16,
+    marginLeft: 10,
+  },
+  modalCancel: {
+    backgroundColor: 'transparent',
+    padding: 10,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
 }); 

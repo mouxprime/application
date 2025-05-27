@@ -869,6 +869,16 @@ export class LocalizationSDK {
     try {
       const timestamp = Date.now();
       
+      // *** NOUVEAU: Détection de changement de posture ***
+      if (sensorData.accelerometer && sensorData.gyroscope) {
+        const postureChanged = this.detectPostureChange(sensorData.accelerometer, sensorData.gyroscope);
+        
+        // Si changement de posture détecté et déjà calibré, déclencher recalibration
+        if (postureChanged && this.dynamicOrientationState.isCalibrated) {
+          this.triggerRecalibration('posture_change');
+        }
+      }
+      
       // *** NOUVEAU: Alimenter AttitudeTracker pour orientation adaptative ***
       if (sensorData.accelerometer && sensorData.gyroscope) {
         this.attitudeTracker.update(
@@ -910,17 +920,28 @@ export class LocalizationSDK {
       // *** NOUVEAU: Traiter la calibration dynamique d'orientation ***
       this.processDynamicOrientationCalibration(pdrState, sensorData);
       
-      // *** NOUVEAU: Appliquer l'offset magnétique si calibré ***
+      // *** AMÉLIORATION: Utiliser le cap compensé du SensorManager ***
       if (sensorData.magnetometer && this.magneticOffset !== undefined) {
-        // Corriger le cap magnétique avec l'offset calculé
-        const originalHeading = Math.atan2(sensorData.magnetometer.y, sensorData.magnetometer.x);
-        const correctedHeading = originalHeading + this.magneticOffset;
-        
-        // Créer un magnétomètre corrigé pour l'EKF
-        sensorData.magnetometer = {
-          ...sensorData.magnetometer,
-          correctedHeading: correctedHeading
-        };
+        // Utiliser le cap compensé d'inclinaison si disponible
+        const advancedOrientation = this.sensorManager?.getAdvancedOrientation?.();
+        if (advancedOrientation && advancedOrientation.isReliable) {
+          // Utiliser l'orientation compensée d'inclinaison
+          const correctedHeading = advancedOrientation.headingRad + this.magneticOffset;
+          sensorData.magnetometer = {
+            ...sensorData.magnetometer,
+            correctedHeading: correctedHeading,
+            compensatedHeading: advancedOrientation.headingRad,
+            confidence: advancedOrientation.overallConfidence
+          };
+        } else {
+          // Fallback vers correction simple
+          const originalHeading = Math.atan2(sensorData.magnetometer.y, sensorData.magnetometer.x);
+          const correctedHeading = originalHeading + this.magneticOffset;
+          sensorData.magnetometer = {
+            ...sensorData.magnetometer,
+            correctedHeading: correctedHeading
+          };
+        }
       }
       
       // Calcul delta temporel pour EKF
@@ -1027,7 +1048,7 @@ export class LocalizationSDK {
   }
 
   /**
-   * Tentative de calibration d'orientation dynamique
+   * Tentative de calibration d'orientation dynamique AMÉLIORÉE
    */
   attemptDynamicOrientationCalibration() {
     const steps = this.dynamicOrientationState.stepHistory;
@@ -1063,16 +1084,31 @@ export class LocalizationSDK {
     while (orientationOffset > Math.PI) orientationOffset -= 2 * Math.PI;
     while (orientationOffset < -Math.PI) orientationOffset += 2 * Math.PI;
     
-    // Vérifier que l'offset est raisonnable
+    // *** SOLUTION 3: Limites assouplies et gestion des grands offsets ***
     const maxOffset = this.config.dynamicOrientationCalibration.maxOffsetAngle;
-    if (Math.abs(orientationOffset) > maxOffset) {
-      console.log(`[CALIBRATION DYNAMIQUE] Offset trop grand: ${(orientationOffset * 180 / Math.PI).toFixed(1)}°, abandon`);
-      this.dynamicOrientationState.isCalibrating = false;
-      return;
+    const offsetDegrees = orientationOffset * 180 / Math.PI;
+    
+    // Gestion spéciale pour les offsets ~180° (téléphone à l'envers)
+    let finalOffset = orientationOffset;
+    if (Math.abs(offsetDegrees) > 150 && Math.abs(offsetDegrees) < 210) {
+      // Cas téléphone à l'envers - normaliser vers ±180°
+      finalOffset = offsetDegrees > 0 ? Math.PI : -Math.PI;
+      console.log(`[CALIBRATION DYNAMIQUE] Détection téléphone à l'envers: ${offsetDegrees.toFixed(1)}° → ${(finalOffset * 180 / Math.PI).toFixed(1)}°`);
+    } else if (Math.abs(orientationOffset) > maxOffset) {
+      // *** NOUVEAU: Seuil élargi à 120° au lieu de 70° ***
+      const enlargedMaxOffset = Math.PI * 2/3; // 120°
+      if (Math.abs(orientationOffset) <= enlargedMaxOffset) {
+        console.log(`[CALIBRATION DYNAMIQUE] Offset important mais acceptable: ${offsetDegrees.toFixed(1)}°`);
+        finalOffset = orientationOffset;
+      } else {
+        console.log(`[CALIBRATION DYNAMIQUE] Offset trop grand: ${offsetDegrees.toFixed(1)}°, abandon`);
+        this.dynamicOrientationState.isCalibrating = false;
+        return;
+      }
     }
     
     // Appliquer la calibration
-    this.applyDynamicOrientationCalibration(orientationOffset);
+    this.applyDynamicOrientationCalibration(finalOffset);
   }
 
   /**
@@ -1433,5 +1469,106 @@ export class LocalizationSDK {
     }
     
     return recommendations;
+  }
+
+  /**
+   * *** NOUVEAU: Détection de changement de posture du téléphone ***
+   */
+  detectPostureChange(accelerometer, gyroscope) {
+    if (!this.lastPostureCheck) {
+      this.lastPostureCheck = {
+        gravity: { ...accelerometer },
+        timestamp: Date.now(),
+        orientation: this.calculatePhoneOrientation(accelerometer)
+      };
+      return false;
+    }
+    
+    const currentTime = Date.now();
+    const timeSinceLastCheck = currentTime - this.lastPostureCheck.timestamp;
+    
+    // Vérifier seulement toutes les 5 secondes
+    if (timeSinceLastCheck < 5000) return false;
+    
+    const currentOrientation = this.calculatePhoneOrientation(accelerometer);
+    const lastOrientation = this.lastPostureCheck.orientation;
+    
+    // Calculer changement d'orientation
+    const rollChange = Math.abs(currentOrientation.roll - lastOrientation.roll);
+    const pitchChange = Math.abs(currentOrientation.pitch - lastOrientation.pitch);
+    
+    // Seuil de changement significatif (30°)
+    const significantChange = rollChange > Math.PI/6 || pitchChange > Math.PI/6;
+    
+    if (significantChange) {
+      console.log(`[POSTURE] Changement détecté - Roll: ${(rollChange * 180/Math.PI).toFixed(1)}°, Pitch: ${(pitchChange * 180/Math.PI).toFixed(1)}°`);
+      
+      // Mettre à jour la référence
+      this.lastPostureCheck = {
+        gravity: { ...accelerometer },
+        timestamp: currentTime,
+        orientation: currentOrientation
+      };
+      
+      return true;
+    }
+    
+    // Mise à jour périodique de la référence
+    this.lastPostureCheck.timestamp = currentTime;
+    return false;
+  }
+
+  /**
+   * *** NOUVEAU: Calculer l'orientation du téléphone à partir de l'accéléromètre ***
+   */
+  calculatePhoneOrientation(accelerometer) {
+    const accNorm = Math.sqrt(
+      accelerometer.x * accelerometer.x + 
+      accelerometer.y * accelerometer.y + 
+      accelerometer.z * accelerometer.z
+    );
+    
+    if (accNorm === 0) return { roll: 0, pitch: 0 };
+    
+    const ax = accelerometer.x / accNorm;
+    const ay = accelerometer.y / accNorm;
+    const az = accelerometer.z / accNorm;
+    
+    const roll = Math.atan2(ay, az);
+    const pitch = Math.atan2(-ax, Math.sqrt(ay * ay + az * az));
+    
+    return { roll, pitch };
+  }
+
+  /**
+   * *** NOUVEAU: Permettre la recalibration dynamique ***
+   */
+  triggerRecalibration(reason = 'manual') {
+    console.log(`[RECALIBRATION] Déclenchement: ${reason}`);
+    
+    // Réinitialiser l'état de calibration dynamique
+    this.dynamicOrientationState = {
+      isCalibrating: false,
+      isCalibrated: false,
+      stepHistory: [],
+      magneticHeadingHistory: [],
+      calculatedOffset: 0,
+      confidence: 0
+    };
+    
+    // Réinitialiser l'offset magnétique
+    this.magneticOffset = undefined;
+    
+    // Notifier l'UI
+    if (this.callbacks.onCalibrationProgress) {
+      this.callbacks.onCalibrationProgress({
+        step: 'recalibration_started',
+        progress: 0,
+        message: `Recalibration démarrée (${reason})`,
+        reason: reason
+      });
+    }
+    
+    return true;
   }
 } 
