@@ -53,10 +53,8 @@ export default function MapScreen() {
   const [batteryLevel, setBatteryLevel] = useState(1);
   const [batteryState, setBatteryState] = useState('unknown');
   
-  // *** NOUVEAU: État pour contrôle de mode ***
-  const [detectionMode, setDetectionMode] = useState('auto'); // 'auto' ou 'manual'
-  const [manualMode, setManualMode] = useState('stationary'); // Mode manuel sélectionné
-  const [modeControlVisible, setModeControlVisible] = useState(false); // Visibilité panneau contrôle
+  // *** NOUVEAU: État pour masquer/afficher le panneau de métriques ***
+  const [isMetricsPanelVisible, setIsMetricsPanelVisible] = useState(true);
   
   // État de la calibration
   const [calibrationModal, setCalibrationModal] = useState({
@@ -219,6 +217,7 @@ export default function MapScreen() {
       await localizationSDK.initialize(null);
       localizationSDK.resetPosition(0, 0, 0, 0);
       actions.resetPose(initialPose);
+      actions.resetTrajectory();
       
       setIsMapLoaded(true);
       
@@ -255,53 +254,14 @@ export default function MapScreen() {
           onPress: () => {
             const initialPose = { x: 0, y: 0, theta: 0 };
             actions.resetPose(initialPose);
+            actions.resetTrajectory();
             localizationSDK.resetPosition(0, 0, 0, 0);
             setViewOffset({ x: 0, y: 0 });
+            console.log('[RESET] Position et trajectoire réinitialisées');
           }
         }
       ]
     );
-  };
-
-  /**
-   * *** NOUVEAU: Basculement mode détection automatique/manuel ***
-   */
-  const toggleDetectionMode = () => {
-    const newMode = detectionMode === 'auto' ? 'manual' : 'auto';
-    setDetectionMode(newMode);
-    
-    if (newMode === 'manual') {
-      // Passer en mode manuel - forcer le mode sélectionné
-      localizationSDK.setManualMode(manualMode);
-      setModeControlVisible(true);
-    } else {
-      // Passer en mode automatique - réactiver la détection
-      localizationSDK.setAutoMode();
-      setModeControlVisible(false);
-    }
-    
-    console.log(`[MODE CONTROL] Basculement vers mode ${newMode}`);
-  };
-
-  /**
-   * *** NOUVEAU: Changement de mode manuel ***
-   */
-  const changeManualMode = (newMode) => {
-    setManualMode(newMode);
-    
-    if (detectionMode === 'manual') {
-      // Appliquer immédiatement si en mode manuel
-      localizationSDK.setManualMode(newMode);
-    }
-    
-    console.log(`[MODE CONTROL] Mode manuel changé vers: ${newMode}`);
-  };
-
-  /**
-   * *** NOUVEAU: Basculement visibilité panneau contrôle ***
-   */
-  const toggleModeControlPanel = () => {
-    setModeControlVisible(!modeControlVisible);
   };
 
   /**
@@ -401,21 +361,51 @@ export default function MapScreen() {
    * Rendu de la trajectoire en vert fluo
    */
   const renderTrajectory = () => {
-    if (!state.trajectory || state.trajectory.length < 2) return null;
+    if (!state.trajectory || state.trajectory.length < 2) {
+      //console.log(`[TRAJECTORY DEBUG] Trajectoire vide ou insuffisante: ${state.trajectory?.length || 0} points`);
+      return null;
+    }
+    
+    console.log(`[TRAJECTORY DEBUG] Rendu ${state.trajectory.length} points de trajectoire`);
+    console.log(`[TRAJECTORY DEBUG] Premiers points:`, state.trajectory.slice(0, 3).map(p => `(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`));
+    console.log(`[TRAJECTORY DEBUG] Derniers points:`, state.trajectory.slice(-3).map(p => `(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`));
     
     const pathData = state.trajectory.map((point, index) => {
       const svgPos = worldToSVG({ x: point.x, y: point.y });
       return `${index === 0 ? 'M' : 'L'} ${svgPos.x} ${svgPos.y}`;
     }).join(' ');
     
+    // Debug des coordonnées SVG
+    const firstSvgPos = worldToSVG({ x: state.trajectory[0].x, y: state.trajectory[0].y });
+    const lastSvgPos = worldToSVG({ x: state.trajectory[state.trajectory.length - 1].x, y: state.trajectory[state.trajectory.length - 1].y });
+    console.log(`[TRAJECTORY DEBUG] SVG coords - Premier: (${firstSvgPos.x}, ${firstSvgPos.y}), Dernier: (${lastSvgPos.x}, ${lastSvgPos.y})`);
+    
     return (
-      <Path
-        d={pathData}
-        stroke="#00ff00"  // Vert fluo
-        strokeWidth="3"
-        fill="none"
-        opacity="0.9"
-      />
+      <G>
+        {/* *** NOUVEAU: Petits cercles pour marquer chaque point de la trajectoire *** */}
+        {state.trajectory.map((point, index) => {
+          const svgPos = worldToSVG({ x: point.x, y: point.y });
+          return (
+            <Circle
+              key={`trajectory-point-${index}`}
+              cx={svgPos.x}
+              cy={svgPos.y}
+              r="3"
+              fill="#00ff00"
+              opacity="0.7"
+            />
+          );
+        })}
+        
+        {/* Ligne de trajectoire */}
+        <Path
+          d={pathData}
+          stroke="#00ff00"  // Vert fluo
+          strokeWidth="3"
+          fill="none"
+          opacity="0.9"
+        />
+      </G>
     );
   };
 
@@ -467,6 +457,8 @@ export default function MapScreen() {
    * Rendu des métriques en temps réel
    */
   const renderMetrics = () => {
+    if (!isMetricsPanelVisible) return null;
+
     const getBatteryIcon = () => {
       if (batteryLevel > 0.75) return 'battery-full';
       if (batteryLevel > 0.5) return 'battery-half';
@@ -498,20 +490,16 @@ export default function MapScreen() {
       return state.pose.confidence < 0.05 && state.isTracking;
     };
 
-    // *** NOUVEAU: Couleur du mode selon détection auto/manuel ***
-    const getModeColor = () => {
-      if (detectionMode === 'manual') return '#ffaa00'; // Orange pour manuel
-      return '#00ff88'; // Vert pour automatique
-    };
-
-    const getModeLabel = () => {
-      const baseMode = state.currentMode || 'STATIONNAIRE';
-      const prefix = detectionMode === 'manual' ? 'M:' : 'A:';
-      return `${prefix}${baseMode.toUpperCase()}`;
-    };
-
     return (
       <View style={styles.metricsPanel}>
+        {/* *** NOUVEAU: En-tête avec bouton de fermeture *** */}
+        <View style={styles.metricsPanelHeader}>
+          <Text style={styles.metricsPanelTitle}>Métriques Temps Réel</Text>
+          <TouchableOpacity onPress={toggleMetricsPanel} style={styles.closeButton}>
+            <Ionicons name="eye-off" size={20} color="#00ff88" />
+          </TouchableOpacity>
+        </View>
+        
         {/* Métriques principales */}
         <View style={styles.metricsRow}>
           <View style={styles.metricItem}>
@@ -531,20 +519,12 @@ export default function MapScreen() {
 
         {/* Métriques PDR avec indicateur mode */}
         <View style={styles.metricsRow}>
-          <TouchableOpacity 
-            style={styles.metricItem} 
-            onPress={toggleModeControlPanel}
-          >
+          <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Mode</Text>
             <Text style={[styles.metricValue, { color: getModeColor() }]}>
               {getModeLabel()}
             </Text>
-            <Ionicons 
-              name={detectionMode === 'manual' ? "hand-left" : "refresh"} 
-              size={12} 
-              color={getModeColor()} 
-            />
-          </TouchableOpacity>
+          </View>
           
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Pas</Text>
@@ -598,166 +578,21 @@ export default function MapScreen() {
   };
 
   /**
-   * *** NOUVEAU: Rendu du panneau de contrôle de mode ***
+   * *** NOUVEAU: Basculement visibilité panneau de métriques ***
    */
-  const renderModeControlPanel = () => {
-    if (!modeControlVisible) return null;
-
-    const modes = [
-      { key: 'stationary', label: 'Stationnaire', icon: 'pause' },
-      { key: 'walking', label: 'Marche', icon: 'walk' },
-      { key: 'crawling', label: 'Ramper', icon: 'body' },
-      { key: 'running', label: 'Course', icon: 'fitness' }
-    ];
-
-    const getModeColor = () => {
-      if (detectionMode === 'manual') return '#ffaa00'; // Orange pour manuel
-      return '#00ff88'; // Vert pour automatique
-    };
-
-    return (
-      <View style={styles.modeControlPanel}>
-        <View style={styles.modeControlContent}>
-          <View style={styles.modeControlHeader}>
-            <Text style={styles.modeControlTitle}>Contrôle de Mode</Text>
-            <TouchableOpacity onPress={toggleModeControlPanel}>
-              <Ionicons name="close" size={20} color="#ffffff" />
-            </TouchableOpacity>
-          </View>
-
-        {/* Basculement Auto/Manuel */}
-        <View style={styles.detectionModeRow}>
-          <TouchableOpacity
-            style={[
-              styles.detectionModeButton,
-              detectionMode === 'auto' && styles.detectionModeActive
-            ]}
-            onPress={() => {
-              if (detectionMode !== 'auto') toggleDetectionMode();
-            }}
-          >
-            <Ionicons name="refresh" size={16} color={detectionMode === 'auto' ? "#000000" : "#00ff88"} />
-            <Text style={[
-              styles.detectionModeText,
-              { color: detectionMode === 'auto' ? "#000000" : "#00ff88" }
-            ]}>
-              AUTO
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.detectionModeButton,
-              detectionMode === 'manual' && styles.detectionModeActive
-            ]}
-            onPress={() => {
-              if (detectionMode !== 'manual') toggleDetectionMode();
-            }}
-          >
-            <Ionicons name="hand-left" size={16} color={detectionMode === 'manual' ? "#000000" : "#ffaa00"} />
-            <Text style={[
-              styles.detectionModeText,
-              { color: detectionMode === 'manual' ? "#000000" : "#ffaa00" }
-            ]}>
-              MANUEL
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Sélection mode manuel */}
-        {detectionMode === 'manual' && (
-          <View style={styles.manualModeGrid}>
-            {modes.map(mode => (
-              <TouchableOpacity
-                key={mode.key}
-                style={[
-                  styles.manualModeButton,
-                  manualMode === mode.key && styles.manualModeActive
-                ]}
-                onPress={() => changeManualMode(mode.key)}
-              >
-                <Ionicons 
-                  name={mode.icon} 
-                  size={20} 
-                  color={manualMode === mode.key ? "#000000" : "#ffffff"} 
-                />
-                <Text style={[
-                  styles.manualModeText,
-                  { color: manualMode === mode.key ? "#000000" : "#ffffff" }
-                ]}>
-                  {mode.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-
-        {/* Informations mode actuel */}
-        <View style={styles.currentModeInfo}>
-          <Text style={styles.currentModeLabel}>Mode actuel:</Text>
-          <Text style={[styles.currentModeValue, { color: getModeColor() }]}>
-            {detectionMode === 'auto' ? 
-              `Automatique (${(state.currentMode || 'stationnaire').toUpperCase()})` :
-              `Manuel (${manualMode.toUpperCase()})`
-            }
-          </Text>
-        </View>
-        </View>
-      </View>
-    );
+  const toggleMetricsPanel = () => {
+    setIsMetricsPanelVisible(!isMetricsPanelVisible);
   };
 
   /**
-   * Rendu des alertes de diagnostic
+   * *** NOUVEAU: Couleur et label du mode (SIMPLIFIÉ) ***
    */
-  const renderDiagnosticAlerts = () => {
-    const alerts = [];
-    
-    // Alerte confiance faible
-    if (state.pose.confidence < 0.05 && state.isTracking) {
-      alerts.push({
-        key: 'low-confidence',
-        icon: 'warning',
-        color: '#ff4444',
-        message: 'Confiance très faible - Vérifiez la calibration'
-      });
-    }
-    
-    // Alerte pas non détectés
-    if (state.isTracking && state.currentMode === 'walking' && 
-        (state.stepCount || 0) === 0 && Date.now() - (state.lastModeChange || 0) > 10000) {
-      alerts.push({
-        key: 'no-steps',
-        icon: 'footsteps',
-        color: '#ffaa00', 
-        message: 'Aucun pas détecté en mode marche'
-      });
-    }
-    
-    // Alerte magnétomètre
-    if (state.sensors?.metadata?.magnetometerConfidence < 0.3) {
-      alerts.push({
-        key: 'mag-confidence',
-        icon: 'compass',
-        color: '#ffaa00',
-        message: 'Interférences magnétiques détectées'
-      });
-    }
-    
-    if (alerts.length === 0) return null;
-    
-    return (
-      <View style={styles.alertsContainer}>
-        {alerts.map(alert => (
-          <View key={alert.key} style={[styles.alertItem, { borderLeftColor: alert.color }]}>
-            <Ionicons name={alert.icon} size={16} color={alert.color} />
-            <Text style={[styles.alertText, { color: alert.color }]}>
-              {alert.message}
-            </Text>
-          </View>
-        ))}
-      </View>
-    );
+  const getModeColor = () => {
+    return '#00ff88'; // Toujours vert pour walking
+  };
+
+  const getModeLabel = () => {
+    return 'WALKING'; // Mode fixe
   };
 
   if (!isMapLoaded) {
@@ -796,11 +631,18 @@ export default function MapScreen() {
       {/* Métriques en temps réel */}
       {renderMetrics()}
 
-      {/* Alertes de diagnostic */}
-      {renderDiagnosticAlerts()}
-
       {/* Contrôles */}
       <View style={styles.controlsContainer}>
+        {/* *** NOUVEAU: Bouton d'affichage métriques quand masqué *** */}
+        {!isMetricsPanelVisible && (
+          <TouchableOpacity 
+            style={[styles.controlButton, styles.metricsToggleButton]} 
+            onPress={toggleMetricsPanel}
+          >
+            <Ionicons name="eye" size={24} color="#00ff88" />
+          </TouchableOpacity>
+        )}
+        
         <TouchableOpacity
           style={[styles.controlButton, state.isTracking && styles.activeButton]}
           onPress={toggleTracking}
@@ -873,9 +715,6 @@ export default function MapScreen() {
           </View>
         </View>
       </Modal>
-
-      {/* Rendu du panneau de contrôle de mode */}
-      {renderModeControlPanel()}
     </SafeAreaView>
   );
 }
@@ -907,6 +746,27 @@ const styles = StyleSheet.create({
     padding: 15,
     borderTopWidth: 1,
     borderTopColor: '#00ff88',
+  },
+  metricsPanelHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  metricsPanelTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  closeButton: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   metricsRow: {
     flexDirection: 'row',
@@ -951,29 +811,6 @@ const styles = StyleSheet.create({
   },
   activeButton: {
     backgroundColor: '#00ff88',
-  },
-  alertsContainer: {
-    backgroundColor: 'rgba(0, 0, 0, 0.9)',
-    borderTopWidth: 1,
-    borderTopColor: '#333333',
-    paddingHorizontal: 15,
-    paddingVertical: 10,
-  },
-  alertItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderLeftWidth: 3,
-    borderRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginBottom: 5,
-  },
-  alertText: {
-    fontSize: 12,
-    fontFamily: 'monospace',
-    marginLeft: 8,
-    flex: 1,
   },
   calibrationModalOverlay: {
     flex: 1,
@@ -1054,99 +891,11 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginLeft: 8,
   },
-  modeControlPanel: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.9)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  modeControlContent: {
-    backgroundColor: '#1a1a1a',
-    borderRadius: 15,
-    padding: 25,
-    minWidth: 300,
-    maxWidth: '90%',
-    borderWidth: 2,
-    borderColor: '#00ff88',
-  },
-  modeControlHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  modeControlTitle: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  detectionModeRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  detectionModeButton: {
-    width: 100,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  metricsToggleButton: {
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
     borderWidth: 2,
     borderColor: '#00ff88',
     justifyContent: 'center',
     alignItems: 'center',
-    marginHorizontal: 5,
-  },
-  detectionModeActive: {
-    backgroundColor: '#00ff88',
-  },
-  detectionModeText: {
-    color: '#00ff88',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  manualModeGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  manualModeButton: {
-    width: 100,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    borderWidth: 2,
-    borderColor: '#00ff88',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginHorizontal: 5,
-  },
-  manualModeActive: {
-    backgroundColor: '#00ff88',
-  },
-  manualModeText: {
-    color: '#00ff88',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  currentModeInfo: {
-    marginTop: 10,
-  },
-  currentModeLabel: {
-    color: '#888888',
-    fontSize: 12,
-    fontFamily: 'monospace',
-  },
-  currentModeValue: {
-    color: '#00ff88',
-    fontSize: 14,
-    fontWeight: 'bold',
-    fontFamily: 'monospace',
   },
 }); 
