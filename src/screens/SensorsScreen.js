@@ -25,68 +25,46 @@ export default function SensorsScreen() {
   });
   const [maxHistoryLength] = useState(100); // Nombre de points à afficher
 
-  // Mise à jour de l'historique des capteurs
+  // *** CORRECTION: Mise à jour de l'historique des capteurs avec throttling ***
   useEffect(() => {
     if (state.sensors && state.sensors.timestamp) {
-      setSensorHistory(prev => {
-        const newHistory = { ...prev };
-        
-        // Ajout des nouvelles données avec timestamp
-        const timestamp = Date.now();
-        
-        // Vérifier si les données ont réellement changé pour éviter les mises à jour infinies
-        const lastAccel = prev.accelerometer[prev.accelerometer.length - 1];
-        const lastGyro = prev.gyroscope[prev.gyroscope.length - 1];
-        const lastMag = prev.magnetometer[prev.magnetometer.length - 1];
-        
-        let hasChanged = false;
-        
-        if (state.sensors.accelerometer) {
-          const current = state.sensors.accelerometer;
-          if (!lastAccel || 
-              Math.abs(current.x - lastAccel.x) > 0.001 ||
-              Math.abs(current.y - lastAccel.y) > 0.001 ||
-              Math.abs(current.z - lastAccel.z) > 0.001) {
+      // Throttling: mettre à jour seulement toutes les 100ms
+      const now = Date.now();
+      const lastUpdate = sensorHistory.lastUpdate || 0;
+      
+      if (now - lastUpdate >= 100) {
+        setSensorHistory(prev => {
+          const newHistory = { ...prev, lastUpdate: now };
+          
+          // Ajout des nouvelles données avec timestamp
+          const timestamp = now;
+          
+          if (state.sensors.accelerometer) {
             newHistory.accelerometer = [
               ...prev.accelerometer.slice(-maxHistoryLength + 1),
-              { ...current, timestamp }
+              { ...state.sensors.accelerometer, timestamp }
             ];
-            hasChanged = true;
           }
-        }
-        
-        if (state.sensors.gyroscope) {
-          const current = state.sensors.gyroscope;
-          if (!lastGyro || 
-              Math.abs(current.x - lastGyro.x) > 0.001 ||
-              Math.abs(current.y - lastGyro.y) > 0.001 ||
-              Math.abs(current.z - lastGyro.z) > 0.001) {
+          
+          if (state.sensors.gyroscope) {
             newHistory.gyroscope = [
               ...prev.gyroscope.slice(-maxHistoryLength + 1),
-              { ...current, timestamp }
+              { ...state.sensors.gyroscope, timestamp }
             ];
-            hasChanged = true;
           }
-        }
-        
-        if (state.sensors.magnetometer) {
-          const current = state.sensors.magnetometer;
-          if (!lastMag || 
-              Math.abs(current.x - lastMag.x) > 0.001 ||
-              Math.abs(current.y - lastMag.y) > 0.001 ||
-              Math.abs(current.z - lastMag.z) > 0.001) {
+          
+          if (state.sensors.magnetometer) {
             newHistory.magnetometer = [
               ...prev.magnetometer.slice(-maxHistoryLength + 1),
-              { ...current, timestamp }
+              { ...state.sensors.magnetometer, timestamp }
             ];
-            hasChanged = true;
           }
-        }
-        
-        return hasChanged ? newHistory : prev;
-      });
+          
+          return newHistory;
+        });
+      }
     }
-  }, [state.sensors?.timestamp]); // Dépendance uniquement sur le timestamp
+  }, [state.sensors?.timestamp]); // Dépendance plus spécifique
 
   /**
    * Génération d'un graphique SVG pour un capteur

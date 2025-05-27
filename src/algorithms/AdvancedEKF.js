@@ -218,6 +218,36 @@ export class AdvancedExtendedKalmanFilter {
       newY = y;
       newZ = z;
       newTheta = theta + omega * dt;
+    } else if (this.currentMode === 'crawling') {
+      // *** NOUVEAU: Mode crawling avec vitesse constante ***
+      // Si la vitesse est nulle, l'initialiser avec la vitesse de crawling
+      if (Math.abs(vx) < 0.01 && Math.abs(vy) < 0.01) {
+        const crawlSpeed = this.config.maxCrawlingSpeed || 0.3; // m/s
+        vx = crawlSpeed * Math.cos(theta);
+        vy = crawlSpeed * Math.sin(theta);
+        
+        // Mettre à jour l'état avec la nouvelle vitesse
+        this.state.set([3, 0], vx);
+        this.state.set([4, 0], vy);
+        
+        console.log(`[EKF CRAWLING] Vitesse initialisée: vx=${vx.toFixed(3)}, vy=${vy.toFixed(3)}`);
+      }
+      
+      // Fusion vitesse cinématique + incréments PDR avec plus de poids sur la cinématique
+      const kinematicX = x + vx * dt;
+      const kinematicY = y + vy * dt;
+      const kinematicZ = z + vz * dt;
+      
+      const pdrX = x + dx;
+      const pdrY = y + dy;
+      const pdrZ = z + dz;
+      
+      // En crawling, privilégier la cinématique (vitesse constante)
+      const pdrWeight = 0.3; // Moins de poids sur PDR en crawling
+      newX = pdrWeight * pdrX + (1 - pdrWeight) * kinematicX;
+      newY = pdrWeight * pdrY + (1 - pdrWeight) * kinematicY;
+      newZ = pdrWeight * pdrZ + (1 - pdrWeight) * kinematicZ;
+      newTheta = theta + dtheta + omega * dt;
     } else {
       // Fusion vitesse cinématique + incréments PDR
       const kinematicX = x + vx * dt;
@@ -471,7 +501,7 @@ export class AdvancedExtendedKalmanFilter {
     const confidenceBonus = Math.min(confidence, 0.3); // Max 30%
     this.P.set([6, 6], this.P.get([6, 6]) * (1 - confidenceBonus * 0.5));
     
-    console.log(`[MAG] Correction appliquée: confiance=${(confidence*100).toFixed(1)}%, bruit=${effectiveNoise.toFixed(3)}`);
+    //console.log(`[MAG] Correction appliquée: confiance=${(confidence*100).toFixed(1)}%, bruit=${effectiveNoise.toFixed(3)}`);
   }
 
   /**
@@ -529,6 +559,34 @@ export class AdvancedExtendedKalmanFilter {
       
       console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
     }
+    
+    // Amélioration du gain confiance
+    const positionGain = 30; // Augmenté de 10% à 30%
+    const orientationGain = 20; // Nouveau: gain orientation
+    
+    // Logs détaillés pour le debug
+    const positionUncertaintyBefore = this.P.get([0, 0]) + this.P.get([1, 1]);
+    const yawUncertaintyBefore = this.P.get([6, 6]);
+    
+    console.log(`[ZUPT] Activé - Gain confiance pos: +${positionGain}%, orient: +${orientationGain}%`);
+    console.log(`[ZUPT] Incertitudes avant: pos=${positionUncertaintyBefore.toFixed(3)}, yaw=${yawUncertaintyBefore.toFixed(3)}`);
+    
+    // *** CORRECTION: Conversion en matrice mathjs pour éviter l'erreur "size is not a function" ***
+    const velocityMeasurement = math.matrix([[0], [0], [0]]);
+    const velocityNoiseMatrix = math.diag([this.config.zuptNoise, this.config.zuptNoise, this.config.zuptNoise]);
+    
+    // Matrice d'observation pour les vitesses (H)
+    const H = math.zeros(3, 13);
+    H.set([0, 3], 1); // vx
+    H.set([1, 4], 1); // vy
+    H.set([2, 5], 1); // vz
+    
+    this.updateMeasurement(velocityMeasurement, H, velocityNoiseMatrix);
+    
+    const positionUncertaintyAfter = this.P.get([0, 0]) + this.P.get([1, 1]);
+    const yawUncertaintyAfter = this.P.get([6, 6]);
+    
+    console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
   }
 
   /**
@@ -552,6 +610,21 @@ export class AdvancedExtendedKalmanFilter {
         return;
       }
       this._isUpdating = true;
+
+      // *** CORRECTION: Conversion en matrice mathjs si nécessaire ***
+      if (Array.isArray(measurement)) {
+        measurement = math.matrix(measurement.map(val => [val]));
+      } else if (typeof measurement === 'object' && !measurement.size) {
+        // Si c'est un objet mais pas une matrice mathjs, essayer de le convertir
+        if (typeof measurement === 'number') {
+          measurement = math.matrix([[measurement]]);
+        } else {
+          console.warn('Type de mesure non supporté:', typeof measurement, measurement);
+          return;
+        }
+      } else if (typeof measurement === 'number') {
+        measurement = math.matrix([[measurement]]);
+      }
 
       // Vérifications des dimensions
       const stateSize = this.state.size();

@@ -6,18 +6,12 @@ import {
   ScrollView,
   TouchableOpacity,
   Dimensions,
-  Alert,
-  Share,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Rect } from 'react-native-svg';
-import * as FileSystem from 'expo-file-system';
-import * as Sharing from 'expo-sharing';
 
 import { useLocalization } from '../context/LocalizationContext';
-import { LocalizationSDK } from '../algorithms/LocalizationSDK';
 
 const { width: screenWidth } = Dimensions.get('window');
 
@@ -31,40 +25,22 @@ export default function AnalyticsScreen() {
     sessionDuration: 0,
     confidenceHistory: [],
     speedHistory: [],
-    accuracyDistribution: { high: 0, medium: 0, low: 0 }
+    accuracyDistribution: { high: 0, medium: 0, low: 0 },
+    verticalDetection: null
   });
 
   const [selectedMetric, setSelectedMetric] = useState('confidence');
-  const [logSessions, setLogSessions] = useState([]);
-  const [isExporting, setIsExporting] = useState(false);
 
-  // Instance SDK pour accéder aux logs
-  const [localizationSDK] = useState(() => new LocalizationSDK({ logging: { enabled: false } }));
-
-  // Charger les sessions de logs disponibles
-  useEffect(() => {
-    loadLogSessions();
-  }, []);
-
-  const loadLogSessions = async () => {
-    try {
-      const sessions = await localizationSDK.getLogSessions();
-      setLogSessions(sessions);
-    } catch (error) {
-      console.error('Erreur chargement sessions:', error);
-    }
-  };
-
-  // Calcul des métriques en temps réel avec optimisation
+  // *** CORRECTION: Calcul des métriques avec throttling pour éviter les boucles infinies ***
   useEffect(() => {
     if (state.trajectory.length > 1) {
-      // Éviter les recalculs trop fréquents
-      const lastCalculation = Date.now() - (analyticsData.lastUpdate || 0);
-      if (lastCalculation > 1000) { // Recalculer maximum toutes les secondes
+      // Throttling: recalculer seulement si assez de temps s'est écoulé
+      const now = Date.now();
+      if (!analyticsData.lastCalculation || now - analyticsData.lastCalculation > 1000) {
         calculateAnalytics();
       }
     }
-  }, [state.trajectory.length, state.pose.x, state.pose.y]); // Dépendances optimisées
+  }, [state.trajectory.length, state.stepCount]); // Dépendances plus spécifiques
 
   const calculateAnalytics = () => {
     const trajectory = state.trajectory;
@@ -120,297 +96,21 @@ export default function AnalyticsScreen() {
       ? (trajectory[trajectory.length - 1].timestamp - trajectory[0].timestamp) / 1000 
       : 0;
 
+    // *** NOUVEAU: Métriques de détection verticale ***
+    const verticalMetrics = state.pdrMetrics?.verticalDetection || null;
+
     setAnalyticsData({
       totalDistance,
       averageSpeed,
       maxSpeed,
       averageAccuracy,
       sessionDuration,
-      confidenceHistory: confidences.slice(-100), // Derniers 100 points
-      speedHistory: speeds.slice(-100),
+      confidenceHistory: confidences.slice(-50), // 50 derniers points
+      speedHistory: speeds.slice(-50),
       accuracyDistribution,
-      lastUpdate: Date.now() // Ajout du timestamp
+      verticalDetection: verticalMetrics, // Ajout des métriques verticales
+      lastCalculation: Date.now() // *** NOUVEAU: Timestamp pour throttling ***
     });
-  };
-
-  /**
-   * *** NOUVELLE FONCTION D'EXPORTATION COMPLÈTE ***
-   */
-  const exportCompleteLogData = async (sessionId = null) => {
-    setIsExporting(true);
-    
-    try {
-      let logData;
-      let filename;
-      
-      if (sessionId) {
-        // Exporter une session spécifique
-        logData = await localizationSDK.exportSession(sessionId, 'json');
-        filename = `pdr_log_${sessionId}.json`;
-      } else {
-        // Exporter la session courante ou créer un export des données actuelles
-        const currentStatus = localizationSDK.getLoggingStatus();
-        
-        if (currentStatus.isLogging && currentStatus.currentSession) {
-          // Session active - exporter les données en cours
-          logData = await localizationSDK.exportCurrentSession('json');
-          filename = `pdr_log_current_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-        } else {
-          // Pas de session active - créer un export des données du contexte
-          logData = createContextExport();
-          filename = `pdr_context_export_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-        }
-      }
-      
-      if (!logData) {
-        Alert.alert('Erreur', 'Aucune donnée à exporter');
-        return;
-      }
-      
-      // Enrichir les données avec des métadonnées d'analyse
-      const enrichedData = {
-        ...logData,
-        exportMetadata: {
-          exportDate: new Date().toISOString(),
-          exportType: sessionId ? 'session' : 'current',
-          analyticsData: analyticsData,
-          trajectoryData: state.trajectory,
-          currentPose: state.pose,
-          systemInfo: {
-            platform: Platform.OS,
-            screenDimensions: { width: screenWidth },
-            appVersion: '1.0.0'
-          }
-        },
-        analysisReady: {
-          sensorDataPoints: logData.logs ? logData.logs.length : 0,
-          timeRange: logData.duration ? `${(logData.duration / 1000).toFixed(1)}s` : 'N/A',
-          dataQuality: assessDataQuality(logData)
-        }
-      };
-      
-      // Sauvegarder et partager le fichier
-      await saveAndShareLogFile(enrichedData, filename);
-      
-    } catch (error) {
-      console.error('Erreur exportation:', error);
-      Alert.alert('Erreur', `Impossible d'exporter les données: ${error.message}`);
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
-  /**
-   * Création d'un export des données du contexte actuel
-   */
-  const createContextExport = () => {
-    return {
-      sessionId: `context_export_${Date.now()}`,
-      startTime: new Date().toISOString(),
-      endTime: new Date().toISOString(),
-      duration: 0,
-      totalEntries: state.trajectory.length,
-      logs: state.trajectory.map((point, index) => ({
-        timestamp: point.timestamp,
-        relativeTime: index > 0 ? point.timestamp - state.trajectory[0].timestamp : 0,
-        sensors: {
-          // Données capteurs du contexte (si disponibles)
-          accelerometer: state.sensors?.accelerometer || null,
-          gyroscope: state.sensors?.gyroscope || null,
-          magnetometer: state.sensors?.magnetometer || null,
-          metadata: state.sensors?.metadata || {}
-        },
-        algorithm: {
-          pdr: {
-            position: { x: point.x, y: point.y, z: 0 },
-            mode: state.currentMode || 'unknown',
-            stepCount: state.stepCount || 0,
-            confidence: point.confidence || 0
-          },
-          sdk: {
-            position: { x: point.x, y: point.y, z: 0 },
-            confidence: point.confidence || 0,
-            isTracking: state.isTracking
-          }
-        }
-      })),
-      statistics: {
-        totalLogs: state.trajectory.length,
-        stepCount: state.stepCount || 0,
-        distance: analyticsData.totalDistance,
-        averageSpeed: analyticsData.averageSpeed,
-        maxSpeed: analyticsData.maxSpeed,
-        averageAccuracy: analyticsData.averageAccuracy
-      }
-    };
-  };
-
-  /**
-   * Évaluation de la qualité des données
-   */
-  const assessDataQuality = (logData) => {
-    if (!logData.logs || logData.logs.length === 0) {
-      return { score: 0, issues: ['Aucune donnée disponible'] };
-    }
-    
-    const logs = logData.logs;
-    const issues = [];
-    let score = 100;
-    
-    // Vérifier la continuité des données capteurs
-    const sensorDataCount = logs.filter(log => 
-      log.sensors?.accelerometer && log.sensors?.gyroscope
-    ).length;
-    
-    const sensorCoverage = sensorDataCount / logs.length;
-    if (sensorCoverage < 0.8) {
-      issues.push(`Données capteurs incomplètes (${(sensorCoverage * 100).toFixed(1)}%)`);
-      score -= 20;
-    }
-    
-    // Vérifier la fréquence d'échantillonnage
-    if (logs.length > 1) {
-      const duration = (logs[logs.length - 1].relativeTime - logs[0].relativeTime) / 1000;
-      const sampleRate = logs.length / duration;
-      
-      if (sampleRate < 0.5) {
-        issues.push(`Fréquence d'échantillonnage faible (${sampleRate.toFixed(1)} Hz)`);
-        score -= 15;
-      }
-    }
-    
-    // Vérifier la cohérence des données algorithme
-    const algorithmDataCount = logs.filter(log => 
-      log.algorithm?.pdr || log.algorithm?.sdk
-    ).length;
-    
-    const algorithmCoverage = algorithmDataCount / logs.length;
-    if (algorithmCoverage < 0.9) {
-      issues.push(`Données algorithme incomplètes (${(algorithmCoverage * 100).toFixed(1)}%)`);
-      score -= 10;
-    }
-    
-    return {
-      score: Math.max(0, score),
-      issues: issues.length > 0 ? issues : ['Données de bonne qualité'],
-      sensorCoverage: sensorCoverage * 100,
-      algorithmCoverage: algorithmCoverage * 100,
-      sampleRate: logs.length > 1 ? logs.length / ((logs[logs.length - 1].relativeTime - logs[0].relativeTime) / 1000) : 0
-    };
-  };
-
-  /**
-   * Sauvegarde et partage du fichier de logs
-   */
-  const saveAndShareLogFile = async (data, filename) => {
-    try {
-      const jsonString = JSON.stringify(data, null, 2);
-      const fileUri = FileSystem.documentDirectory + filename;
-      
-      // Sauvegarder le fichier
-      await FileSystem.writeAsStringAsync(fileUri, jsonString);
-      
-      // Partager le fichier
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(fileUri, {
-          mimeType: 'application/json',
-          dialogTitle: 'Exporter les logs PDR'
-        });
-      } else {
-        // Fallback pour les plateformes sans partage de fichiers
-        await Share.share({
-          message: `Logs PDR exportés: ${filename}\n\nTaille: ${(jsonString.length / 1024).toFixed(1)} KB`,
-          title: 'Export des logs PDR'
-        });
-      }
-      
-      Alert.alert(
-        'Export réussi',
-        `Fichier sauvegardé: ${filename}\nTaille: ${(jsonString.length / 1024).toFixed(1)} KB\nEntrées: ${data.logs ? data.logs.length : 0}`,
-        [{ text: 'OK' }]
-      );
-      
-    } catch (error) {
-      throw new Error(`Erreur sauvegarde: ${error.message}`);
-    }
-  };
-
-  /**
-   * Rendu de la section d'exportation des logs
-   */
-  const renderLogExportSection = () => {
-    return (
-      <View style={styles.exportContainer}>
-        <Text style={styles.sectionTitle}>📊 Exportation des Logs</Text>
-        
-        {/* Informations sur les sessions disponibles */}
-        <View style={styles.sessionsInfo}>
-          <Text style={styles.infoText}>
-            Sessions disponibles: {logSessions.length}
-          </Text>
-          {logSessions.length > 0 && (
-            <Text style={styles.infoSubtext}>
-              Dernière session: {new Date(logSessions[0]?.startTime).toLocaleString()}
-            </Text>
-          )}
-        </View>
-        
-        {/* Boutons d'exportation */}
-        <View style={styles.exportButtons}>
-          <TouchableOpacity 
-            style={[styles.exportButton, styles.primaryExportButton]}
-            onPress={() => exportCompleteLogData()}
-            disabled={isExporting}
-          >
-            <Ionicons name="download" size={20} color="#ffffff" />
-            <Text style={styles.exportButtonText}>
-              {isExporting ? 'Export en cours...' : 'Exporter Session Courante'}
-            </Text>
-          </TouchableOpacity>
-          
-          {logSessions.length > 0 && (
-            <TouchableOpacity 
-              style={[styles.exportButton, styles.secondaryExportButton]}
-              onPress={() => showSessionSelector()}
-              disabled={isExporting}
-            >
-              <Ionicons name="archive" size={20} color="#4ecdc4" />
-              <Text style={[styles.exportButtonText, { color: '#4ecdc4' }]}>
-                Exporter Session Archivée
-              </Text>
-            </TouchableOpacity>
-          )}
-        </View>
-        
-        {/* Informations sur le format d'export */}
-        <View style={styles.formatInfo}>
-          <Text style={styles.formatTitle}>📋 Format d'export JSON:</Text>
-          <Text style={styles.formatItem}>• Données capteurs (accéléromètre, gyroscope, magnétomètre)</Text>
-          <Text style={styles.formatItem}>• Décisions algorithme (PDR, EKF, AttitudeTracker)</Text>
-          <Text style={styles.formatItem}>• Timestamps synchronisés</Text>
-          <Text style={styles.formatItem}>• Métadonnées de qualité</Text>
-          <Text style={styles.formatItem}>• Statistiques de session</Text>
-        </View>
-      </View>
-    );
-  };
-
-  /**
-   * Sélecteur de session pour l'export
-   */
-  const showSessionSelector = () => {
-    const sessionOptions = logSessions.map((session, index) => ({
-      text: `${session.id} (${new Date(session.startTime).toLocaleDateString()})`,
-      onPress: () => exportCompleteLogData(session.id)
-    }));
-    
-    sessionOptions.push({ text: 'Annuler', style: 'cancel' });
-    
-    Alert.alert(
-      'Sélectionner une session',
-      'Choisissez la session à exporter:',
-      sessionOptions
-    );
   };
 
   /**
@@ -441,6 +141,19 @@ export default function AnalyticsScreen() {
         value: formatDuration(analyticsData.sessionDuration),
         icon: 'time',
         color: '#ffa726'
+      },
+      // *** NOUVEAU: Métriques de crawling ***
+      {
+        title: 'Distance crawling',
+        value: `${(state.crawlDistance || 0).toFixed(1)} m`,
+        icon: 'git-merge',
+        color: '#ff6b6b'
+      },
+      {
+        title: 'Nombre de pas',
+        value: `${state.stepCount || 0}`,
+        icon: 'footsteps',
+        color: '#4ecdc4'
       }
     ];
 
@@ -597,20 +310,104 @@ export default function AnalyticsScreen() {
           }]} />
         </View>
         
-        <View style={styles.distributionStats}>
-          <View style={styles.statItem}>
-            <View style={[styles.statColor, { backgroundColor: '#00ff88' }]} />
-            <Text style={styles.statText}>Haute: {high} ({highPercent.toFixed(0)}%)</Text>
+        <View style={styles.distributionLegend}>
+          <View style={styles.legendRow}>
+            <View style={[styles.legendColor, { backgroundColor: '#00ff88' }]} />
+            <Text style={styles.legendText}>Haute ({highPercent.toFixed(1)}%)</Text>
           </View>
-          <View style={styles.statItem}>
-            <View style={[styles.statColor, { backgroundColor: '#ffaa00' }]} />
-            <Text style={styles.statText}>Moyenne: {medium} ({mediumPercent.toFixed(0)}%)</Text>
+          <View style={styles.legendRow}>
+            <View style={[styles.legendColor, { backgroundColor: '#ffaa00' }]} />
+            <Text style={styles.legendText}>Moyenne ({mediumPercent.toFixed(1)}%)</Text>
           </View>
-          <View style={styles.statItem}>
-            <View style={[styles.statColor, { backgroundColor: '#ff4444' }]} />
-            <Text style={styles.statText}>Faible: {low} ({lowPercent.toFixed(0)}%)</Text>
+          <View style={styles.legendRow}>
+            <View style={[styles.legendColor, { backgroundColor: '#ff4444' }]} />
+            <Text style={styles.legendText}>Faible ({lowPercent.toFixed(1)}%)</Text>
           </View>
         </View>
+      </View>
+    );
+  };
+
+  /**
+   * *** NOUVEAU: Métriques de détection verticale ***
+   */
+  const renderVerticalDetectionMetrics = () => {
+    const verticalData = analyticsData.verticalDetection;
+    
+    if (!verticalData) {
+      return (
+        <View style={styles.verticalContainer}>
+          <Text style={styles.sectionTitle}>🔄 Détection Verticale</Text>
+          <View style={styles.noDataContainer}>
+            <Text style={styles.noDataText}>Détection verticale non disponible</Text>
+          </View>
+        </View>
+      );
+    }
+
+    const getMethodColor = (method) => {
+      switch (method) {
+        case 'vertical_projection': return '#00ff88';
+        case 'magnitude_fallback': return '#ffaa00';
+        case 'magnitude_default': return '#ff8800';
+        case 'magnitude_only': return '#ff4444';
+        default: return '#888888';
+      }
+    };
+
+    const getMethodLabel = (method) => {
+      switch (method) {
+        case 'vertical_projection': return 'Projection Verticale';
+        case 'magnitude_fallback': return 'Magnitude (Fallback)';
+        case 'magnitude_default': return 'Magnitude (Défaut)';
+        case 'magnitude_only': return 'Magnitude Seule';
+        default: return 'Inconnu';
+      }
+    };
+
+    return (
+      <View style={styles.verticalContainer}>
+        <Text style={styles.sectionTitle}>🔄 Détection Verticale</Text>
+        
+        {/* État actuel */}
+        <View style={styles.verticalStatusRow}>
+          <Text style={styles.verticalLabel}>Méthode:</Text>
+          <View style={[styles.methodBadge, { backgroundColor: getMethodColor(verticalData.method) }]}>
+            <Text style={styles.methodBadgeText}>
+              {getMethodLabel(verticalData.method)}
+            </Text>
+          </View>
+        </View>
+
+        {/* Confiance d'orientation */}
+        <View style={styles.verticalStatusRow}>
+          <Text style={styles.verticalLabel}>Confiance Orientation:</Text>
+          <Text style={[styles.verticalValue, { 
+            color: verticalData.orientationConfidence > 0.5 ? '#00ff88' : '#ffaa00' 
+          }]}>
+            {(verticalData.orientationConfidence * 100).toFixed(0)}%
+          </Text>
+        </View>
+
+        {/* Dernier pic vertical */}
+        {verticalData.lastVerticalPeak > 0 && (
+          <View style={styles.verticalStatusRow}>
+            <Text style={styles.verticalLabel}>Dernier Pic Vertical:</Text>
+            <Text style={styles.verticalValue}>
+              {verticalData.lastVerticalPeak.toFixed(3)}g
+            </Text>
+          </View>
+        )}
+
+        {/* État fallback */}
+        {verticalData.fallbackActive && (
+          <View style={styles.verticalStatusRow}>
+            <Text style={styles.verticalLabel}>⚠️ Fallback Actif</Text>
+            <Text style={styles.verticalValue}>
+              Orientation instable
+            </Text>
+          </View>
+        )}
       </View>
     );
   };
@@ -663,6 +460,23 @@ export default function AnalyticsScreen() {
   };
 
   /**
+   * Exportation des données
+   */
+  const exportData = () => {
+    const exportData = {
+      timestamp: new Date().toISOString(),
+      trajectory: state.trajectory,
+      analytics: analyticsData,
+      settings: state.settings,
+      pose: state.pose
+    };
+
+    // TODO: Implémenter l'exportation réelle
+    console.log('Données exportées:', exportData);
+    alert('Fonctionnalité d\'exportation à implémenter');
+  };
+
+  /**
    * Formatage de la durée
    */
   const formatDuration = (seconds) => {
@@ -679,6 +493,114 @@ export default function AnalyticsScreen() {
     }
   };
 
+  /**
+   * *** NOUVEAU: Rendu des métriques physiologiques ***
+   */
+  const renderPhysiologicalMetrics = () => {
+    const pdrState = state.pdr;
+    if (!pdrState?.physiologicalMetrics) {
+      return null;
+    }
+
+    const metrics = pdrState.physiologicalMetrics;
+    
+    const getFrequencyColor = () => {
+      const ratio = metrics.currentStepFrequency / metrics.maxAllowedFrequency;
+      if (ratio > 0.8) return '#ff4444'; // Rouge si proche du max
+      if (ratio > 0.6) return '#ffaa00'; // Orange si élevé
+      return '#00ff88'; // Vert si normal
+    };
+
+    const getGyroColor = () => {
+      if (!metrics.gyroConfirmationEnabled) return '#888888';
+      if (metrics.lastGyroActivity > 0.3) return '#00ff88';
+      if (metrics.lastGyroActivity > 0.1) return '#ffaa00';
+      return '#ff4444';
+    };
+
+    return (
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>🧬 Garde-fous Physiologiques</Text>
+        
+        <View style={styles.metricsGrid}>
+          {/* Fréquence de pas */}
+          <View style={styles.metricCard}>
+            <Ionicons name="pulse" size={24} color={getFrequencyColor()} />
+            <Text style={styles.metricTitle}>Fréquence Pas</Text>
+            <Text style={[styles.metricValue, { color: getFrequencyColor() }]}>
+              {metrics.currentStepFrequency.toFixed(1)} Hz
+            </Text>
+            <Text style={styles.metricSubtitle}>
+              Max: {metrics.maxAllowedFrequency} Hz
+            </Text>
+          </View>
+
+          {/* Historique des pas */}
+          <View style={styles.metricCard}>
+            <Ionicons name="time" size={24} color="#4ecdc4" />
+            <Text style={styles.metricTitle}>Historique</Text>
+            <Text style={[styles.metricValue, { color: '#4ecdc4' }]}>
+              {metrics.stepHistoryLength}
+            </Text>
+            <Text style={styles.metricSubtitle}>pas récents</Text>
+          </View>
+
+          {/* Confirmation gyroscopique */}
+          <View style={styles.metricCard}>
+            <Ionicons 
+              name={metrics.gyroConfirmationEnabled ? "checkmark-circle" : "close-circle"} 
+              size={24} 
+              color={getGyroColor()} 
+            />
+            <Text style={styles.metricTitle}>Gyro Confirm</Text>
+            <Text style={[styles.metricValue, { color: getGyroColor() }]}>
+              {metrics.gyroConfirmationEnabled ? 
+                metrics.lastGyroActivity.toFixed(2) : 'OFF'
+              }
+            </Text>
+            <Text style={styles.metricSubtitle}>
+              {metrics.gyroConfirmationEnabled ? 'rad/s' : 'désactivé'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Indicateurs d'état */}
+        <View style={styles.statusIndicators}>
+          <View style={[
+            styles.statusIndicator,
+            { backgroundColor: metrics.currentStepFrequency / metrics.maxAllowedFrequency > 0.8 ? 
+              'rgba(255, 68, 68, 0.2)' : 'rgba(0, 255, 136, 0.2)' }
+          ]}>
+            <Text style={[
+              styles.statusText,
+              { color: metrics.currentStepFrequency / metrics.maxAllowedFrequency > 0.8 ? 
+                '#ff4444' : '#00ff88' }
+            ]}>
+              {metrics.currentStepFrequency / metrics.maxAllowedFrequency > 0.8 ? 
+                '⚠️ Fréquence élevée' : '✅ Fréquence normale'}
+            </Text>
+          </View>
+
+          {metrics.gyroConfirmationEnabled && (
+            <View style={[
+              styles.statusIndicator,
+              { backgroundColor: metrics.lastGyroActivity > 0.1 ? 
+                'rgba(0, 255, 136, 0.2)' : 'rgba(255, 170, 0, 0.2)' }
+            ]}>
+              <Text style={[
+                styles.statusText,
+                { color: metrics.lastGyroActivity > 0.1 ? '#00ff88' : '#ffaa00' }
+              ]}>
+                {metrics.lastGyroActivity > 0.1 ? 
+                  '✅ Gyro actif' : '⚠️ Gyro faible'}
+              </Text>
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView showsVerticalScrollIndicator={false}>
@@ -691,11 +613,22 @@ export default function AnalyticsScreen() {
         {/* Distribution de précision */}
         {renderAccuracyDistribution()}
         
+        {/* Métriques de détection verticale */}
+        {renderVerticalDetectionMetrics()}
+        
         {/* Informations système */}
         {renderSystemInfo()}
         
-        {/* Section d'exportation des logs */}
-        {renderLogExportSection()}
+        {/* Métriques physiologiques */}
+        {renderPhysiologicalMetrics()}
+        
+        {/* Boutons d'action */}
+        <View style={styles.actionsContainer}>
+          <TouchableOpacity style={styles.exportButton} onPress={exportData}>
+            <Ionicons name="download" size={20} color="#ffffff" />
+            <Text style={styles.buttonText}>Exporter les données</Text>
+          </TouchableOpacity>
+        </View>
         
         <View style={styles.spacer} />
       </ScrollView>
@@ -727,7 +660,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 15,
     alignItems: 'center',
-    width: '48%',
+    width: '31%',
     marginBottom: 15,
     borderWidth: 1,
     borderColor: 'rgba(0, 255, 136, 0.3)',
@@ -795,7 +728,7 @@ const styles = StyleSheet.create({
   distributionSegment: {
     height: '100%',
   },
-  distributionStats: {
+  distributionLegend: {
     flexDirection: 'row',
     justifyContent: 'space-around',
   },
@@ -839,58 +772,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  exportContainer: {
-    padding: 20,
-  },
-  sessionsInfo: {
-    marginBottom: 15,
-  },
-  infoText: {
-    color: '#ffffff',
-    fontSize: 14,
-  },
-  infoSubtext: {
-    color: '#888888',
-    fontSize: 12,
-  },
-  exportButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 15,
+  actionsContainer: {
+    paddingHorizontal: 20,
+    marginBottom: 20,
   },
   exportButton: {
-    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    backgroundColor: '#4ecdc4',
     borderRadius: 8,
     padding: 15,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  primaryExportButton: {
-    backgroundColor: '#4ecdc4',
-  },
-  secondaryExportButton: {
-    backgroundColor: 'rgba(0, 255, 136, 0.1)',
-  },
-  exportButtonText: {
+  buttonText: {
     color: '#ffffff',
     fontSize: 16,
     fontWeight: 'bold',
     marginLeft: 8,
-  },
-  formatInfo: {
-    marginBottom: 15,
-  },
-  formatTitle: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 10,
-  },
-  formatItem: {
-    color: '#888888',
-    fontSize: 12,
-    marginBottom: 5,
   },
   noDataContainer: {
     height: 80,
@@ -903,5 +801,54 @@ const styles = StyleSheet.create({
   },
   spacer: {
     height: 40,
+  },
+  verticalContainer: {
+    marginHorizontal: 20,
+    marginBottom: 25,
+  },
+  verticalStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 5,
+  },
+  verticalLabel: {
+    color: '#cccccc',
+    fontSize: 12,
+    marginRight: 8,
+  },
+  verticalValue: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  methodBadge: {
+    padding: 4,
+    borderRadius: 4,
+  },
+  methodBadgeText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  section: {
+    padding: 20,
+  },
+  metricSubtitle: {
+    color: '#888888',
+    fontSize: 12,
+  },
+  statusIndicators: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 10,
+  },
+  statusIndicator: {
+    padding: 8,
+    borderRadius: 8,
+  },
+  statusText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
 }); 
