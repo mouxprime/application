@@ -15,6 +15,7 @@ import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, LinearGradient, Stop
 import { Ionicons } from '@expo/vector-icons';
 import * as Battery from 'expo-battery';
 import { Magnetometer, Accelerometer, Gyroscope } from 'expo-sensors';
+import * as Location from 'expo-location';
 
 import { useLocalization } from '../context/LocalizationContext';
 import { useAuth } from '../context/AuthContext';
@@ -54,9 +55,18 @@ export default function MapScreen() {
   const [isOrientationActive, setIsOrientationActive] = useState(true); // Activé par défaut
   const continuousOrientationRef = useRef(0);
   
+  // *** NOUVEAU: États pour la boussole native indépendante ***
+  const [nativeCompassSubscription, setNativeCompassSubscription] = useState(null);
+  const [isNativeCompassActive, setIsNativeCompassActive] = useState(false);
+  
   // *** FIX: CALLBACKS DÉFINIS AVANT L'INITIALISATION DU SERVICE ***
-  const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, source, confidence, nativeStepLength }) => {
-    console.log(`🚶 [STEP-CALLBACK] Pas détecté: ${stepCount} (source: ${source})`);
+  const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, totalSteps, confidence, source, nativeStepLength, averageStepLength, cadence, timeDelta, isFallback }) => {
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] === DÉBUT ANALYSE CONFIANCE ===`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] Confiance reçue du service: ${confidence} (${(confidence * 100).toFixed(1)}%)`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] nativeStepLength: ${nativeStepLength}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] source: ${source}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] isFallback: ${isFallback}`);
+    
     console.log(`📏 [STEP-CALLBACK] Longueur de pas: ${stepLength.toFixed(3)}m ${nativeStepLength ? '(NATIVE)' : '(FALLBACK)'}`);
     console.log(`📍 [STEP-CALLBACK] Déplacement: dx=${dx.toFixed(3)}, dy=${dy.toFixed(3)}`);
     
@@ -68,6 +78,9 @@ export default function MapScreen() {
     
     // *** CONFIANCE ÉLEVÉE POUR LES DONNÉES NATIVES ***
     const adjustedConfidence = nativeStepLength ? 1.0 : confidence;
+    
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] adjustedConfidence calculée: ${adjustedConfidence} (${(adjustedConfidence * 100).toFixed(1)}%)`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] === FIN ANALYSE CONFIANCE ===`);
     
     // Mettre à jour la position
     const newX = currentState.pose.x + dx;
@@ -178,16 +191,15 @@ export default function MapScreen() {
     initializeSystem();
     initializeBattery();
     
-    // *** FIX: Démarrer l'orientation automatiquement ***
-    setIsOrientationActive(true);
+    // *** NOUVEAU: Démarrer la boussole native indépendante ***
+    startNativeCompass();
     
     return () => {
       if (hybridMotionService) {
         hybridMotionService.stop();
       }
-      if (isOrientationActive) {
-        stopContinuousOrientation();
-      }
+      // *** NOUVEAU: Arrêter la boussole native au démontage ***
+      stopNativeCompass();
     };
   }, []);
 
@@ -273,6 +285,8 @@ export default function MapScreen() {
     if (state.isTracking) {
       actions.setTracking(false);
       hybridMotionService.stop();
+      // *** MODIFICATION: Garder l'orientation active même hors tracking ***
+      console.log('🧭 [ORIENTATION] Orientation maintenue active hors tracking');
     } else {
       actions.setTracking(true);
       
@@ -584,6 +598,7 @@ export default function MapScreen() {
   /**
    * Rendu de la position actuelle avec orientation permanente et taille fixe
    * SIMPLIFIÉ: Taille constante sans calculs de zoom complexes
+   * *** FIX: 0° = Nord (haut), angles 0-360° ***
    */
   const renderCurrentPosition = () => {
     const svgPos = worldToSVG({ x: state.pose.x, y: state.pose.y });
@@ -596,14 +611,30 @@ export default function MapScreen() {
       currentOrientation = state.pose.theta;
     }
     
+    // *** FIX: Normaliser l'angle entre 0 et 2π (0-360°) ***
+    let normalizedOrientation = currentOrientation;
+    while (normalizedOrientation < 0) normalizedOrientation += 2 * Math.PI;
+    while (normalizedOrientation >= 2 * Math.PI) normalizedOrientation -= 2 * Math.PI;
+    
+    // *** FIX: 0° = Nord (axe Y positif vers le haut) ***
+    // En SVG, Y positif va vers le bas, donc on inverse
+    // La boussole donne 0° = Nord, on garde cette convention
+    // Mais on ajuste pour l'affichage SVG où Y+ = bas
+    
     // *** SIMPLIFIÉ: Taille fixe pour éviter les problèmes de zoom ***
     const radius = 6; // Augmenté pour meilleure visibilité
     const headingLength = 25; // Augmenté pour meilleure visibilité
     const strokeWidth = 2;
     const confidenceRadius = 15;
     
-    const headingX = svgPos.x + Math.cos(currentOrientation) * headingLength;
-    const headingY = svgPos.y - Math.sin(currentOrientation) * headingLength; // Inversion Y pour SVG
+    // *** FIX: Calcul correct pour 0° = Nord (haut) ***
+    // En SVG: 0° = droite, 90° = bas, 180° = gauche, 270° = haut
+    // On veut: 0° = haut (nord), 90° = droite (est), 180° = bas (sud), 270° = gauche (ouest)
+    // Donc on soustrait 90° pour décaler et on inverse Y
+    const svgOrientation = normalizedOrientation - Math.PI / 2;
+    
+    const headingX = svgPos.x + Math.cos(svgOrientation) * headingLength;
+    const headingY = svgPos.y + Math.sin(svgOrientation) * headingLength; // Pas d'inversion Y ici car déjà géré
     
     // Couleur selon l'état du tracking
     const positionColor = state.isTracking ? "#00ff00" : "#ffaa00";
@@ -623,7 +654,7 @@ export default function MapScreen() {
         />
         
         {/* *** FIX: Flèche directionnelle pour meilleure visibilité *** */}
-        <G transform={`translate(${headingX}, ${headingY}) rotate(${-currentOrientation * 180 / Math.PI + 90})`}>
+        <G transform={`translate(${headingX}, ${headingY}) rotate(${svgOrientation * 180 / Math.PI + 90})`}>
           <Path
             d="M -4 -8 L 0 0 L 4 -8 Z"
             fill={orientationColor}
@@ -741,10 +772,20 @@ export default function MapScreen() {
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Orientation:</Text>
             <Text style={[styles.metricValue, { color: isOrientationActive ? '#00ff88' : '#666666' }]}>
-              {isOrientationActive 
-                ? (continuousOrientation * 180 / Math.PI).toFixed(1) + '°'
-                : (state.pose.theta * 180 / Math.PI).toFixed(1) + '°'
-              }
+              {(() => {
+                let angle = 0;
+                if (isOrientationActive) {
+                  angle = continuousOrientation * 180 / Math.PI;
+                } else {
+                  angle = state.pose.theta * 180 / Math.PI;
+                }
+                
+                // Normaliser entre 0 et 360°
+                while (angle < 0) angle += 360;
+                while (angle >= 360) angle -= 360;
+                
+                return angle.toFixed(1) + '°';
+              })()}
             </Text>
           </View>
         </View>
@@ -769,6 +810,16 @@ export default function MapScreen() {
               }]}>
                 {orientationSource === 'native_compass' ? 'Boussole' : 
                  orientationSource === 'pdr_fallback' ? 'PDR' : 'Gyro'}
+              </Text>
+            </View>
+            
+            {/* *** NOUVEAU: Statut boussole native *** */}
+            <View style={styles.metricItem}>
+              <Text style={styles.metricLabel}>Boussole Native:</Text>
+              <Text style={[styles.metricValue, { 
+                color: isNativeCompassActive ? '#00ff88' : '#ff4444' 
+              }]}>
+                {isNativeCompassActive ? 'Active' : 'Inactive'}
               </Text>
             </View>
           </>
@@ -890,27 +941,6 @@ export default function MapScreen() {
   };
 
   /**
-   * *** SIMPLIFIÉ: Recalibration manuelle de la boussole ***
-   */
-  const handleCompassRecalibration = () => {
-    Alert.alert(
-      'Recalibrer la boussole',
-      'Pour améliorer la précision de l\'orientation :\n\n📱 Effectuez un mouvement en huit avec votre téléphone\n⏱️ Maintenez le mouvement pendant quelques secondes\n\nCeci permet au système de recalibrer automatiquement la boussole.',
-      [
-        { text: 'Annuler', style: 'cancel' },
-        {
-          text: 'Compris',
-          onPress: () => {
-            // *** SUPPRIMÉ: Méthode inexistante ***
-            // hybridMotionService.resetCompassDrift();
-            console.log('Recalibration boussole demandée');
-          }
-        }
-      ]
-    );
-  };
-
-  /**
    * *** NOUVEAU: Callback pour le changement de zoom ***
    */
   const handleZoomChange = (newZoom) => {
@@ -918,48 +948,45 @@ export default function MapScreen() {
   };
 
   /**
-   * *** NOUVEAU: Démarrer l'orientation continue via le NativeEnhancedMotionService ***
+   * *** NOUVEAU: Démarrer l'orientation continue via la boussole native ***
    */
   const startContinuousOrientation = async () => {
-    // Le NativeEnhancedMotionService gère déjà l'orientation automatiquement
-    console.log('🧭 Orientation gérée automatiquement par NativeEnhancedMotionService');
+    console.log('🧭 [ORIENTATION] Démarrage orientation via boussole native indépendante');
+    setIsOrientationActive(true);
+    
+    // Démarrer la boussole native si pas déjà active
+    if (!isNativeCompassActive) {
+      await startNativeCompass();
+    }
   };
 
   /**
-   * *** NOUVEAU: Arrêter l'orientation continue ***
+   * *** SUPPRIMÉ: Arrêter l'orientation continue - plus nécessaire ***
    */
   const stopContinuousOrientation = () => {
-    try {
-      setIsOrientationActive(false);
-      setOrientationConfidence(0);
-      setOrientationSource('auto');
-      
-      console.log('Orientation continue arrêtée');
-      
-    } catch (error) {
-      console.error('Erreur arrêt orientation continue:', error);
-    }
+    // *** MODIFICATION: Ne plus arrêter l'orientation ***
+    console.log('🧭 [ORIENTATION] Orientation maintenue active en permanence');
   };
 
   /**
-   * *** NOUVEAU: Basculer l'orientation continue ***
+   * *** SUPPRIMÉ: Basculer l'orientation continue - plus nécessaire ***
    */
   const toggleContinuousOrientation = () => {
-    if (isOrientationActive) {
-      stopContinuousOrientation();
-    } else {
-      startContinuousOrientation();
-    }
+    // *** MODIFICATION: Orientation toujours active ***
+    console.log('🧭 [ORIENTATION] Orientation toujours active - basculement désactivé');
   };
 
   // *** FIX: Effet pour démarrer l'orientation continue automatiquement ***
   useEffect(() => {
-    if (isMapLoaded && !isOrientationActive) {
+    if (isMapLoaded) {
       console.log('🧭 [ORIENTATION] Démarrage automatique de l\'orientation...');
       setIsOrientationActive(true);
-      startContinuousOrientation();
+      // *** MODIFICATION: Utiliser la boussole native indépendante ***
+      if (!isNativeCompassActive) {
+        startNativeCompass();
+      }
     }
-  }, [isMapLoaded]);
+  }, [isMapLoaded, isNativeCompassActive]);
 
   const startMotionTracking = async () => {
     try {
@@ -1003,6 +1030,104 @@ export default function MapScreen() {
     } catch (error) {
       console.error('❌ Erreur redémarrage suivi mouvement:', error);
     }
+  };
+
+  /**
+   * *** NOUVEAU: Démarrer la boussole native indépendante ***
+   */
+  const startNativeCompass = async () => {
+    try {
+      //console.log('🧭 [NATIVE-COMPASS] Démarrage de la boussole native indépendante...');
+      
+      // Demander les permissions de localisation
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        console.warn('🧭 [NATIVE-COMPASS] Permission localisation refusée');
+        return false;
+      }
+      
+      // Arrêter l'ancienne subscription si elle existe
+      if (nativeCompassSubscription) {
+        nativeCompassSubscription.remove();
+      }
+      
+      // Démarrer le suivi de l'orientation
+      const subscription = await Location.watchHeadingAsync(
+        (headingData) => {
+          handleNativeCompassUpdate(headingData);
+        },
+        {
+          accuracy: Location.LocationAccuracy.High,
+          timeInterval: 100,  // Mise à jour toutes les 100ms
+          distanceInterval: 0
+        }
+      );
+      
+      setNativeCompassSubscription(subscription);
+      setIsNativeCompassActive(true);
+      
+      //console.log('✅ [NATIVE-COMPASS] Boussole native démarrée avec succès');
+      return true;
+      
+    } catch (error) {
+      console.error('❌ [NATIVE-COMPASS] Erreur démarrage boussole native:', error);
+      return false;
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Arrêter la boussole native indépendante ***
+   */
+  const stopNativeCompass = () => {
+    try {
+      if (nativeCompassSubscription) {
+        nativeCompassSubscription.remove();
+        setNativeCompassSubscription(null);
+      }
+      
+      setIsNativeCompassActive(false);
+      console.log('🛑 [NATIVE-COMPASS] Boussole native arrêtée');
+      
+    } catch (error) {
+      console.error('❌ [NATIVE-COMPASS] Erreur arrêt boussole native:', error);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Gérer les mises à jour de la boussole native ***
+   */
+  const handleNativeCompassUpdate = (headingData) => {
+    const { trueHeading, accuracy, timestamp } = headingData;
+    
+    console.log(`🧭 [NATIVE-COMPASS] Orientation reçue: ${trueHeading.toFixed(1)}° (précision: ${accuracy})`);
+    
+    // Normaliser l'angle
+    let normalizedHeading = trueHeading;
+    while (normalizedHeading >= 360) normalizedHeading -= 360;
+    while (normalizedHeading < 0) normalizedHeading += 360;
+    
+    // Convertir en radians
+    const headingRadians = (normalizedHeading * Math.PI) / 180;
+    
+    // Mettre à jour les états d'orientation
+    setContinuousOrientation(headingRadians);
+    continuousOrientationRef.current = headingRadians;
+    setOrientationConfidence(accuracy ? Math.max(0, Math.min(1, (100 - accuracy) / 100)) : 0.8);
+    setOrientationSource('native_compass');
+    setIsOrientationActive(true);
+    
+    // Mettre à jour la pose dans le contexte
+    const currentState = stateRef.current;
+    const currentActions = actionsRef.current;
+    
+    currentActions.updatePose({
+      x: currentState.pose.x,
+      y: currentState.pose.y,
+      theta: headingRadians,
+      confidence: currentState.pose.confidence
+    });
+    
+    console.log(`🧭 [NATIVE-COMPASS] Orientation mise à jour: ${normalizedHeading.toFixed(1)}° (${headingRadians.toFixed(3)} rad)`);
   };
 
   if (!isMapLoaded) {
@@ -1084,26 +1209,8 @@ export default function MapScreen() {
         >
           <Ionicons name="save" size={24} color={(!state.trajectory || state.trajectory.length === 0) ? "#666666" : "#00ff88"} />
         </TouchableOpacity>
-        
-        {/* *** NOUVEAU: Bouton recalibrer la boussole *** */}
-        <TouchableOpacity 
-          style={styles.controlButton} 
-          onPress={handleCompassRecalibration}
-        >
-          <Ionicons name="compass" size={24} color="#00ff88" />
-        </TouchableOpacity>
 
-        {/* *** NOUVEAU: Bouton orientation native *** */}
-        <TouchableOpacity 
-          style={[styles.controlButton, isOrientationActive && styles.activeButton]} 
-          onPress={toggleContinuousOrientation}
-        >
-          <Ionicons 
-            name={isOrientationActive ? "compass" : "compass-outline"} 
-            size={24} 
-            color={isOrientationActive ? "#ffffff" : "#00ff88"} 
-          />
-        </TouchableOpacity>
+        {/* *** SUPPRIMÉ: Boutons de boussole inutiles *** */}
       </View>
 
       {/* Modal de calibration */}

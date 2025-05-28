@@ -16,7 +16,7 @@ public class ExpoNativePedometerModule: Module {
   private let pedometerQueue = DispatchQueue(label: "com.ktapp.pedometer", qos: .userInitiated)
   
   public func definition() -> ModuleDefinition {
-    Name("ExpoNativePedometer")
+    Name("ExpoNativePedometerModule")
     
     // Événements émis vers JavaScript
     Events("onStepLengthUpdate")

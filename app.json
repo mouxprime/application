@@ -16,8 +16,10 @@
       "supportsTablet": false,
       "infoPlist": {
         "NSMotionUsageDescription": "La détection de pas est utilisée pour la navigation intérieure.",
-        "NSLocationWhenInUseUsageDescription": "La boussole est utilisée pour afficher l'orientation."
-      }
+        "NSLocationWhenInUseUsageDescription": "La boussole est utilisée pour afficher l'orientation.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.moux.KTApp"
     },
     "android": {
       "adaptiveIcon": {
@@ -35,6 +37,11 @@
     },
     "plugins": [
       "./modules/expo-native-pedometer/plugin.js"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "882465a6-d7b9-4633-b203-70df73ba3058"
+      }
+    }
   }
 }

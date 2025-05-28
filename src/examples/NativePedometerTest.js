@@ -5,6 +5,15 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, Platform, ScrollView } from 'react-native';
 import { Pedometer } from 'expo-sensors';
 
+// *** NOUVEAU: Import du module natif pour test ***
+let ExpoNativePedometer = null;
+try {
+  ExpoNativePedometer = require('../../modules/expo-native-pedometer/src/index');
+  console.log('✅ [TEST] Module natif ExpoNativePedometer chargé pour test');
+} catch (error) {
+  console.log('⚠️ [TEST] Module natif non disponible pour test');
+}
+
 const NativePedometerTest = () => {
   const [isAvailable, setIsAvailable] = useState(false);
   const [permissions, setPermissions] = useState(null);
@@ -12,6 +21,8 @@ const NativePedometerTest = () => {
   const [historicalData, setHistoricalData] = useState([]);
   const [isTracking, setIsTracking] = useState(false);
   const [subscription, setSubscription] = useState(null);
+  const [nativeTestData, setNativeTestData] = useState(null); // *** NOUVEAU: Données test natif ***
+  const [nativeSubscription, setNativeSubscription] = useState(null); // *** NOUVEAU: Subscription test ***
 
   useEffect(() => {
     checkAvailability();
@@ -126,9 +137,87 @@ const NativePedometerTest = () => {
     Alert.alert('Test CMPedometer', 'Tests des données historiques terminés');
   };
 
+  // *** NOUVEAU: Test du module natif CMPedometer ***
+  const testNativeModule = async () => {
+    if (Platform.OS !== 'ios' || !ExpoNativePedometer) {
+      Alert.alert('Info', 'Module natif CMPedometer non disponible');
+      return;
+    }
+
+    try {
+      console.log('🧪 [TEST-NATIVE] Démarrage test module natif...');
+      
+      // Vérification de la disponibilité
+      const available = await ExpoNativePedometer.isAvailable();
+      console.log('🧪 [TEST-NATIVE] Disponibilité:', available);
+      
+      if (!available) {
+        Alert.alert('Test Natif', 'CMPedometer non disponible sur cet appareil');
+        return;
+      }
+      
+      // Obtenir le statut
+      const status = await ExpoNativePedometer.getStatus();
+      console.log('🧪 [TEST-NATIVE] Statut:', status);
+      
+      // S'abonner aux événements
+      const subscription = ExpoNativePedometer.addStepLengthListener((event) => {
+        console.log('🧪 [TEST-NATIVE] Événement reçu:', event);
+        setNativeTestData({
+          ...event,
+          receivedAt: new Date().toLocaleTimeString()
+        });
+      });
+      setNativeSubscription(subscription);
+      
+      // Démarrer le suivi
+      await ExpoNativePedometer.startStepLengthTracking();
+      console.log('🧪 [TEST-NATIVE] Suivi démarré');
+      
+      Alert.alert(
+        'Test Natif Démarré', 
+        'Le module natif CMPedometer est maintenant actif.\n\nMarchéz pour voir les données de distance transmises en temps réel.',
+        [
+          {
+            text: 'Arrêter le test',
+            onPress: stopNativeTest
+          },
+          {
+            text: 'Continuer',
+            style: 'cancel'
+          }
+        ]
+      );
+      
+    } catch (error) {
+      console.error('🧪 [TEST-NATIVE] Erreur:', error);
+      Alert.alert('Erreur Test Natif', error.message);
+    }
+  };
+
+  const stopNativeTest = async () => {
+    try {
+      if (nativeSubscription) {
+        nativeSubscription.remove();
+        setNativeSubscription(null);
+      }
+      
+      if (ExpoNativePedometer) {
+        await ExpoNativePedometer.stopStepLengthTracking();
+        console.log('🧪 [TEST-NATIVE] Test arrêté');
+      }
+      
+      setNativeTestData(null);
+      Alert.alert('Test Natif', 'Test du module natif arrêté');
+    } catch (error) {
+      console.error('🧪 [TEST-NATIVE] Erreur arrêt:', error);
+    }
+  };
+
   const clearData = () => {
     setCurrentData(null);
     setHistoricalData([]);
+    setNativeTestData(null); // *** NOUVEAU: Effacer aussi les données natives ***
   };
 
   return (
@@ -179,6 +268,10 @@ const NativePedometerTest = () => {
             </TouchableOpacity>
           )}
           
+          <TouchableOpacity style={styles.button} onPress={testNativeModule}>
+            <Text style={styles.buttonText}>Test Native Module</Text>
+          </TouchableOpacity>
+          
           <TouchableOpacity style={styles.button} onPress={clearData}>
             <Text style={styles.buttonText}>Effacer</Text>
           </TouchableOpacity>
@@ -201,6 +294,36 @@ const NativePedometerTest = () => {
           )}
           <Text style={styles.dataText}>
             Timestamp: {new Date(currentData.timestamp || Date.now()).toLocaleTimeString()}
+          </Text>
+        </View>
+      )}
+
+      {/* *** NOUVEAU: Données du test natif *** */}
+      {nativeTestData && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>🍎 Test Module Natif CMPedometer</Text>
+          <Text style={[styles.dataText, styles.nativeData]}>
+            ✅ Longueur de pas: {nativeTestData.stepLength?.toFixed(3)} m
+          </Text>
+          <Text style={[styles.dataText, styles.nativeData]}>
+            ✅ Steps totaux: {nativeTestData.totalSteps}
+          </Text>
+          <Text style={[styles.dataText, styles.nativeData]}>
+            ✅ Distance totale: {nativeTestData.totalDistance?.toFixed(3)} m
+          </Text>
+          <Text style={styles.dataText}>
+            Timestamp: {new Date(nativeTestData.timestamp).toLocaleTimeString()}
+          </Text>
+          <Text style={styles.dataText}>
+            Reçu à: {nativeTestData.receivedAt}
+          </Text>
+          {nativeTestData.totalSteps > 0 && nativeTestData.totalDistance > 0 && (
+            <Text style={[styles.dataText, styles.calculatedData]}>
+              📊 Longueur moyenne calculée: {(nativeTestData.totalDistance / nativeTestData.totalSteps).toFixed(3)} m
+            </Text>
+          )}
+          <Text style={styles.infoText}>
+            💡 Ces données proviennent directement de CMPedometer.distance
           </Text>
         </View>
       )}
@@ -359,6 +482,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 2,
     color: '#666',
+  },
+  nativeData: {
+    color: '#007AFF',
+  },
+  calculatedData: {
+    color: '#34C759',
   },
 });
 

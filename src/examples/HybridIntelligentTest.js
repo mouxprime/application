@@ -122,6 +122,32 @@ const NativeIntelligentTest = () => {
     }
   };
 
+  const forceFallbackMode = () => {
+    try {
+      if (motionServiceRef.current) {
+        motionServiceRef.current.forceFallbackMode();
+        addLog('🆘 Mode fallback forcé (0.87m par pas)', 'info');
+      }
+    } catch (error) {
+      addLog(`❌ Erreur mode fallback: ${error.message}`, 'error');
+    }
+  };
+
+  const triggerFallbackStep = () => {
+    try {
+      if (motionServiceRef.current) {
+        const success = motionServiceRef.current.triggerFallbackStep();
+        if (success) {
+          addLog('🆘 Pas fallback déclenché (0.87m)', 'step');
+        } else {
+          addLog('⚠️ Mode fallback non actif', 'error');
+        }
+      }
+    } catch (error) {
+      addLog(`❌ Erreur pas fallback: ${error.message}`, 'error');
+    }
+  };
+
   const getLogColor = (type) => {
     switch (type) {
       case 'error': return '#FF3B30';
@@ -149,6 +175,14 @@ const NativeIntelligentTest = () => {
 
         <TouchableOpacity style={styles.button} onPress={resetService}>
           <Text style={styles.buttonText}>Reset</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={[styles.button, styles.fallbackButton]} onPress={forceFallbackMode}>
+          <Text style={styles.buttonText}>Mode Fallback</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={[styles.button, styles.stepButton]} onPress={triggerFallbackStep}>
+          <Text style={styles.buttonText}>Pas Manuel (0.87m)</Text>
         </TouchableOpacity>
       </View>
 
@@ -387,6 +421,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     fontStyle: 'italic',
+  },
+  fallbackButton: {
+    backgroundColor: '#FF9500',
+  },
+  stepButton: {
+    backgroundColor: '#007AFF',
   },
 });
 

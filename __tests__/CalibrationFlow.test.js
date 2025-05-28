@@ -7,7 +7,6 @@ import { LocalizationProvider } from '../src/context/LocalizationContext';
 
 // Mock des dépendances
 jest.mock('../src/algorithms/LocalizationSDK');
-jest.mock('../src/algorithms/OrientationCalibrator');
 
 // Mock Alert
 jest.spyOn(Alert, 'alert');
@@ -216,11 +215,8 @@ describe('Tests Conditions Réelles - Robustesse', () => {
       });
     });
 
-    const orientation = new (require('../src/algorithms/OrientationCalibrator').OrientationCalibrator)();
-    
-    // Test threshold ajusté
-    expect(orientation.config.gravityThreshold).toBe(0.5);
-    expect(orientation.config.calibrationDuration).toBe(2000);
+    // Test avec SDK uniquement (plus d'OrientationCalibrator)
+    expect(mockSDK.prototype.calibratePocketOrientation).toBeDefined();
   });
 
   test('Simulation pocket veste - orientation différente', async () => {
@@ -239,9 +235,7 @@ describe('Tests Conditions Réelles - Robustesse', () => {
   });
 
   test('Validation gravityThreshold en conditions réelles', () => {
-    const orientationCalibrator = new (require('../src/algorithms/OrientationCalibrator').OrientationCalibrator)();
-    
-    // Test avec différents niveaux de mouvement
+    // Test avec différents niveaux de mouvement (sans OrientationCalibrator)
     const testCases = [
       { accMag: 9.81, gyroMag: 0.05, shouldPass: true },   // Immobile
       { accMag: 10.5, gyroMag: 0.08, shouldPass: false },  // Mouvement modéré

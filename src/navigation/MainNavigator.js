@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import MapScreen from '../screens/MapScreen';
 import SensorsScreen from '../screens/SensorsScreen';
 import AnalyticsScreen from '../screens/AnalyticsScreen';
+import ConfigurationScreen from '../screens/ConfigurationScreen';
 import AccountScreen from '../screens/AccountScreen';
 
 const Tab = createBottomTabNavigator();
@@ -33,6 +34,13 @@ const tabsConfig = [
     headerTitle: 'Analyse Performance',
     iconFocused: 'analytics',
     iconUnfocused: 'analytics-outline',
+  },
+  {
+    name: 'Configuration',
+    component: ConfigurationScreen,
+    headerTitle: 'Configuration & Paramètres',
+    iconFocused: 'settings',
+    iconUnfocused: 'settings-outline',
   },
   {
     name: 'Mon Compte',
