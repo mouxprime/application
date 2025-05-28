@@ -457,82 +457,25 @@ export class AdvancedExtendedKalmanFilter {
   }
 
   /**
-   * Mise à jour avec correction magnétomètre conditionnelle AMÉLIORÉE
+   * Mise à jour avec données de magnétomètre (SIMPLIFIÉ)
    */
-  updateWithMagnetometer(magneticField, confidence = 1.0, orientationCalibrator = null) {
-    // *** AMÉLIORATION: Utiliser les nouvelles informations de compensation ***
-    let heading;
-    let effectiveConfidence = confidence;
-    
-    // Prioriser le cap corrigé avec compensation d'inclinaison
-    if (magneticField.correctedHeading !== undefined) {
-      heading = magneticField.correctedHeading;
+  updateWithMagnetometer(magneticField, confidence = 1.0) {
+    if (!magneticField || typeof magneticField.x !== 'number') return;
+
+    try {
+      // Calcul du cap magnétique simple
+      const magneticHeading = Math.atan2(magneticField.y, magneticField.x);
       
-      // Utiliser la confiance de la compensation d'inclinaison si disponible
-      if (magneticField.confidence !== undefined) {
-        effectiveConfidence = Math.max(magneticField.confidence, 0.1); // Minimum 10%
-      }
+      // Normalisation [-π, π]
+      const normalizedHeading = this.normalizeAngle(magneticHeading);
       
-      console.log(`[EKF] Utilisation cap compensé: ${(heading * 180/Math.PI).toFixed(1)}°, confiance: ${(effectiveConfidence * 100).toFixed(1)}%`);
+      // Mise à jour directe avec confiance
+      this.updateWithObservation([6], [normalizedHeading], this.config.magnetometerNoise / confidence);
       
-    } else {
-      // *** BUG FIX: Seuil de confiance beaucoup plus bas pour forcer les corrections absolues ***
-      // Autoriser l'usage même avec très faible confiance (minimum 5% au lieu de 10%)
-      effectiveConfidence = Math.max(confidence, 0.05);
-
-      // Transformation du champ magnétique avec la calibration d'orientation si disponible
-      let transformedMagField = magneticField;
-      if (orientationCalibrator && orientationCalibrator.isCalibrated) {
-        try {
-          // Appliquer la transformation d'orientation au vecteur magnétique
-          const magVector = math.matrix([[magneticField.x], [magneticField.y], [magneticField.z]]);
-          const rotatedVector = math.multiply(orientationCalibrator.rotationMatrix, magVector);
-          
-          transformedMagField = {
-            x: rotatedVector.get([0, 0]),
-            y: rotatedVector.get([1, 0]),
-            z: rotatedVector.get([2, 0])
-          };
-        } catch (error) {
-          console.warn('Erreur transformation magnétomètre:', error);
-          transformedMagField = magneticField; // Fallback vers données brutes
-        }
-      }
-
-      heading = Math.atan2(transformedMagField.y, transformedMagField.x);
-    }
-
-    const measurement = math.matrix([[heading]]);
-
-    // Matrice d'observation pour orientation
-    const H = math.zeros(1, 13);
-    H.set([0, 6], 1); // θ orientation
-
-    // *** AMÉLIORATION: Bruit adaptatif basé sur la qualité de la mesure ***
-    let baseNoise = this.config.magnetometerNoise ** 2;
-    
-    // Réduire le bruit si on a une mesure compensée fiable
-    if (magneticField.correctedHeading !== undefined && magneticField.confidence > 0.7) {
-      baseNoise *= 0.5; // Réduire le bruit de 50% pour les mesures compensées fiables
-    }
-    
-    const effectiveNoise = Math.min(baseNoise / effectiveConfidence, 2.0); // Plafonné à 2.0
-    const R = math.matrix([[effectiveNoise]]);
-    
-    this.updateMeasurement(measurement, H, R);
-    
-    // *** BUG FIX: Appliquer une correction supplémentaire pour orientation absolue ***
-    // Réduction explicite de l'incertitude en yaw après correction magnétomètre
-    const confidenceBonus = Math.min(effectiveConfidence, 0.3);
-    
-    // Réduire l'incertitude en orientation (élément [6,6] de la matrice de covariance)
-    const currentUncertainty = this.P.get([6, 6]);
-    const reductionFactor = 1 - confidenceBonus * 0.5;
-    this.P.set([6, 6], currentUncertainty * reductionFactor);
-    
-    // Log pour debug
-    if (this.config.debug) {
-      console.log(`[EKF] Magnétomètre - Heading: ${(heading * 180/Math.PI).toFixed(1)}°, Confiance: ${(effectiveConfidence * 100).toFixed(1)}%, Bruit: ${effectiveNoise.toFixed(3)}`);
+      this._lastMagnetometerConfidence = confidence;
+      
+    } catch (error) {
+      console.warn('Erreur mise à jour magnétomètre (simplifié):', error);
     }
   }
 

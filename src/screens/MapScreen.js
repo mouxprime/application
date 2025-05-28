@@ -39,7 +39,12 @@ export default function MapScreen() {
     userHeight: 1.7,
     adaptiveSampling: true,
     energyOptimization: true,
-    positionUpdateRate: 1.0
+    positionUpdateRate: 1.0,
+    continuousOrientation: {
+      enabled: true,
+      mode: 'native_compass', // Mode natif par défaut
+      fallbackToSteps: true
+    }
   }));
   
   // Convertisseur d'échelle avec l'échelle de référence
@@ -173,6 +178,7 @@ export default function MapScreen() {
           stepNumber: stepCount
         });
       },
+      // *** SIMPLIFIÉ: Callback calibration pour capteurs uniquement ***
       onCalibrationProgress: (progress) => {
         console.log('Progression calibration:', progress);
         
@@ -190,6 +196,26 @@ export default function MapScreen() {
             setCalibrationModal(prev => ({ ...prev, visible: false }));
           }, 1500); // Afficher "Terminé" pendant 1.5s
         }
+      },
+      // *** NOUVEAU: Callback pour dérive de boussole ***
+      onCompassDriftDetected: (driftData) => {
+        console.log('Dérive boussole détectée:', driftData);
+        
+        // Afficher notification de recalibration manuelle
+        Alert.alert(
+          'Recalibration de la boussole',
+          driftData.message + '\n\nEffectuez un mouvement en huit avec votre téléphone pour améliorer la précision.',
+          [
+            { text: 'Plus tard', style: 'cancel' },
+            { 
+              text: 'Compris', 
+              onPress: () => {
+                // Réinitialiser l'historique de dérive
+                localizationSDK.resetCompassDrift();
+              }
+            }
+          ]
+        );
       },
       onDataUpdate: (sensorData) => {
         // Mise à jour du contexte avec les données capteurs en temps réel
@@ -813,9 +839,9 @@ export default function MapScreen() {
             <View style={styles.metricItem}>
               <Text style={styles.metricLabel}>Source:</Text>
               <Text style={[styles.metricValue, { 
-                color: orientationSource === 'continuous_fusion' ? '#00ff88' : '#ffaa00' 
+                color: orientationSource === 'native_compass' ? '#00ff88' : '#ffaa00' 
               }]}>
-                {orientationSource === 'continuous_fusion' ? 'Fusion' : 
+                {orientationSource === 'native_compass' ? 'Boussole' : 
                  orientationSource === 'pdr_fallback' ? 'PDR' : 'Gyro'}
               </Text>
             </View>
@@ -938,32 +964,21 @@ export default function MapScreen() {
   };
 
   /**
-   * *** NOUVEAU: Recalibration manuelle de la boussole ***
+   * *** SIMPLIFIÉ: Recalibration manuelle de la boussole ***
    */
   const handleCompassRecalibration = () => {
     Alert.alert(
       'Recalibrer la boussole',
-      'Cette action va réinitialiser la calibration de l\'orientation et redémarrer le processus automatique.\n\nUtilisez cette fonction si la direction semble incorrecte après avoir changé la position du téléphone (main ↔ poche).',
+      'Pour améliorer la précision de l\'orientation :\n\n📱 Effectuez un mouvement en huit avec votre téléphone\n⏱️ Maintenez le mouvement pendant quelques secondes\n\nCeci permet au système de recalibrer automatiquement la boussole.',
       [
         { text: 'Annuler', style: 'cancel' },
         {
-          text: 'Recalibrer',
+          text: 'Compris',
           onPress: () => {
-            try {
-              // Déclencher la recalibration dans le SDK
-              const result = localizationSDK.triggerRecalibration('manual');
-              if (result) {
-                Alert.alert(
-                  'Recalibration démarrée',
-                  'Marchez en ligne droite pendant quelques pas pour permettre la recalibration automatique de l\'orientation.',
-                  [{ text: 'Compris' }]
-                );
-              } else {
-                Alert.alert('Erreur', 'Impossible de déclencher la recalibration');
-              }
-            } catch (error) {
-              console.error('Erreur recalibration:', error);
-              Alert.alert('Erreur', 'Une erreur est survenue lors de la recalibration');
+            // Réinitialiser l'historique de dérive pour permettre une nouvelle détection
+            const success = localizationSDK.resetCompassDrift();
+            if (success) {
+              console.log('Historique de dérive réinitialisé - Prêt pour nouvelle calibration');
             }
           }
         }
@@ -983,26 +998,29 @@ export default function MapScreen() {
    */
   const startContinuousOrientation = async () => {
     try {
-      // Activer le mode orientation continue dans le SDK
-      const success = localizationSDK.setOrientationMode('continuous_fusion');
+      // Activer le mode orientation native dans le SDK
+      const success = localizationSDK.setOrientationMode('native_compass');
       
       if (success) {
         setIsOrientationActive(true);
-        console.log('Orientation continue activée via SDK');
+        console.log('Orientation native activée via SDK');
         
         // Configurer le callback pour recevoir les mises à jour d'orientation
         localizationSDK.callbacks.onOrientationUpdate = (orientationData) => {
           setContinuousOrientation(orientationData.heading);
           setOrientationConfidence(orientationData.confidence);
-          setOrientationSource(orientationData.source);
+          setOrientationSource('native_compass');
         };
         
       } else {
-        console.warn('Impossible d\'activer l\'orientation continue');
+        console.warn('Impossible d\'activer l\'orientation native');
+        // Fallback vers mode gyro
+        setOrientationSource('pdr_gyro');
       }
       
     } catch (error) {
-      console.error('Erreur démarrage orientation continue:', error);
+      console.error('Erreur démarrage orientation native:', error);
+      setOrientationSource('pdr_gyro');
     }
   };
 
@@ -1011,8 +1029,8 @@ export default function MapScreen() {
    */
   const stopContinuousOrientation = () => {
     try {
-      // Désactiver le mode orientation continue dans le SDK
-      localizationSDK.setOrientationMode('pdr_gyro');
+      // Désactiver le mode orientation native dans le SDK
+      const success = localizationSDK.setOrientationMode('pdr_gyro');
       
       setIsOrientationActive(false);
       setOrientationConfidence(0);
@@ -1023,10 +1041,10 @@ export default function MapScreen() {
         delete localizationSDK.callbacks.onOrientationUpdate;
       }
       
-      console.log('Orientation continue arrêtée');
+      console.log('Orientation native arrêtée');
       
     } catch (error) {
-      console.error('Erreur arrêt orientation continue:', error);
+      console.error('Erreur arrêt orientation native:', error);
     }
   };
 
@@ -1038,31 +1056,6 @@ export default function MapScreen() {
       stopContinuousOrientation();
     } else {
       startContinuousOrientation();
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Forcer calibration immédiate ***
-   */
-  const forceImmediateCalibration = () => {
-    try {
-      const success = localizationSDK.forceImmediateCalibration();
-      
-      if (success) {
-        console.log('Calibration immédiate déclenchée');
-        // Afficher un indicateur de calibration en cours
-        setCalibrationModal({
-          visible: true,
-          progress: 0,
-          message: 'Calibration immédiate en cours...',
-          step: 'immediate_calibration'
-        });
-      } else {
-        console.warn('Impossible de déclencher la calibration immédiate');
-      }
-      
-    } catch (error) {
-      console.error('Erreur calibration immédiate:', error);
     }
   };
 
@@ -1212,7 +1205,7 @@ export default function MapScreen() {
           <Ionicons name="compass" size={24} color="#00ff88" />
         </TouchableOpacity>
 
-        {/* *** NOUVEAU: Bouton orientation permanente *** */}
+        {/* *** NOUVEAU: Bouton orientation native *** */}
         <TouchableOpacity 
           style={[styles.controlButton, isOrientationActive && styles.activeButton]} 
           onPress={toggleContinuousOrientation}
@@ -1221,18 +1214,6 @@ export default function MapScreen() {
             name={isOrientationActive ? "compass" : "compass-outline"} 
             size={24} 
             color={isOrientationActive ? "#ffffff" : "#00ff88"} 
-          />
-        </TouchableOpacity>
-
-        {/* *** NOUVEAU: Bouton calibration immédiate *** */}
-        <TouchableOpacity 
-          style={styles.controlButton} 
-          onPress={forceImmediateCalibration}
-        >
-          <Ionicons 
-            name="refresh-circle-outline" 
-            size={24} 
-            color="#00ff88" 
           />
         </TouchableOpacity>
       </View>

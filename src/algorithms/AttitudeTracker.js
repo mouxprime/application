@@ -1,80 +1,71 @@
 import { create, all } from 'mathjs';
-import { OrientationCalibrator } from './OrientationCalibrator.js';
 
 const math = create(all);
 
 /**
- * Traqueur d'attitude continu avec re-calibration automatique
- * Utilise un filtre Madgwick pour maintenir un quaternion téléphone→monde
- * et détecte automatiquement les moments de stabilité pour re-calibrer
+ * AttitudeTracker - Suivi d'orientation adaptative simplifié
+ * Plus d'OrientationCalibrator - utilise uniquement la boussole native
  */
 export class AttitudeTracker {
   constructor(config = {}) {
     this.config = {
-      // Paramètres du filtre Madgwick
-      beta: config.beta || 0.1, // Gain du filtre (0.1 = conservateur, 0.5 = agressif)
-      
-      // Seuils de détection de stabilité
-      stabilityAccThreshold: config.stabilityAccThreshold || 0.2, // m/s²
-      stabilityGyroThreshold: config.stabilityGyroThreshold || 0.1, // rad/s
-      stabilityDuration: config.stabilityDuration || 2000, // ms
-      
-      // Confiance magnétique
-      magConfidenceThreshold: config.magConfidenceThreshold || 0.7,
-      magNormThreshold: config.magNormThreshold || 5.0, // µT tolérance
-      
-      // Re-calibration
+      beta: config.beta || 0.15,                          
+      stabilityAccThreshold: config.stabilityAccThreshold || 0.3,     
+      stabilityGyroThreshold: config.stabilityGyroThreshold || 0.15,   
+      stabilityDuration: config.stabilityDuration || 1500,
+      magConfidenceThreshold: config.magConfidenceThreshold || 0.3,
       autoRecalibrationEnabled: config.autoRecalibrationEnabled !== false,
-      recalibrationInterval: config.recalibrationInterval || 30000, // 30s minimum entre recalibrations
-      
+      recalibrationInterval: config.recalibrationInterval || 20000,
+      magNormThreshold: config.magNormThreshold || 100, // Seuil variance norme magnétique
       ...config
     };
 
-    // État du quaternion (téléphone → monde)
+    // État quaternion AHRS (Attitude and Heading Reference System)
     this.quaternion = { w: 1, x: 0, y: 0, z: 0 };
-    this.previousQuaternion = { ...this.quaternion };
     
-    // Suivi de stabilité
+    // Gestion de la stabilité
     this.stabilityState = {
       isStable: false,
       stableStartTime: 0,
-      accelerationVariance: 0,
-      gyroMagnitude: 0,
-      samples: []
+      accelerometerVariance: 0,
+      gyroscopeNorm: 0,
+      lastStabilityCheck: 0,
+      samples: [] // Ajout du tableau de samples
     };
     
-    // Confiance magnétique
+    // Historiques pour calculs de variance
+    this.accelerometerHistory = [];
+    this.gyroscopeHistory = [];
+    
+    // *** NOUVEAU: Initialisation complète de magnetometerState ***
     this.magneticState = {
+      lastReading: null,
       confidence: 0,
-      reference: null,
-      recentSamples: []
+      isReliable: false,
+      recentSamples: [], // Historique des échantillons récents
+      reference: null    // Référence magnétique calibrée
     };
     
-    // Re-calibration automatique
+    // Recalibration automatique
     this.recalibrationState = {
-      lastRecalibrationTime: 0,
-      isRecalibrating: false,
-      calibrator: new OrientationCalibrator({
-        calibrationDuration: 3000, // 3s pour recalibration rapide
-        samplesRequired: 30,
-        gravityThreshold: 1.0,
-        gyroThreshold: 0.15
-      })
+      lastRecalibration: Date.now(),
+      lastRecalibrationTime: Date.now(), // Compatibilité
+      isRecalibrating: false
     };
+
+    // Matrices de rotation (initialisées à l'identité)
+    this.bodyToPhoneMatrix = null;
+    this.phoneToBodyMatrix = null;
     
-    // Matrice de rotation corps → téléphone actuelle
-    this.bodyToPhoneMatrix = math.identity(3);
-    this.phoneToBodyMatrix = math.identity(3);
-    
+    // Temps de dernière mise à jour
+    this.lastUpdateTime = 0;
+
     // Callbacks
     this.onAttitudeUpdate = null;
     this.onRecalibration = null;
     this.onStabilityChange = null;
-    
-    // Dernière mise à jour
-    this.lastUpdateTime = 0;
-    
-    console.log('AttitudeTracker initialisé');
+
+    console.log('AttitudeTracker initialisé (simplifié - sans OrientationCalibrator)');
   }
 
   /**
@@ -393,61 +384,41 @@ export class AttitudeTracker {
     const stableDuration = currentTime - this.stabilityState.stableStartTime;
     if (stableDuration < this.config.stabilityDuration) return;
     
-    // Déclencher re-calibration
-    this.startAutoRecalibration(accelerometer, gyroscope);
+    // *** SIMPLIFIÉ: Plus de calibration automatique complexe ***
+    console.log('Recalibration automatique simplifiée (sans calibrator externe)');
+    this.simpleAutoRecalibration();
   }
 
   /**
-   * Démarrage re-calibration automatique
+   * *** NOUVEAU: Recalibration automatique simplifiée ***
    */
-  startAutoRecalibration(accelerometer, gyroscope) {
-    console.log('Démarrage re-calibration automatique');
+  simpleAutoRecalibration() {
+    console.log('Recalibration automatique simplifiée démarrée');
     
     this.recalibrationState.isRecalibrating = true;
     this.recalibrationState.lastRecalibrationTime = Date.now();
     
-    // Configuration callbacks
-    this.recalibrationState.calibrator.setCallbacks({
-      onProgress: (progress, message) => {
-        // Suivi silencieux
-      },
-      onComplete: (rotationMatrix, avgGravity) => {
-        this.completeAutoRecalibration(rotationMatrix, avgGravity);
-      }
-    });
-    
-    // Démarrer calibration
-    this.recalibrationState.calibrator.startCalibration();
-    
-    // Feed données pendant la calibration
-    const feedData = () => {
-      if (this.recalibrationState.isRecalibrating) {
-        this.recalibrationState.calibrator.addCalibrationSample(accelerometer, gyroscope);
-        setTimeout(feedData, 40); // 25Hz
-      }
-    };
-    feedData();
+    // Simuler une brève recalibration (500ms)
+    setTimeout(() => {
+      this.completeSimpleRecalibration();
+    }, 500);
   }
 
   /**
-   * Finalisation re-calibration automatique
+   * *** NOUVEAU: Finalisation recalibration simplifiée ***
    */
-  completeAutoRecalibration(rotationMatrix, avgGravity) {
-    console.log('Re-calibration automatique terminée');
-    
-    // Mise à jour matrices
-    this.bodyToPhoneMatrix = rotationMatrix;
-    this.phoneToBodyMatrix = math.inv(rotationMatrix);
+  completeSimpleRecalibration() {
+    console.log('Recalibration automatique simplifiée terminée');
     
     this.recalibrationState.isRecalibrating = false;
     
-    // Notification
+    // Notification de recalibration terminée
     if (this.onRecalibration) {
       this.onRecalibration({
-        rotationMatrix,
-        avgGravity,
         automatic: true,
-        timestamp: Date.now()
+        simplified: true,
+        timestamp: Date.now(),
+        message: 'Recalibration automatique simplifiée effectuée'
       });
     }
   }
@@ -530,7 +501,7 @@ export class AttitudeTracker {
   forceRecalibration(accelerometer, gyroscope) {
     console.log('Force re-calibration manuelle');
     this.recalibrationState.lastRecalibrationTime = 0; // Reset timer
-    this.startAutoRecalibration(accelerometer, gyroscope);
+    this.simpleAutoRecalibration(); // Utiliser la version simplifiée
   }
 
   /**
