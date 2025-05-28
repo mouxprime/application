@@ -7,7 +7,7 @@ const initialState = {
     x: 0,         // Position X en mètres
     y: 0,         // Position Y en mètres
     theta: 0,     // Orientation en radians
-    confidence: 0 // Niveau de confiance (0-1)
+    confidence: 0.8 // Niveau de confiance initial raisonnable (0-1)
   },
   
   // Données des capteurs
@@ -47,7 +47,7 @@ const initialState = {
     stabilityDuration: 0,
     accelerationVariance: 0,
     gyroMagnitude: 0,
-    magneticConfidence: 0,
+    magneticConfidence: 0.5, // Confiance magnétique initiale raisonnable
     isRecalibrating: false,
     lastRecalibration: 0,
     bodyToPhoneMatrix: null,
@@ -166,7 +166,7 @@ function localizationReducer(state, action) {
           x: action.payload?.x || 0,
           y: action.payload?.y || 0,
           theta: action.payload?.theta || 0,
-          confidence: 0
+          confidence: action.payload?.confidence || 0.8 // Confiance initiale raisonnable
         },
         trajectory: []
       };

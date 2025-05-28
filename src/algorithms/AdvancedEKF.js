@@ -1003,7 +1003,7 @@ export class AdvancedExtendedKalmanFilter {
   /**
    * Mise à jour avec données PDR pour stabiliser la confiance AMÉLIORÉE
    */
-  updateWithPDR(pdrPosition, pdrYaw, mode) {
+  updateWithPDR(pdrPosition, pdrYaw, mode, measurementConfidence = 1.0) {
     if (this._isUpdating) return;
     
     try {
@@ -1033,6 +1033,16 @@ export class AdvancedExtendedKalmanFilter {
           yawNoise = 0.08;
       }
       
+      // *** NOUVEAU: Ajustement du bruit selon la confiance de mesure ***
+      // Plus la confiance est élevée, plus le bruit est faible (mesure plus fiable)
+      const confidenceAdjustment = Math.max(0.1, measurementConfidence); // Éviter division par zéro
+      const adjustedPositionNoise = positionNoise / confidenceAdjustment;
+      const adjustedYawNoise = yawNoise / confidenceAdjustment;
+      
+      console.log(`[EKF-CONFIDENCE] Mode: ${mode}, Confiance: ${(measurementConfidence * 100).toFixed(1)}%`);
+      console.log(`[EKF-CONFIDENCE] Bruit position: ${positionNoise.toFixed(4)} → ${adjustedPositionNoise.toFixed(4)}`);
+      console.log(`[EKF-CONFIDENCE] Bruit yaw: ${yawNoise.toFixed(4)} → ${adjustedYawNoise.toFixed(4)}`);
+      
       // Mise à jour de position (X, Y)
       const positionMeasurement = math.matrix([[pdrPosition.x], [pdrPosition.y]]);
       const H_pos = math.zeros(2, 13);
@@ -1040,8 +1050,8 @@ export class AdvancedExtendedKalmanFilter {
       H_pos.set([1, 1], 1); // mesure Y
       
       const R_pos = math.matrix([
-        [positionNoise ** 2, 0],
-        [0, positionNoise ** 2]
+        [adjustedPositionNoise ** 2, 0],
+        [0, adjustedPositionNoise ** 2]
       ]);
       
       this.updateMeasurement(positionMeasurement, H_pos, R_pos);
@@ -1051,14 +1061,14 @@ export class AdvancedExtendedKalmanFilter {
       const H_yaw = math.zeros(1, 13);
       H_yaw.set([0, 6], 1); // mesure yaw
       
-      const R_yaw = math.matrix([[yawNoise ** 2]]);
+      const R_yaw = math.matrix([[adjustedYawNoise ** 2]]);
       
       this.updateMeasurement(yawMeasurement, H_yaw, R_yaw);
       
       // Log simplifié toutes les 2 secondes
       const now = Date.now();
       if (now - this.lastLogTime >= 2000) {
-        console.log(`[STATUS] Mode: ${mode}`);
+        console.log(`[STATUS] Mode: ${mode}, Confiance: ${(measurementConfidence * 100).toFixed(1)}%`);
         this.lastLogTime = now;
       }
       
@@ -1126,6 +1136,16 @@ export class AdvancedExtendedKalmanFilter {
    */
   _processSingleUpdate(update) {
     let measurement, H, R;
+    
+    // *** NOUVEAU: Ajustement du bruit selon la confiance si présente ***
+    const confidence = update.confidence || 1.0; // Confiance par défaut à 100%
+    const confidenceAdjustment = Math.max(0.1, confidence); // Éviter division par zéro
+    const adjustedNoise = update.noise / confidenceAdjustment;
+    
+    // Log de debug pour les mises à jour PDR avec confiance
+    if ((update.type === 'pdr_position' || update.type === 'pdr_yaw') && update.confidence !== undefined) {
+      console.log(`[EKF-BATCH-CONFIDENCE] ${update.type}: confiance=${(confidence * 100).toFixed(1)}%, bruit=${update.noise.toFixed(4)}→${adjustedNoise.toFixed(4)}`);
+    }
 
     switch (update.type) {
       case 'barometer':
@@ -1133,7 +1153,7 @@ export class AdvancedExtendedKalmanFilter {
         measurement = math.matrix([[update.measurement]]);
         H = math.zeros(1, 13);
         H.set([0, 2], 1); // z position
-        R = math.matrix([[update.noise ** 2]]);
+        R = math.matrix([[adjustedNoise ** 2]]);
         break;
 
       case 'magnetometer':
@@ -1141,7 +1161,7 @@ export class AdvancedExtendedKalmanFilter {
         measurement = math.matrix([[update.measurement]]);
         H = math.zeros(1, 13);
         H.set([0, 6], 1); // θ orientation
-        R = math.matrix([[update.noise ** 2]]);
+        R = math.matrix([[adjustedNoise ** 2]]);
         break;
 
       case 'pdr_position':
@@ -1151,8 +1171,8 @@ export class AdvancedExtendedKalmanFilter {
         H.set([0, 0], 1); // mesure X
         H.set([1, 1], 1); // mesure Y
         R = math.matrix([
-          [update.noise ** 2, 0],
-          [0, update.noise ** 2]
+          [adjustedNoise ** 2, 0],
+          [0, adjustedNoise ** 2]
         ]);
         break;
 
@@ -1161,7 +1181,7 @@ export class AdvancedExtendedKalmanFilter {
         measurement = math.matrix([[update.measurement]]);
         H = math.zeros(1, 13);
         H.set([0, 6], 1); // mesure yaw
-        R = math.matrix([[update.noise ** 2]]);
+        R = math.matrix([[adjustedNoise ** 2]]);
         break;
 
       default:

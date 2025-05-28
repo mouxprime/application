@@ -23,16 +23,25 @@ import { LocalizationSDK } from '../algorithms/LocalizationSDK';
 import { ScaleConverter } from '../utils/ScaleConverter';
 import ZoomableView from '../components/ZoomableView';
 import NativeEnhancedMotionService from '../services/NativeEnhancedMotionService';
+import { PersistentMapService } from '../services/PersistentMapService';
+import TiledMapView from '../components/TiledMapView';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
-// Dimensions de la carte totale
+// *** NOUVEAU: Système de carte persistante avec tuiles ***
+// Dimensions de la carte totale (pour la carte persistante)
 const MAP_TOTAL_WIDTH = 14629;
 const MAP_TOTAL_HEIGHT = 13764;
 
+// *** SPÉCIFICATIONS D'ÉCHELLE ***
+// Échelle exacte : 3.72 pixels = 1 mètre
+// Grille totale : 14629px × 13764px
+// Soit environ : 3932m × 3700m en coordonnées monde
+// Espacement grille : 10m = 37.2px
+
 // Zoom limites
-const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 20;
+const MIN_ZOOM = 0.05; // Zoom out pour voir toute la carte
+const MAX_ZOOM = 10;   // Zoom in pour les détails
 
 export default function MapScreen() {
   const { state, actions } = useLocalization();
@@ -48,6 +57,11 @@ export default function MapScreen() {
     actionsRef.current = actions;
   }, [state, actions]);
   
+  // *** NOUVEAU: Service de carte persistante ***
+  const [persistentMapService] = useState(() => new PersistentMapService());
+  const [persistentMapSVG, setPersistentMapSVG] = useState('');
+  const [mapStats, setMapStats] = useState(null);
+  
   // *** NOUVEAU: États pour l'orientation continue unifiée ***
   const [continuousOrientation, setContinuousOrientation] = useState(0);
   const [orientationConfidence, setOrientationConfidence] = useState(0);
@@ -58,6 +72,18 @@ export default function MapScreen() {
   // *** NOUVEAU: États pour la boussole native indépendante ***
   const [nativeCompassSubscription, setNativeCompassSubscription] = useState(null);
   const [isNativeCompassActive, setIsNativeCompassActive] = useState(false);
+  
+  // *** NOUVEAU: États pour la carte avec tuiles ***
+  const [viewportInfo, setViewportInfo] = useState({
+    zoom: 0.1,
+    panX: 0,
+    panY: 0,
+    visibleTiles: 0
+  });
+  const [mapControls, setMapControls] = useState({
+    centerOnUser: null,
+    viewFullMap: null
+  });
   
   // *** FIX: CALLBACKS DÉFINIS AVANT L'INITIALISATION DU SERVICE ***
   const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, totalSteps, confidence, source, nativeStepLength, averageStepLength, cadence, timeDelta, isFallback }) => {
@@ -76,10 +102,12 @@ export default function MapScreen() {
     
     console.log(`📊 [STEP-CALLBACK] État actuel: position=(${currentState.pose.x.toFixed(2)}, ${currentState.pose.y.toFixed(2)}), pas=${currentState.stepCount || 0}`);
     
-    // *** CONFIANCE ÉLEVÉE POUR LES DONNÉES NATIVES ***
-    const adjustedConfidence = nativeStepLength ? 1.0 : confidence;
+    // *** NOUVEAU: Distinction claire des sources pour la confiance ***
+    const isNative = source === 'ios_cmpedometer';
+    const stepConfidenceToUse = isNative ? 1.0 : confidence;
     
-    console.log(`🔧 [STEP-CALLBACK-DEBUG] adjustedConfidence calculée: ${adjustedConfidence} (${(adjustedConfidence * 100).toFixed(1)}%)`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] isNative: ${isNative}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] stepConfidenceToUse: ${stepConfidenceToUse} (${(stepConfidenceToUse * 100).toFixed(1)}%)`);
     console.log(`🔧 [STEP-CALLBACK-DEBUG] === FIN ANALYSE CONFIANCE ===`);
     
     // Mettre à jour la position
@@ -95,7 +123,7 @@ export default function MapScreen() {
       x: newX,
       y: newY,
       theta: currentTheta,
-      confidence: adjustedConfidence
+      confidence: stepConfidenceToUse
     });
     
     // Ajouter le point à la trajectoire
@@ -103,7 +131,7 @@ export default function MapScreen() {
       x: newX,
       y: newY,
       timestamp,
-      confidence: adjustedConfidence
+      confidence: stepConfidenceToUse
     });
     
     // *** FIX: Calculer la distance totale correctement ***
@@ -113,18 +141,16 @@ export default function MapScreen() {
     currentActions.updatePDRMetrics({
       stepCount,
       distance: totalDistance,
-      currentMode: nativeStepLength ? 'NATIF' : 'FALLBACK',
+      currentMode: isNative ? 'NATIF' : 'FALLBACK',
       energyLevel: 1.0,
       isZUPT: false
     });
     
-    console.log(`📊 [STEP-CALLBACK] Métriques mises à jour: ${stepCount} pas, distance: ${totalDistance.toFixed(2)}m, confiance: ${(adjustedConfidence * 100).toFixed(0)}%`);
+    console.log(`📊 [STEP-CALLBACK] Métriques mises à jour: ${stepCount} pas, distance: ${totalDistance.toFixed(2)}m, confiance: ${(stepConfidenceToUse * 100).toFixed(0)}%`);
     console.log(`🎯 [STEP-CALLBACK] Trajectoire: ${(currentState.trajectory?.length || 0) + 1} points`);
   }, [isOrientationActive, continuousOrientation]);
 
   const handleHeading = useCallback(({ yaw, accuracy, timestamp, source, filteredHeading, rawHeading }) => {
-    console.log(`🧭 [HEADING-CALLBACK] Orientation reçue: ${(yaw * 180 / Math.PI).toFixed(1)}° (précision: ${accuracy})`);
-    
     // *** FIX: Utiliser les refs pour accéder aux valeurs actuelles ***
     const currentState = stateRef.current;
     const currentActions = actionsRef.current;
@@ -142,8 +168,6 @@ export default function MapScreen() {
       theta: yaw, // Garder en radians pour les calculs
       confidence: currentState.pose.confidence
     });
-    
-    console.log(`🧭 [HEADING-CALLBACK] Orientation mise à jour: ${(yaw * 180 / Math.PI).toFixed(1)}° (précision: ${accuracy})`);
   }, []);
   
   const [hybridMotionService] = useState(() => new NativeEnhancedMotionService(
@@ -151,17 +175,18 @@ export default function MapScreen() {
     handleHeading
   ));
   
-  // Convertisseur d'échelle avec l'échelle de référence
+  // Convertisseur d'échelle avec l'échelle de référence CORRIGÉE
   const [scaleConverter] = useState(() => new ScaleConverter({
     referenceMaters: 100,     // 100 mètres
-    referencePixels: 372,     // = 372 pixels
+    referencePixels: 372,     // = 372 pixels (échelle correcte)
     screenWidth: screenWidth,
     screenHeight: screenHeight - 200
   }));
   
   // État de la carte
   const [isMapLoaded, setIsMapLoaded] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [currentZoom, setCurrentZoom] = useState(1);
+  const [viewOffset, setViewOffset] = useState({ x: 0, y: 0 });
   const [batteryLevel, setBatteryLevel] = useState(1);
   const [batteryState, setBatteryState] = useState('unknown');
   
@@ -183,13 +208,17 @@ export default function MapScreen() {
     isLoading: false
   });
   
-  // Dimensions de l'affichage SVG
+  // *** CORRECTION: Dimensions SVG adaptées à l'écran avec zoom intelligent ***
+  // Dimensions de l'affichage SVG - RETOUR À LA TAILLE ÉCRAN
   const svgWidth = screenWidth;
   const svgHeight = screenHeight - 200; // Espace pour les contrôles et métriques
 
   useEffect(() => {
     initializeSystem();
     initializeBattery();
+    
+    // *** NOUVEAU: Initialiser la carte persistante ***
+    initializePersistentMap();
     
     // *** NOUVEAU: Démarrer la boussole native indépendante ***
     startNativeCompass();
@@ -296,13 +325,13 @@ export default function MapScreen() {
 
   /**
    * *** NOUVEAU: Centrer la vue sur la position de l'utilisateur ***
-   * SIMPLIFIÉ: Utilise seulement les coordonnées de base sans ScaleConverter
+   * *** MODIFIÉ: Utilise le nouveau système de centrage intelligent ***
    */
-  const centerOnUser = () => {
-    console.log(`[VIEW] Centrage sur utilisateur: position=(${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})`);
-    // Note: Le centrage est maintenant géré par ZoomableView
-    // Cette fonction sert principalement de feedback visuel
-  };
+  const centerOnUser = useCallback(() => {
+    if (mapControls.centerOnUser) {
+      mapControls.centerOnUser();
+    }
+  }, [mapControls.centerOnUser]);
 
   /**
    * *** ANCIEN: Centrer la vue sur la trajectoire (gardé pour référence) ***
@@ -338,35 +367,42 @@ export default function MapScreen() {
   };
 
   /**
-   * *** NOUVEAU: Sauvegarder le trajet actuel ***
+   * *** NOUVEAU: Sauvegarder le trajet actuel dans la carte persistante ***
    */
-  const handleSaveTrajectory = () => {
-    if (!authState.isAuthenticated) {
-      Alert.alert(
-        'Connexion requise',
-        'Vous devez être connecté pour sauvegarder vos trajets.',
-        [
-          { text: 'Annuler', style: 'cancel' },
-          { text: 'Se connecter', onPress: () => {
-            // L'utilisateur peut naviguer vers l'onglet Mon Compte
-            Alert.alert('Info', 'Rendez-vous dans l\'onglet "Mon Compte" pour vous connecter.');
-          }}
-        ]
-      );
-      return;
+  const saveTrajectoryToPersistentMap = async () => {
+    try {
+      if (!state.trajectory || state.trajectory.length === 0) {
+        console.warn('⚠️ [MAP-SCREEN] Aucun trajet à sauvegarder');
+        return;
+      }
+      
+      console.log(`🗺️ [MAP-SCREEN] Sauvegarde du trajet actuel (${state.trajectory.length} points)`);
+      
+      const metadata = {
+        stepCount: state.stepCount || 0,
+        distance: state.distance || 0,
+        startTime: state.trajectory[0]?.timestamp,
+        endTime: state.trajectory[state.trajectory.length - 1]?.timestamp
+      };
+      
+      const trajectoryId = await persistentMapService.addTrajectory(state.trajectory, metadata);
+      
+      // Recharger la carte persistante
+      const svgContent = await persistentMapService.getSVGContent();
+      setPersistentMapSVG(svgContent);
+      
+      // Mettre à jour les statistiques
+      const stats = persistentMapService.getMapStats();
+      setMapStats(stats);
+      
+      console.log(`✅ [MAP-SCREEN] Trajet ${trajectoryId} sauvegardé dans la carte persistante`);
+      
+      return trajectoryId;
+      
+    } catch (error) {
+      console.error('❌ [MAP-SCREEN] Erreur sauvegarde trajet persistant:', error);
+      throw error;
     }
-
-    if (!state.trajectory || state.trajectory.length === 0) {
-      Alert.alert('Erreur', 'Aucun trajet à sauvegarder');
-      return;
-    }
-
-    // Ouvrir le modal de sauvegarde
-    setSaveTrajectoryModal({
-      visible: true,
-      trajectoryName: `Trajet ${new Date().toLocaleDateString()}`,
-      isLoading: false
-    });
   };
 
   /**
@@ -425,17 +461,68 @@ export default function MapScreen() {
   };
 
   /**
-   * Conversion des coordonnées monde vers l'écran SVG
-   * SIMPLIFIÉ: Pas de zoom/offset car géré par ZoomableView
+   * *** NOUVEAU: Sauvegarder le trajet actuel ***
+   */
+  const handleSaveTrajectory = async () => {
+    try {
+      // Sauvegarder dans la carte persistante
+      const trajectoryId = await saveTrajectoryToPersistentMap();
+      
+      if (trajectoryId) {
+        Alert.alert(
+          'Succès', 
+          `Trajet sauvegardé dans la carte persistante !\n\nID: ${trajectoryId.substring(0, 12)}...`,
+          [
+            { text: 'OK' },
+            { 
+              text: 'Voir stats', 
+              onPress: () => showMapStats() 
+            }
+          ]
+        );
+        
+        // Optionnel : Réinitialiser le trajet actuel
+        actions.resetTrajectory();
+      }
+      
+    } catch (error) {
+      Alert.alert('Erreur', 'Impossible de sauvegarder le trajet: ' + error.message);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Afficher les statistiques de la carte ***
+   */
+  const showMapStats = () => {
+    if (!mapStats) {
+      Alert.alert('Info', 'Aucune statistique disponible');
+      return;
+    }
+    
+    const message = `Carte persistante :
+    
+📊 Trajets enregistrés : ${mapStats.trajectoryCount}
+📏 Distance totale : ${mapStats.totalDistance.toFixed(1)} m
+🗺️ Dimensions : ${mapStats.mapDimensions.worldWidth.toFixed(0)}m × ${mapStats.mapDimensions.worldHeight.toFixed(0)}m
+📅 Dernière mise à jour : ${mapStats.lastUpdate ? new Date(mapStats.lastUpdate).toLocaleString() : 'Jamais'}`;
+    
+    Alert.alert('Statistiques de la carte', message);
+  };
+
+  /**
+   * Conversion des coordonnées monde vers l'écran SVG avec zoom intelligent
+   * *** NOUVEAU: Système de zoom et centrage intelligent ***
    */
   const worldToSVG = (worldPos) => {
-    // Conversion simple mètres -> pixels avec échelle de base uniquement
-    const pixelX = worldPos.x * scaleConverter.BASE_SCALE;
-    const pixelY = -worldPos.y * scaleConverter.BASE_SCALE; // Inversion Y pour SVG
+    // *** CORRECTION: Échelle exacte selon spécification utilisateur ***
+    const EXACT_SCALE = 3.72; // pixels par mètre (3.72 px = 1m)
     
-    // Centre de l'écran comme origine
-    const centerX = svgWidth / 2;
-    const centerY = svgHeight / 2;
+    const pixelX = worldPos.x * EXACT_SCALE * currentZoom;
+    const pixelY = -worldPos.y * EXACT_SCALE * currentZoom; // Inversion Y pour SVG
+    
+    // Centre de l'écran comme origine avec offset
+    const centerX = svgWidth / 2 + viewOffset.x;
+    const centerY = svgHeight / 2 + viewOffset.y;
     
     return {
       x: centerX + pixelX,
@@ -445,49 +532,115 @@ export default function MapScreen() {
 
   /**
    * Rendu de la grille noire
-   * SIMPLIFIÉ: Grille fixe sans dépendance au ScaleConverter
+   * CORRIGÉ: Grille de 14629px × 13764px avec échelle 3.72 px/m
    */
   const renderGrid = () => {
-    const gridSpacing = 50; // Espacement fixe en pixels
+    // *** CORRECTION: Grille selon spécifications utilisateur ***
+    const EXACT_SCALE = 3.72; // pixels par mètre (3.72 px = 1m)
+    const GRID_WIDTH = 14629; // pixels
+    const GRID_HEIGHT = 13764; // pixels
+    
+    // Espacement de grille en mètres (par exemple tous les 10m)
+    const gridSpacingMeters = 10; // mètres
+    const gridSpacing = gridSpacingMeters * EXACT_SCALE; // pixels (37.2px)
+    
     const lines = [];
     
-    // Grille centrée sur l'écran
+    // Centre de l'écran comme origine
     const centerX = svgWidth / 2;
     const centerY = svgHeight / 2;
     
+    // Calculer les limites de la grille en coordonnées écran
+    const gridLeft = centerX - GRID_WIDTH / 2;
+    const gridRight = centerX + GRID_WIDTH / 2;
+    const gridTop = centerY - GRID_HEIGHT / 2;
+    const gridBottom = centerY + GRID_HEIGHT / 2;
+    
+    // Calculer le nombre de lignes nécessaires
+    const numVerticalLines = Math.ceil(GRID_WIDTH / gridSpacing);
+    const numHorizontalLines = Math.ceil(GRID_HEIGHT / gridSpacing);
+    
     // Lignes verticales
-    for (let i = -10; i <= 10; i++) {
+    for (let i = -Math.floor(numVerticalLines / 2); i <= Math.ceil(numVerticalLines / 2); i++) {
       const x = centerX + (i * gridSpacing);
-      lines.push(
-        <Line
-          key={`v-${i}`}
-          x1={x}
-          y1={0}
-          x2={x}
-          y2={svgHeight}
-          stroke="#333333"
-          strokeWidth="1"
-          opacity="0.3"
-        />
-      );
+      if (x >= gridLeft && x <= gridRight) {
+        lines.push(
+          <Line
+            key={`v-${i}`}
+            x1={x}
+            y1={Math.max(0, gridTop)}
+            x2={x}
+            y2={Math.min(svgHeight, gridBottom)}
+            stroke="#333333"
+            strokeWidth="1"
+            opacity="0.3"
+          />
+        );
+      }
     }
     
     // Lignes horizontales
-    for (let i = -10; i <= 10; i++) {
+    for (let i = -Math.floor(numHorizontalLines / 2); i <= Math.ceil(numHorizontalLines / 2); i++) {
       const y = centerY + (i * gridSpacing);
-      lines.push(
-        <Line
-          key={`h-${i}`}
-          x1={0}
-          y1={y}
-          x2={svgWidth}
-          y2={y}
-          stroke="#333333"
-          strokeWidth="1"
-          opacity="0.3"
-        />
-      );
+      if (y >= gridTop && y <= gridBottom) {
+        lines.push(
+          <Line
+            key={`h-${i}`}
+            x1={Math.max(0, gridLeft)}
+            y1={y}
+            x2={Math.min(svgWidth, gridRight)}
+            y2={y}
+            stroke="#333333"
+            strokeWidth="1"
+            opacity="0.3"
+          />
+        );
+      }
     }
+    
+    // *** NOUVEAU: Bordure de la grille pour visualiser les limites ***
+    lines.push(
+      <Line
+        key="border-top"
+        x1={Math.max(0, gridLeft)}
+        y1={Math.max(0, gridTop)}
+        x2={Math.min(svgWidth, gridRight)}
+        y2={Math.max(0, gridTop)}
+        stroke="#666666"
+        strokeWidth="2"
+        opacity="0.8"
+      />,
+      <Line
+        key="border-bottom"
+        x1={Math.max(0, gridLeft)}
+        y1={Math.min(svgHeight, gridBottom)}
+        x2={Math.min(svgWidth, gridRight)}
+        y2={Math.min(svgHeight, gridBottom)}
+        stroke="#666666"
+        strokeWidth="2"
+        opacity="0.8"
+      />,
+      <Line
+        key="border-left"
+        x1={Math.max(0, gridLeft)}
+        y1={Math.max(0, gridTop)}
+        x2={Math.max(0, gridLeft)}
+        y2={Math.min(svgHeight, gridBottom)}
+        stroke="#666666"
+        strokeWidth="2"
+        opacity="0.8"
+      />,
+      <Line
+        key="border-right"
+        x1={Math.min(svgWidth, gridRight)}
+        y1={Math.max(0, gridTop)}
+        x2={Math.min(svgWidth, gridRight)}
+        y2={Math.min(svgHeight, gridBottom)}
+        stroke="#666666"
+        strokeWidth="2"
+        opacity="0.8"
+      />
+    );
     
     return <G>{lines}</G>;
   };
@@ -497,11 +650,8 @@ export default function MapScreen() {
    */
   const renderTrajectory = () => {
     if (!state.trajectory || state.trajectory.length < 1) {
-      console.log('🔍 [TRAJECTORY] Aucune trajectoire à afficher:', state.trajectory?.length || 0, 'points');
       return null;
     }
-    
-    console.log(`🔍 [TRAJECTORY] Rendu de ${state.trajectory.length} points`);
     
     // *** FIX: Chemin simple et visible ***
     const generateSimplePath = () => {
@@ -772,20 +922,7 @@ export default function MapScreen() {
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Orientation:</Text>
             <Text style={[styles.metricValue, { color: isOrientationActive ? '#00ff88' : '#666666' }]}>
-              {(() => {
-                let angle = 0;
-                if (isOrientationActive) {
-                  angle = continuousOrientation * 180 / Math.PI;
-                } else {
-                  angle = state.pose.theta * 180 / Math.PI;
-                }
-                
-                // Normaliser entre 0 et 360°
-                while (angle < 0) angle += 360;
-                while (angle >= 360) angle -= 360;
-                
-                return angle.toFixed(1) + '°';
-              })()}
+              {(isOrientationActive ? (continuousOrientation * 180 / Math.PI).toFixed(1) : (state.pose.theta * 180 / Math.PI).toFixed(1)) + '°'}
             </Text>
           </View>
         </View>
@@ -878,7 +1015,20 @@ export default function MapScreen() {
           
           <View style={styles.metricItem}>
             <Text style={styles.metricLabel}>Zoom</Text>
-            <Text style={styles.metricValue}>x{zoom}</Text>
+            <Text style={styles.metricValue}>x{viewportInfo.zoom.toFixed(2)}</Text>
+          </View>
+        </View>
+
+        {/* *** NOUVEAU: Informations du système de tuiles *** */}
+        <View style={styles.metricsRow}>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Tuiles</Text>
+            <Text style={styles.metricValue}>{viewportInfo.visibleTiles}</Text>
+          </View>
+          
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Carte</Text>
+            <Text style={styles.metricValue}>{mapStats ? mapStats.trajectoryCount : 0} trajets</Text>
           </View>
         </View>
       </View>
@@ -944,7 +1094,7 @@ export default function MapScreen() {
    * *** NOUVEAU: Callback pour le changement de zoom ***
    */
   const handleZoomChange = (newZoom) => {
-    setZoom(newZoom);
+    setCurrentZoom(newZoom);
   };
 
   /**
@@ -1099,8 +1249,6 @@ export default function MapScreen() {
   const handleNativeCompassUpdate = (headingData) => {
     const { trueHeading, accuracy, timestamp } = headingData;
     
-    console.log(`🧭 [NATIVE-COMPASS] Orientation reçue: ${trueHeading.toFixed(1)}° (précision: ${accuracy})`);
-    
     // Normaliser l'angle
     let normalizedHeading = trueHeading;
     while (normalizedHeading >= 360) normalizedHeading -= 360;
@@ -1126,9 +1274,55 @@ export default function MapScreen() {
       theta: headingRadians,
       confidence: currentState.pose.confidence
     });
-    
-    console.log(`🧭 [NATIVE-COMPASS] Orientation mise à jour: ${normalizedHeading.toFixed(1)}° (${headingRadians.toFixed(3)} rad)`);
   };
+
+  // *** NOUVEAU: Initialisation de la carte persistante ***
+  const initializePersistentMap = async () => {
+    try {
+      console.log('🗺️ [MAP-SCREEN] Initialisation de la carte persistante...');
+      
+      await persistentMapService.initialize();
+      
+      // Charger le SVG de la carte persistante
+      const svgContent = await persistentMapService.getSVGContent();
+      setPersistentMapSVG(svgContent);
+      
+      // Charger les statistiques
+      const stats = persistentMapService.getMapStats();
+      setMapStats(stats);
+      
+      console.log('✅ [MAP-SCREEN] Carte persistante initialisée:', stats);
+      
+    } catch (error) {
+      console.error('❌ [MAP-SCREEN] Erreur initialisation carte persistante:', error);
+      // Continuer sans la carte persistante
+    }
+  };
+
+  // *** NOUVEAU: Gestionnaire de changement de viewport ***
+  const handleViewportChange = useCallback((info) => {
+    setViewportInfo({
+      zoom: info.zoom,
+      panX: info.panX,
+      panY: info.panY,
+      visibleTiles: info.visibleTiles || 0
+    });
+    
+    // Sauvegarder les contrôles de la carte
+    if (info.centerOnUser && info.viewFullMap) {
+      setMapControls({
+        centerOnUser: info.centerOnUser,
+        viewFullMap: info.viewFullMap
+      });
+    }
+  }, []);
+
+  // *** NOUVEAU: Voir la carte entière ***
+  const viewFullMap = useCallback(() => {
+    if (mapControls.viewFullMap) {
+      mapControls.viewFullMap();
+    }
+  }, [mapControls.viewFullMap]);
 
   if (!isMapLoaded) {
     return (
@@ -1143,33 +1337,14 @@ export default function MapScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Carte SVG avec gestes avancés */}
-      <ZoomableView 
-        onZoomChange={handleZoomChange}
-        minZoom={MIN_ZOOM}
-        maxZoom={MAX_ZOOM}
-      >
-        <View style={styles.mapContainer}>
-          <Svg width={svgWidth} height={svgHeight} style={styles.svg}>
-            <G>
-              {/* Fond noir */}
-              <Path
-                d={`M ${-svgWidth} ${-svgHeight} L ${svgWidth * 2} ${-svgHeight} L ${svgWidth * 2} ${svgHeight * 2} L ${-svgWidth} ${svgHeight * 2} Z`}
-                fill="#000000"
-              />
-              
-              {/* Grille */}
-              {renderGrid()}
-              
-              {/* Trajectoire */}
-              {renderTrajectory()}
-              
-              {/* Position actuelle */}
-              {renderCurrentPosition()}
-            </G>
-          </Svg>
-        </View>
-      </ZoomableView>
+      {/* *** NOUVEAU: Carte avec système de tuiles pour afficher la carte entière *** */}
+      <TiledMapView
+        persistentMapService={persistentMapService}
+        currentTrajectory={state.trajectory}
+        userPosition={state.pose}
+        userOrientation={continuousOrientation}
+        onViewportChange={handleViewportChange}
+      />
 
       {/* Métriques en temps réel */}
       {renderMetrics()}
@@ -1201,7 +1376,12 @@ export default function MapScreen() {
           <Ionicons name="locate" size={24} color="#00ff88" />
         </TouchableOpacity>
         
-        {/* *** NOUVEAU: Bouton sauvegarder trajet *** */}
+        {/* *** NOUVEAU: Bouton voir carte entière *** */}
+        <TouchableOpacity style={styles.controlButton} onPress={viewFullMap}>
+          <Ionicons name="scan" size={24} color="#00ff88" />
+        </TouchableOpacity>
+        
+        {/* *** NOUVEAU: Bouton sauvegarder trajet dans carte persistante *** */}
         <TouchableOpacity 
           style={[styles.controlButton, (!state.trajectory || state.trajectory.length === 0) && styles.disabledControlButton]} 
           onPress={handleSaveTrajectory}
@@ -1210,7 +1390,44 @@ export default function MapScreen() {
           <Ionicons name="save" size={24} color={(!state.trajectory || state.trajectory.length === 0) ? "#666666" : "#00ff88"} />
         </TouchableOpacity>
 
-        {/* *** SUPPRIMÉ: Boutons de boussole inutiles *** */}
+        {/* *** NOUVEAU: Bouton statistiques de la carte *** */}
+        <TouchableOpacity 
+          style={styles.controlButton} 
+          onPress={showMapStats}
+        >
+          <Ionicons name="stats-chart" size={24} color="#00ff88" />
+        </TouchableOpacity>
+
+        {/* *** NOUVEAU: Bouton réinitialiser carte persistante *** */}
+        <TouchableOpacity 
+          style={styles.controlButton} 
+          onPress={() => {
+            Alert.alert(
+              'Réinitialiser la carte',
+              'Êtes-vous sûr de vouloir effacer tous les trajets de la carte persistante ?',
+              [
+                { text: 'Annuler', style: 'cancel' },
+                { 
+                  text: 'Effacer', 
+                  style: 'destructive',
+                  onPress: async () => {
+                    try {
+                      await persistentMapService.resetMap();
+                      setPersistentMapSVG('');
+                      setMapStats(null);
+                      await initializePersistentMap();
+                      Alert.alert('Succès', 'Carte persistante réinitialisée');
+                    } catch (error) {
+                      Alert.alert('Erreur', 'Impossible de réinitialiser la carte');
+                    }
+                  }
+                }
+              ]
+            );
+          }}
+        >
+          <Ionicons name="trash" size={24} color="#ff4444" />
+        </TouchableOpacity>
       </View>
 
       {/* Modal de calibration */}
@@ -1258,82 +1475,6 @@ export default function MapScreen() {
                 <Text style={styles.successText}>Calibration terminée !</Text>
               </View>
             )}
-          </View>
-        </View>
-      </Modal>
-
-      {/* *** NOUVEAU: Modal de sauvegarde de trajet *** */}
-      <Modal
-        visible={saveTrajectoryModal.visible}
-        transparent={true}
-        animationType="slide"
-      >
-        <View style={styles.saveModalOverlay}>
-          <View style={styles.saveModalContent}>
-            <View style={styles.saveModalHeader}>
-              <Ionicons name="save" size={32} color="#00ff88" />
-              <Text style={styles.saveModalTitle}>Sauvegarder le trajet</Text>
-            </View>
-            
-            <Text style={styles.saveModalSubtitle}>
-              Donnez un nom à votre trajet pour le retrouver facilement
-            </Text>
-            
-            <View style={styles.saveInputContainer}>
-              <Ionicons name="map" size={20} color="#666666" style={styles.saveInputIcon} />
-              <TextInput
-                style={styles.saveTextInput}
-                placeholder="Nom du trajet"
-                placeholderTextColor="#666666"
-                value={saveTrajectoryModal.trajectoryName}
-                onChangeText={(text) => setSaveTrajectoryModal(prev => ({ ...prev, trajectoryName: text }))}
-                autoFocus={true}
-                selectTextOnFocus={true}
-              />
-            </View>
-
-            <View style={styles.trajectoryPreview}>
-              <Text style={styles.previewTitle}>Aperçu du trajet :</Text>
-              <View style={styles.previewStats}>
-                <View style={styles.previewStat}>
-                  <Ionicons name="footsteps" size={16} color="#00ff88" />
-                  <Text style={styles.previewStatText}>{state.stepCount || 0} pas</Text>
-                </View>
-                <View style={styles.previewStat}>
-                  <Ionicons name="resize" size={16} color="#00ff88" />
-                  <Text style={styles.previewStatText}>{(state.distance || 0).toFixed(1)} m</Text>
-                </View>
-                <View style={styles.previewStat}>
-                  <Ionicons name="location" size={16} color="#00ff88" />
-                  <Text style={styles.previewStatText}>{state.trajectory?.length || 0} points</Text>
-                </View>
-              </View>
-            </View>
-            
-            <View style={styles.saveModalActions}>
-              <TouchableOpacity
-                style={styles.saveModalCancelButton}
-                onPress={() => setSaveTrajectoryModal({ visible: false, trajectoryName: '', isLoading: false })}
-                disabled={saveTrajectoryModal.isLoading}
-              >
-                <Text style={styles.saveModalCancelText}>Annuler</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity
-                style={[styles.saveModalSaveButton, saveTrajectoryModal.isLoading && styles.disabledButton]}
-                onPress={confirmSaveTrajectory}
-                disabled={saveTrajectoryModal.isLoading}
-              >
-                {saveTrajectoryModal.isLoading ? (
-                  <ActivityIndicator color="#000000" size="small" />
-                ) : (
-                  <>
-                    <Ionicons name="checkmark" size={20} color="#000000" />
-                    <Text style={styles.saveModalSaveText}>Sauvegarder</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
           </View>
         </View>
       </Modal>
@@ -1526,114 +1667,5 @@ const styles = StyleSheet.create({
     borderColor: '#666666',
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  saveModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  saveModalContent: {
-    backgroundColor: '#1a1a1a',
-    borderRadius: 15,
-    padding: 25,
-    margin: 20,
-    minWidth: 300,
-    borderWidth: 2,
-    borderColor: '#00ff88',
-    alignItems: 'center',
-  },
-  saveModalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  saveModalTitle: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginLeft: 10,
-  },
-  saveModalSubtitle: {
-    color: '#cccccc',
-    fontSize: 14,
-    textAlign: 'center',
-    marginBottom: 15,
-    fontFamily: 'monospace',
-  },
-  saveInputContainer: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  saveInputIcon: {
-    marginRight: 10,
-  },
-  saveTextInput: {
-    flex: 1,
-    color: '#ffffff',
-    fontSize: 14,
-    fontFamily: 'monospace',
-  },
-  trajectoryPreview: {
-    width: '100%',
-    marginBottom: 20,
-  },
-  previewTitle: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 10,
-  },
-  previewStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  previewStat: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  previewStatText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontFamily: 'monospace',
-  },
-  saveModalActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  saveModalCancelButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    borderWidth: 2,
-    borderColor: '#ffffff',
-    borderRadius: 12,
-    padding: 10,
-  },
-  saveModalCancelText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  saveModalSaveButton: {
-    backgroundColor: '#00ff88',
-    borderWidth: 2,
-    borderColor: '#00ff88',
-    borderRadius: 12,
-    padding: 10,
-  },
-  disabledButton: {
-    backgroundColor: 'rgba(0, 255, 136, 0.2)',
-    borderWidth: 2,
-    borderColor: '#666666',
-    borderRadius: 12,
-    padding: 10,
-  },
-  saveModalSaveText: {
-    color: '#000000',
-    fontSize: 14,
-    fontWeight: 'bold',
   },
 }); 
