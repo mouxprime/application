@@ -15,7 +15,8 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Nous utilisons la boussole pour afficher l'orientation."
+        "NSMotionUsageDescription": "La détection de pas est utilisée pour la navigation intérieure.",
+        "NSLocationWhenInUseUsageDescription": "La boussole est utilisée pour afficher l'orientation."
       }
     },
     "android": {
