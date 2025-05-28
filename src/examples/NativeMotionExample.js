@@ -1,15 +1,18 @@
-// Exemple d'utilisation simple du NativeEnhancedMotionService dans un composant React Native
-import React, { useState, useEffect, useRef } from 'react';
+// NativeMotionExample.js
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import NativeEnhancedMotionService from '../services/NativeEnhancedMotionService';
 
 export default function NativeMotionExample() {
+  const [motionService, setMotionService] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const [stepData, setStepData] = useState({
     stepCount: 0,
     stepLength: 0,
     totalDistance: 0,
-    source: 'none'
+    source: 'none',
+    cadence: 0,
+    averageStepLength: 0
   });
   const [headingData, setHeadingData] = useState({
     heading: 0,
@@ -17,50 +20,53 @@ export default function NativeMotionExample() {
   });
   const [stats, setStats] = useState(null);
 
-  const motionServiceRef = useRef(null);
-
   useEffect(() => {
     // Initialisation du service
-    motionServiceRef.current = new NativeEnhancedMotionService(
-      // Callback pour les pas détectés
-      (data) => {
-        console.log('📱 [EXAMPLE] Pas détecté:', data);
-        
-        setStepData({
-          stepCount: data.stepCount,
-          stepLength: data.stepLength,
-          totalDistance: data.totalDistance || 0,
-          source: data.source,
-          confidence: data.confidence,
-          nativeStepLength: data.nativeStepLength
-        });
-      },
-      // Callback pour l'orientation
-      (data) => {
-        setHeadingData({
-          heading: data.filteredHeading || (data.yaw * 180 / Math.PI),
-          accuracy: data.accuracy
-        });
-      }
+    const service = new NativeEnhancedMotionService(
+      handleStepDetected,
+      handleHeading
     );
+    setMotionService(service);
 
     return () => {
-      if (motionServiceRef.current) {
-        motionServiceRef.current.stop();
+      if (service) {
+        service.stop();
       }
     };
   }, []);
 
+  const handleStepDetected = (data) => {
+    console.log('📱 [EXAMPLE] Pas détecté:', data);
+    
+    setStepData({
+      stepCount: data.stepCount,
+      stepLength: data.stepLength,
+      totalDistance: data.totalDistance || 0,
+      source: data.source,
+      confidence: data.confidence,
+      cadence: data.cadence || 0,
+      averageStepLength: data.averageStepLength || data.stepLength,
+      timeDelta: data.timeDelta || 0
+    });
+  };
+
+  const handleHeading = (data) => {
+    setHeadingData({
+      heading: data.filteredHeading || (data.yaw * 180 / Math.PI),
+      accuracy: data.accuracy
+    });
+  };
+
   const startTracking = async () => {
-    if (!motionServiceRef.current) return;
+    if (!motionService) return;
 
     try {
-      await motionServiceRef.current.start();
+      await motionService.start();
       setIsRunning(true);
       
       // Mise à jour des stats toutes les secondes
       const statsInterval = setInterval(() => {
-        setStats(motionServiceRef.current.getStats());
+        setStats(motionService.getStats());
       }, 1000);
 
       // Nettoyer l'intervalle quand on arrête
@@ -72,27 +78,29 @@ export default function NativeMotionExample() {
   };
 
   const stopTracking = async () => {
-    if (!motionServiceRef.current) return;
+    if (!motionService) return;
 
     try {
-      await motionServiceRef.current.stop();
+      await motionService.stop();
       setIsRunning(false);
-      setStats(motionServiceRef.current.getStats());
+      setStats(motionService.getStats());
     } catch (error) {
       Alert.alert('Erreur', `Impossible d'arrêter le suivi: ${error.message}`);
     }
   };
 
   const resetTracking = async () => {
-    if (!motionServiceRef.current) return;
+    if (!motionService) return;
 
     try {
-      await motionServiceRef.current.reset();
+      await motionService.reset();
       setStepData({
         stepCount: 0,
         stepLength: 0,
         totalDistance: 0,
-        source: 'none'
+        source: 'none',
+        cadence: 0,
+        averageStepLength: 0
       });
     } catch (error) {
       Alert.alert('Erreur', `Impossible de réinitialiser: ${error.message}`);
@@ -101,7 +109,7 @@ export default function NativeMotionExample() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Native Enhanced Motion Service</Text>
+      <Text style={styles.title}>Service de Mouvement Adaptatif</Text>
       
       {/* Contrôles */}
       <View style={styles.controls}>
@@ -124,25 +132,31 @@ export default function NativeMotionExample() {
 
       {/* Données de pas */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Données de Pas</Text>
+        <Text style={styles.sectionTitle}>Données de Pas Adaptatives</Text>
         <Text style={styles.data}>Nombre de pas: {stepData.stepCount}</Text>
         <Text style={styles.data}>
-          Longueur de pas: {stepData.stepLength.toFixed(3)}m
+          Longueur instantanée: {stepData.stepLength.toFixed(3)}m
+        </Text>
+        <Text style={styles.data}>
+          Longueur moyenne: {stepData.averageStepLength.toFixed(3)}m
         </Text>
         <Text style={styles.data}>
           Distance totale: {stepData.totalDistance.toFixed(3)}m
         </Text>
-        <Text style={[styles.data, stepData.source === 'native_cmpedometer' ? styles.nativeSource : styles.fallbackSource]}>
+        <Text style={styles.data}>
+          Cadence: {stepData.cadence.toFixed(2)} pas/s
+        </Text>
+        <Text style={[styles.data, styles.adaptiveSource]}>
           Source: {stepData.source}
         </Text>
-        {stepData.nativeStepLength && (
-          <Text style={styles.nativeIndicator}>
-            ✅ Longueur de pas NATIVE: {stepData.nativeStepLength.toFixed(3)}m
-          </Text>
-        )}
         <Text style={styles.data}>
           Confiance: {(stepData.confidence * 100).toFixed(1)}%
         </Text>
+        {stepData.timeDelta > 0 && (
+          <Text style={styles.data}>
+            Intervalle: {stepData.timeDelta.toFixed(2)}s
+          </Text>
+        )}
       </View>
 
       {/* Données d'orientation */}
@@ -164,14 +178,26 @@ export default function NativeMotionExample() {
             Durée session: {stats.sessionDuration.toFixed(1)}s
           </Text>
           <Text style={styles.data}>
-            Module natif disponible: {stats.metrics.nativeAvailable ? 'Oui' : 'Non'}
+            Podomètre disponible: {stats.metrics.nativeAvailable ? 'Oui' : 'Non'}
           </Text>
-          <Text style={[styles.data, stats.metrics.usingNativeStepLength ? styles.nativeSource : styles.fallbackSource]}>
-            Mode: {stats.metrics.usingNativeStepLength ? 'NATIF CMPedometer' : 'FALLBACK Expo'}
+          <Text style={[styles.data, styles.adaptiveSource]}>
+            Mode: ADAPTATIF Expo Pedometer
           </Text>
           <Text style={styles.data}>
-            Longueur moyenne: {stats.metrics.averageStepLength.toFixed(3)}m
+            Longueur adaptative: {stats.metrics.adaptiveStepLength.toFixed(3)}m
           </Text>
+          
+          {/* Historique des derniers pas */}
+          {stats.stepHistory && stats.stepHistory.length > 0 && (
+            <View style={styles.historySection}>
+              <Text style={styles.historyTitle}>Derniers pas:</Text>
+              {stats.stepHistory.map((step, index) => (
+                <Text key={index} style={styles.historyItem}>
+                  #{index + 1}: {step.stepLength.toFixed(3)}m @ {step.cadence.toFixed(2)}Hz
+                </Text>
+              ))}
+            </View>
+          )}
         </View>
       )}
     </View>
@@ -238,21 +264,25 @@ const styles = StyleSheet.create({
     marginBottom: 5,
     color: '#666',
   },
-  nativeSource: {
-    color: '#4CAF50',
+  adaptiveSource: {
+    color: '#9C27B0',
     fontWeight: 'bold',
   },
-  fallbackSource: {
-    color: '#FF9800',
-    fontWeight: 'bold',
+  historySection: {
+    marginTop: 10,
+    padding: 10,
+    backgroundColor: '#f8f8f8',
+    borderRadius: 5,
   },
-  nativeIndicator: {
+  historyTitle: {
     fontSize: 14,
-    color: '#4CAF50',
     fontWeight: 'bold',
-    backgroundColor: '#E8F5E8',
-    padding: 5,
-    borderRadius: 4,
-    marginVertical: 5,
+    marginBottom: 5,
+    color: '#555',
+  },
+  historyItem: {
+    fontSize: 12,
+    color: '#777',
+    marginBottom: 2,
   },
 }); 

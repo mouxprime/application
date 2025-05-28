@@ -4,6 +4,7 @@ import { AdvancedSensorManager } from '../sensors/AdvancedSensorManager.js';
 import { AttitudeTracker } from './AttitudeTracker.js';
 import { ContinuousOrientationService } from '../services/ContinuousOrientationService.js';
 import { create, all } from 'mathjs';
+import { Platform } from 'react-native';
 
 const math = create(all);
 
@@ -51,7 +52,7 @@ export class LocalizationSDK {
       // *** NOUVEAU: Configuration orientation continue unifiée ***
       continuousOrientation: {
         enabled: config.continuousOrientation?.enabled !== false, // Activé par défaut
-        mode: config.continuousOrientation?.mode || 'continuous_fusion', // Mode par défaut
+        mode: config.continuousOrientation?.mode || (Platform.OS === 'ios' ? 'native_compass' : 'pdr_gyro'), // Mode par défaut selon la plateforme
         fallbackToSteps: config.continuousOrientation?.fallbackToSteps !== false, // Fallback activé
         
         // Configuration fusion continue
@@ -234,6 +235,11 @@ export class LocalizationSDK {
       // Configuration des callbacks internes
       this.setupInternalCallbacks();
 
+      // *** NOUVEAU: Démarrage automatique de l'orientation selon le mode par défaut ***
+      const defaultMode = this.config.continuousOrientation.mode;
+      console.log(`Démarrage orientation par défaut: ${defaultMode}`);
+      this.setOrientationMode(defaultMode);
+
       this.isInitialized = true;
       console.log('SDK de localisation initialisé avec succès');
       return true;
@@ -262,6 +268,37 @@ export class LocalizationSDK {
     }
 
     try {
+      // *** NOUVEAU: Initialisation de l'orientation avec la boussole native ***
+      console.log('🧭 Lecture de l\'orientation initiale via boussole native...');
+      
+      let initialHeading = 0; // Valeur par défaut
+      let headingSource = 'default';
+      
+      try {
+        // Démarrer temporairement la boussole native pour lire l'orientation initiale
+        const compassStarted = await this.continuousOrientationService.startNativeCompass();
+        
+        if (compassStarted) {
+          // Attendre un court délai pour obtenir une lecture stable
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Lire l'orientation actuelle
+          const currentOrientation = this.continuousOrientationService.getCurrentOrientation();
+          
+          if (currentOrientation.isActive && currentOrientation.heading !== undefined) {
+            initialHeading = currentOrientation.heading;
+            headingSource = 'native_compass';
+            console.log(`🧭 Orientation initiale obtenue: ${(initialHeading * 180 / Math.PI).toFixed(1)}° (boussole native)`);
+          } else {
+            console.warn('🧭 Boussole native active mais pas de données - utilisation 0°');
+          }
+        } else {
+          console.warn('🧭 Impossible de démarrer la boussole native - utilisation 0°');
+        }
+      } catch (error) {
+        console.warn('🧭 Erreur lecture boussole native:', error.message);
+      }
+
       // Vérifier si une calibration valide existe
       const needsCalibration = !this.isPocketCalibrationValid(pocketCalibrationMatrix) || 
                               this.requiresCalibration();
@@ -288,20 +325,37 @@ export class LocalizationSDK {
         console.log('Calibration automatique terminée avec succès');
       } else {
         console.log('Utilisation calibration existante valide');
-        // Plus besoin d'appliquer une matrice de rotation - la boussole native gère cela
-        // this.pdr.orientationCalibrator.rotationMatrix = pocketCalibrationMatrix;
-        // this.pdr.orientationCalibrator.isCalibrated = true;
+      }
+
+      // *** NOUVEAU: Initialiser le PDR avec l'orientation absolue ***
+      console.log(`🎯 Initialisation PDR avec orientation absolue: ${(initialHeading * 180 / Math.PI).toFixed(1)}°`);
+      
+      // Réinitialiser la position PDR avec l'orientation réelle
+      this.pdr.resetPosition(0, 0, 0, initialHeading);
+      
+      // Réinitialiser l'EKF avec l'orientation réelle
+      this.ekf.reset({ x: 0, y: 0, z: 0, theta: initialHeading });
+      
+      // Mettre à jour l'état global
+      this.currentState.position = { x: 0, y: 0, z: 0 };
+      this.currentState.orientation = { yaw: initialHeading };
+      
+      // Notifier l'UI de l'orientation initiale
+      if (this.callbacks.onCalibrationProgress) {
+        this.callbacks.onCalibrationProgress({
+          step: 'initial_heading_set',
+          progress: 1.0,
+          message: `Orientation initiale: ${(initialHeading * 180 / Math.PI).toFixed(1)}° (${headingSource})`,
+          initialHeading: initialHeading * 180 / Math.PI,
+          headingSource: headingSource
+        });
       }
 
       // Démarrage des capteurs
       await this.sensorManager.startAll();
 
-      // *** CORRECTION: Timer redondant - callbacks immédiats depuis PDR ***
-      // Configuration du timer de mise à jour utilisateur
-      // this.startUserUpdateTimer();
-
       this.isTracking = true;
-      console.log('Tracking démarré');
+      console.log(`✅ Tracking démarré avec orientation initiale: ${(initialHeading * 180 / Math.PI).toFixed(1)}°`);
 
       return true;
     } catch (error) {
@@ -590,7 +644,7 @@ export class LocalizationSDK {
         });
         
         // *** BONUS PDR: Réduction de 5% de l'incertitude après chaque correction PDR ***
-        console.log(`[PDR] Correction appliquée - Mode: ${pdrState.mode}, Noise pos: ${positionNoise.toFixed(3)}, yaw: ${yawNoise.toFixed(3)}`);
+        //console.log(`[PDR] Correction appliquée - Mode: ${pdrState.mode}, Noise pos: ${positionNoise.toFixed(3)}, yaw: ${yawNoise.toFixed(3)}`);
         
         this.lastPDRUpdate = now;
       }
@@ -763,18 +817,29 @@ export class LocalizationSDK {
   }
 
   /**
-   * Réinitialisation de la position
+   * Réinitialisation de la position avec orientation absolue
    */
   resetPosition(x = 0, y = 0, z = 0, theta = 0) {
+    // Réinitialiser le PDR avec l'orientation absolue
     this.pdr.resetPosition(x, y, z, theta);
+    
+    // Réinitialiser l'EKF avec l'orientation absolue
     this.ekf.reset({ x, y, z, theta });
     
+    // Mettre à jour l'état global
     this.currentState.position = { x, y, z };
     this.currentState.orientation = { yaw: theta };
     this.currentState.stepCount = 0;
     this.currentState.distance = 0;
     
-    console.log(`Position réinitialisée: (${x}, ${y}, ${z})`);
+    // Log informatif avec conversion en degrés
+    const thetaDegrees = (theta * 180 / Math.PI).toFixed(1);
+    console.log(`🎯 Position réinitialisée: (${x}, ${y}, ${z}) - Orientation: ${thetaDegrees}°`);
+    
+    // Si on a une orientation non-nulle, c'est probablement une initialisation avec boussole native
+    if (Math.abs(theta) > 0.01) { // Seuil de 0.6° pour éviter les erreurs de précision
+      console.log(`🧭 Orientation absolue appliquée: ${thetaDegrees}° (référentiel monde réel)`);
+    }
   }
 
   /**

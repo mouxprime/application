@@ -92,46 +92,43 @@ export class ContinuousOrientationService {
     const nativeHeading = headingData.trueHeading; // Cap compensé par inclinaison
     const accuracy = headingData.accuracy;         // Précision en degrés
 
-    // Conversion degrés → radians
-    const headingRad = (nativeHeading * Math.PI) / 180;
+    // *** FIX: Utiliser directement l'orientation native sans correction ***
+    // La boussole native iOS est déjà optimisée et se corrige automatiquement
+    // Pas besoin de conversion - utiliser la valeur native directement
+    const headingDegrees = nativeHeading;
+    
+    // Conversion en radians pour les calculs internes
+    const headingRadians = (headingDegrees * Math.PI) / 180;
 
-    // Calcul de la confiance (0-1) basée sur accuracy
-    const confidence = Math.max(0, Math.min(1, 1 - (accuracy / this.config.accuracyDriftThreshold)));
+    // Log simplifié
+    console.log(`🧭 [ORIENTATION] Native: ${headingDegrees.toFixed(1)}° → Radians: ${headingRadians.toFixed(3)}`);
 
-    // Mise à jour état
-    this.orientationState.currentHeading = headingRad;
+    // Mise à jour de l'état
+    this.orientationState.currentHeading = headingRadians;
     this.orientationState.accuracy = accuracy;
-    this.orientationState.confidence = confidence;
     this.orientationState.lastUpdate = currentTime;
 
-    // Application du lissage exponentiel
-    this.applySmoothing(headingRad);
+    // Callback vers les abonnés
+    if (this.onOrientationUpdate) {
+      this.onOrientationUpdate({
+        heading: headingRadians,
+        headingDegrees: headingDegrees,
+        accuracy: accuracy,
+        confidence: this.calculateConfidence(accuracy),
+        source: 'native_compass',
+        timestamp: currentTime
+      });
+    }
 
     // Détection de dérive
     this.detectDrift(accuracy);
-
-    // Notification
-    this.notifyOrientationUpdate();
   }
 
   /**
-   * Application du lissage exponentiel
+   * Calcul de la confiance basée sur accuracy
    */
-  applySmoothing(newHeading) {
-    const alpha = this.config.smoothingAlpha;
-    const currentSmoothed = this.orientationState.smoothedHeading;
-    
-    // Gérer le passage par ±π pour le lissage
-    let angleDiff = newHeading - currentSmoothed;
-    if (Math.abs(angleDiff) > Math.PI) {
-      if (angleDiff > 0) {
-        angleDiff -= 2 * Math.PI;
-      } else {
-        angleDiff += 2 * Math.PI;
-      }
-    }
-    
-    this.orientationState.smoothedHeading = this.normalizeAngle(currentSmoothed + alpha * angleDiff);
+  calculateConfidence(accuracy) {
+    return Math.max(0, Math.min(1, 1 - (accuracy / this.config.accuracyDriftThreshold)));
   }
 
   /**
@@ -185,10 +182,10 @@ export class ContinuousOrientationService {
   notifyOrientationUpdate() {
     if (this.onOrientationUpdate) {
       this.onOrientationUpdate({
-        heading: this.orientationState.smoothedHeading,
+        heading: this.orientationState.currentHeading,
         rawHeading: this.orientationState.currentHeading,
         accuracy: this.orientationState.accuracy,
-        confidence: this.orientationState.confidence,
+        confidence: this.calculateConfidence(this.orientationState.accuracy),
         source: 'native_compass',
         lastUpdate: this.orientationState.lastUpdate
       });
@@ -222,10 +219,10 @@ export class ContinuousOrientationService {
    */
   getCurrentOrientation() {
     return {
-      heading: this.orientationState.smoothedHeading,
+      heading: this.orientationState.currentHeading,
       rawHeading: this.orientationState.currentHeading,
       accuracy: this.orientationState.accuracy,
-      confidence: this.orientationState.confidence,
+      confidence: this.calculateConfidence(this.orientationState.accuracy),
       isActive: this.orientationState.isActive,
       source: 'native_compass',
       lastUpdate: this.orientationState.lastUpdate

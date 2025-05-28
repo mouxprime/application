@@ -532,7 +532,7 @@ export class AdvancedExtendedKalmanFilter {
       const positionUncertaintyAfter = this.P.get([0, 0]) + this.P.get([1, 1]);
       const yawUncertaintyAfter = this.P.get([6, 6]);
       
-      console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
+      //console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
     }
     
     // Amélioration du gain confiance
@@ -561,7 +561,7 @@ export class AdvancedExtendedKalmanFilter {
     const positionUncertaintyAfter = this.P.get([0, 0]) + this.P.get([1, 1]);
     const yawUncertaintyAfter = this.P.get([6, 6]);
     
-    console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
+    //console.log(`[ZUPT] Incertitudes après: pos=${positionUncertaintyAfter.toFixed(3)}, yaw=${yawUncertaintyAfter.toFixed(3)}`);
   }
 
   /**
@@ -869,8 +869,8 @@ export class AdvancedExtendedKalmanFilter {
     
     // *** DEBUG: Traçage des incertitudes périodique avec nouvelles métriques ***
     if (!this._lastConfidenceDebug || Date.now() - this._lastConfidenceDebug > 3000) {
-      console.log(`[EKF] Incertitudes: pos=${positionUncertainty.toFixed(3)}→${cappedPositionUncertainty.toFixed(3)}, yaw=${yawUncertainty.toFixed(3)}→${cappedYawUncertainty.toFixed(3)}`);
-      console.log(`[EKF] Total uncertainty=${totalUncertainty.toFixed(3)}, Confiance=${(confidence * 100).toFixed(1)}%, Mode=${this.currentMode}`);
+      //console.log(`[EKF] Incertitudes: pos=${positionUncertainty.toFixed(3)}→${cappedPositionUncertainty.toFixed(3)}, yaw=${yawUncertainty.toFixed(3)}→${cappedYawUncertainty.toFixed(3)}`);
+      //console.log(`[EKF] Total uncertainty=${totalUncertainty.toFixed(3)}, Confiance=${(confidence * 100).toFixed(1)}%, Mode=${this.currentMode}`);
       this._lastConfidenceDebug = Date.now();
     }
     

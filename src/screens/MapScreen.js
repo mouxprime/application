@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -21,6 +21,7 @@ import { useAuth } from '../context/AuthContext';
 import { LocalizationSDK } from '../algorithms/LocalizationSDK';
 import { ScaleConverter } from '../utils/ScaleConverter';
 import ZoomableView from '../components/ZoomableView';
+import NativeEnhancedMotionService from '../services/NativeEnhancedMotionService';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
@@ -35,17 +36,107 @@ const MAX_ZOOM = 20;
 export default function MapScreen() {
   const { state, actions } = useLocalization();
   const { state: authState, actions: authActions } = useAuth();
-  const [localizationSDK] = useState(() => new LocalizationSDK({
-    userHeight: 1.7,
-    adaptiveSampling: true,
-    energyOptimization: true,
-    positionUpdateRate: 1.0,
-    continuousOrientation: {
-      enabled: true,
-      mode: 'native_compass', // Mode natif par défaut
-      fallbackToSteps: true
-    }
-  }));
+  
+  // *** FIX: Utiliser des refs pour éviter les problèmes de closure ***
+  const stateRef = useRef(state);
+  const actionsRef = useRef(actions);
+  
+  // Mettre à jour les refs quand state/actions changent
+  useEffect(() => {
+    stateRef.current = state;
+    actionsRef.current = actions;
+  }, [state, actions]);
+  
+  // *** NOUVEAU: États pour l'orientation continue unifiée ***
+  const [continuousOrientation, setContinuousOrientation] = useState(0);
+  const [orientationConfidence, setOrientationConfidence] = useState(0);
+  const [orientationSource, setOrientationSource] = useState('pdr_gyro');
+  const [isOrientationActive, setIsOrientationActive] = useState(true); // Activé par défaut
+  const continuousOrientationRef = useRef(0);
+  
+  // *** FIX: CALLBACKS DÉFINIS AVANT L'INITIALISATION DU SERVICE ***
+  const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, source, confidence, nativeStepLength }) => {
+    console.log(`🚶 [STEP-CALLBACK] Pas détecté: ${stepCount} (source: ${source})`);
+    console.log(`📏 [STEP-CALLBACK] Longueur de pas: ${stepLength.toFixed(3)}m ${nativeStepLength ? '(NATIVE)' : '(FALLBACK)'}`);
+    console.log(`📍 [STEP-CALLBACK] Déplacement: dx=${dx.toFixed(3)}, dy=${dy.toFixed(3)}`);
+    
+    // *** FIX: Utiliser les refs pour accéder aux valeurs actuelles ***
+    const currentState = stateRef.current;
+    const currentActions = actionsRef.current;
+    
+    console.log(`📊 [STEP-CALLBACK] État actuel: position=(${currentState.pose.x.toFixed(2)}, ${currentState.pose.y.toFixed(2)}), pas=${currentState.stepCount || 0}`);
+    
+    // *** CONFIANCE ÉLEVÉE POUR LES DONNÉES NATIVES ***
+    const adjustedConfidence = nativeStepLength ? 1.0 : confidence;
+    
+    // Mettre à jour la position
+    const newX = currentState.pose.x + dx;
+    const newY = currentState.pose.y + dy;
+    
+    // *** FIX: Utiliser l'orientation actuelle correcte ***
+    const currentTheta = isOrientationActive ? continuousOrientation : currentState.pose.theta;
+    
+    console.log(`📍 [STEP-CALLBACK] Nouvelle position: (${newX.toFixed(2)}, ${newY.toFixed(2)}), orientation: ${(currentTheta * 180 / Math.PI).toFixed(1)}°`);
+    
+    currentActions.updatePose({
+      x: newX,
+      y: newY,
+      theta: currentTheta,
+      confidence: adjustedConfidence
+    });
+    
+    // Ajouter le point à la trajectoire
+    currentActions.addTrajectoryPoint({
+      x: newX,
+      y: newY,
+      timestamp,
+      confidence: adjustedConfidence
+    });
+    
+    // *** FIX: Calculer la distance totale correctement ***
+    const totalDistance = (currentState.distance || 0) + stepLength;
+    
+    // *** FIX: Mettre à jour les métriques PDR avec le bon stepCount ***
+    currentActions.updatePDRMetrics({
+      stepCount,
+      distance: totalDistance,
+      currentMode: nativeStepLength ? 'NATIF' : 'FALLBACK',
+      energyLevel: 1.0,
+      isZUPT: false
+    });
+    
+    console.log(`📊 [STEP-CALLBACK] Métriques mises à jour: ${stepCount} pas, distance: ${totalDistance.toFixed(2)}m, confiance: ${(adjustedConfidence * 100).toFixed(0)}%`);
+    console.log(`🎯 [STEP-CALLBACK] Trajectoire: ${(currentState.trajectory?.length || 0) + 1} points`);
+  }, [isOrientationActive, continuousOrientation]);
+
+  const handleHeading = useCallback(({ yaw, accuracy, timestamp, source, filteredHeading, rawHeading }) => {
+    console.log(`🧭 [HEADING-CALLBACK] Orientation reçue: ${(yaw * 180 / Math.PI).toFixed(1)}° (précision: ${accuracy})`);
+    
+    // *** FIX: Utiliser les refs pour accéder aux valeurs actuelles ***
+    const currentState = stateRef.current;
+    const currentActions = actionsRef.current;
+    
+    // *** FIX: Mettre à jour les états locaux d'orientation AVANT de les utiliser ***
+    setContinuousOrientation(yaw); // yaw est déjà en radians
+    continuousOrientationRef.current = yaw; // Mettre à jour la ref aussi
+    setOrientationConfidence(accuracy ? Math.max(0, Math.min(1, (100 - accuracy) / 100)) : 0.8);
+    setOrientationSource('native_compass');
+    setIsOrientationActive(true); // S'assurer que l'orientation est active
+    
+    currentActions.updatePose({
+      x: currentState.pose.x,
+      y: currentState.pose.y,
+      theta: yaw, // Garder en radians pour les calculs
+      confidence: currentState.pose.confidence
+    });
+    
+    console.log(`🧭 [HEADING-CALLBACK] Orientation mise à jour: ${(yaw * 180 / Math.PI).toFixed(1)}° (précision: ${accuracy})`);
+  }, []);
+  
+  const [hybridMotionService] = useState(() => new NativeEnhancedMotionService(
+    handleStepDetected,
+    handleHeading
+  ));
   
   // Convertisseur d'échelle avec l'échelle de référence
   const [scaleConverter] = useState(() => new ScaleConverter({
@@ -63,13 +154,6 @@ export default function MapScreen() {
   
   // *** NOUVEAU: État pour masquer/afficher le panneau de métriques ***
   const [isMetricsPanelVisible, setIsMetricsPanelVisible] = useState(true);
-  
-  // *** NOUVEAU: États pour l'orientation continue unifiée ***
-  const [continuousOrientation, setContinuousOrientation] = useState(0);
-  const [orientationConfidence, setOrientationConfidence] = useState(0);
-  const [orientationSource, setOrientationSource] = useState('pdr_gyro');
-  const [isOrientationActive, setIsOrientationActive] = useState(true); // Activé par défaut
-  const continuousOrientationRef = useRef(0);
   
   // État de la calibration
   const [calibrationModal, setCalibrationModal] = useState({
@@ -94,18 +178,13 @@ export default function MapScreen() {
     initializeSystem();
     initializeBattery();
     
-    // *** CORRECTION: Utiliser les bonnes fonctions d'orientation continue ***
-    // startPermanentOrientation(); // SUPPRIMÉ - fonction inexistante
-    
-    // *** CORRECTION: Suppression de la mise à jour périodique qui cause la boucle infinie ***
-    // Les métriques sont maintenant mises à jour via les callbacks du SDK
+    // *** FIX: Démarrer l'orientation automatiquement ***
+    setIsOrientationActive(true);
     
     return () => {
-      if (localizationSDK) {
-        localizationSDK.stopTracking();
+      if (hybridMotionService) {
+        hybridMotionService.stop();
       }
-      // *** CORRECTION: Utiliser la bonne fonction d'arrêt ***
-      // stopPermanentOrientation(); // SUPPRIMÉ - fonction inexistante
       if (isOrientationActive) {
         stopContinuousOrientation();
       }
@@ -130,116 +209,21 @@ export default function MapScreen() {
 
   // Configuration des callbacks du SDK
   useEffect(() => {
-    localizationSDK.setCallbacks({
-      onPositionUpdate: (x, y, theta, mode) => {
-        // *** NOUVEAU: Stabiliser l'orientation avant mise à jour ***
-        stabilizeOrientation(theta);
+    const configureMotionService = async () => {
+      try {
+        console.log('⚙️ Configuration NativeEnhancedMotionService...');
         
-        const pose = { x, y, theta, confidence: localizationSDK.currentState?.confidence || 0 };
-        actions.updatePose(pose);
+        // ✅ SIMPLIFIÉ: Plus de configuration nécessaire !
+        // Le module natif calcule automatiquement la longueur de pas
         
-        // *** SUPPRIMÉ: Ajout automatique de points de trajectoire ***
-        // Les points seront ajoutés seulement lors de la détection de pas
-        
-        // Mise à jour des métriques PDR avec détection verticale
-        const currentState = localizationSDK.currentState;
-        if (currentState) {
-          const verticalMetrics = localizationSDK.pdr?.getVerticalDetectionMetrics();
-          
-          actions.updatePDRMetrics({
-            currentMode: mode || 'stationary',
-            stepCount: currentState.stepCount || 0,
-            distance: currentState.distance || 0,
-            sampleRate: currentState.sampleRate || 25,
-            energyLevel: currentState.energyLevel || 1.0,
-            isZUPT: currentState.isZUPT || false,
-            verticalDetection: currentState.verticalDetection || null,
-            verticalMetrics: verticalMetrics
-          });
-        }
-      },
-      onModeChanged: (mode, features) => {
-        console.log(`Mode changé: ${mode}`, features);
-        actions.updatePDRMetrics({ currentMode: mode });
-      },
-      onEnergyStatusChanged: (energyStatus) => {
-        console.log('État énergétique:', energyStatus);
-        actions.updatePDRMetrics({ energyLevel: energyStatus.energyLevel || 1.0 });
-      },
-      // *** NOUVEAU: Callback spécifique pour les pas détectés ***
-      onStepDetected: (stepCount, stepLength, x, y, theta) => {
-        console.log(`[STEP DÉTECTÉ] #${stepCount} - Ajout point trajectoire: (${x.toFixed(2)}, ${y.toFixed(2)})`);
-        
-        // Ajouter un point de trajectoire seulement lors d'un pas
-        const now = Date.now();
-        actions.addTrajectoryPoint({
-          x, y, timestamp: now,
-          confidence: localizationSDK.currentState?.confidence || 0,
-          stepNumber: stepCount
-        });
-      },
-      // *** SIMPLIFIÉ: Callback calibration pour capteurs uniquement ***
-      onCalibrationProgress: (progress) => {
-        console.log('Progression calibration:', progress);
-        
-        // Afficher le modal de calibration
-        setCalibrationModal({
-          visible: progress.isCalibrating || !progress.isComplete,
-          progress: progress.progress || 0,
-          message: progress.message || 'Calibration en cours...',
-          step: progress.step || 'unknown'
-        });
-        
-        // Cacher le modal quand calibration terminée
-        if (progress.isComplete) {
-          setTimeout(() => {
-            setCalibrationModal(prev => ({ ...prev, visible: false }));
-          }, 1500); // Afficher "Terminé" pendant 1.5s
-        }
-      },
-      // *** NOUVEAU: Callback pour dérive de boussole ***
-      onCompassDriftDetected: (driftData) => {
-        console.log('Dérive boussole détectée:', driftData);
-        
-        // Afficher notification de recalibration manuelle
-        Alert.alert(
-          'Recalibration de la boussole',
-          driftData.message + '\n\nEffectuez un mouvement en huit avec votre téléphone pour améliorer la précision.',
-          [
-            { text: 'Plus tard', style: 'cancel' },
-            { 
-              text: 'Compris', 
-              onPress: () => {
-                // Réinitialiser l'historique de dérive
-                localizationSDK.resetCompassDrift();
-              }
-            }
-          ]
-        );
-      },
-      onDataUpdate: (sensorData) => {
-        // Mise à jour du contexte avec les données capteurs en temps réel
-        // Gestion des données enrichies d'AdvancedSensorManager
-        const accelerometer = sensorData.accelerometer || { x: 0, y: 0, z: 0 };
-        const gyroscope = sensorData.gyroscope || { x: 0, y: 0, z: 0 };
-        const magnetometer = sensorData.magnetometer || { x: 0, y: 0, z: 0 };
-        
-        // Ajout de la magnitude pour l'accéléromètre si pas déjà présente
-        if (accelerometer && !accelerometer.magnitude) {
-          accelerometer.magnitude = Math.sqrt(
-            accelerometer.x ** 2 + accelerometer.y ** 2 + accelerometer.z ** 2
-          );
-        }
-        
-        actions.updateSensors({
-          accelerometer,
-          gyroscope,
-          magnetometer,
-          metadata: sensorData.metadata || {}
-        });
+        console.log('✅ NativeEnhancedMotionService configuré (aucune config requise)');
+      } catch (error) {
+        console.error('❌ Erreur configuration NativeEnhancedMotionService:', error);
       }
-    });
-  }, [actions]);
+    };
+    
+    configureMotionService();
+  }, []);
 
   /**
    * Initialisation de la batterie
@@ -262,19 +246,22 @@ export default function MapScreen() {
    */
   const initializeSystem = async () => {
     try {
+      console.log('Initialisation du système de localisation...');
+      
+      // *** MODIFICATION: Pas d'initialisation spéciale pour HybridMotionService ***
+      // Il s'initialise automatiquement lors du start()
+      
       // Position initiale par défaut à (0, 0)
       const initialPose = { x: 0, y: 0, theta: 0 };
-
-      // Initialisation du SDK sans carte préchargée
-      await localizationSDK.initialize(null);
-      localizationSDK.resetPosition(0, 0, 0, 0);
+      
       actions.resetPose(initialPose);
       actions.resetTrajectory();
       
       setIsMapLoaded(true);
       
+      console.log('✅ Système initialisé avec succès');
     } catch (error) {
-      console.error('Erreur initialisation:', error);
+      console.error('❌ Erreur initialisation système:', error);
       Alert.alert('Erreur', 'Impossible d\'initialiser le système de localisation');
     }
   };
@@ -285,10 +272,11 @@ export default function MapScreen() {
   const toggleTracking = async () => {
     if (state.isTracking) {
       actions.setTracking(false);
-      localizationSDK.stopTracking();
+      hybridMotionService.stop();
     } else {
       actions.setTracking(true);
-      await localizationSDK.startTracking();
+      
+      await startMotionTracking();
     }
   };
 
@@ -494,103 +482,53 @@ export default function MapScreen() {
    * Rendu de la trajectoire avec trait affiné
    */
   const renderTrajectory = () => {
-    if (!state.trajectory || state.trajectory.length < 2) {
+    if (!state.trajectory || state.trajectory.length < 1) {
+      console.log('🔍 [TRAJECTORY] Aucune trajectoire à afficher:', state.trajectory?.length || 0, 'points');
       return null;
     }
     
-    // *** NOUVEAU: Génération d'un chemin lissé avec courbes de Bézier ***
-    const generateSmoothPath = () => {
+    console.log(`🔍 [TRAJECTORY] Rendu de ${state.trajectory.length} points`);
+    
+    // *** FIX: Chemin simple et visible ***
+    const generateSimplePath = () => {
       const points = state.trajectory.map(point => worldToSVG({ x: point.x, y: point.y }));
       
-      if (points.length < 3) {
-        // Pas assez de points pour lisser, utiliser une ligne droite
-        return points.map((point, index) => 
-          `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`
-        ).join(' ');
+      if (points.length === 1) {
+        // Un seul point - afficher un cercle
+        const point = points[0];
+        return `M ${point.x} ${point.y} L ${point.x + 1} ${point.y}`;
       }
       
-      let path = `M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`;
-      
-      // Utiliser des courbes quadratiques pour lisser le chemin
-      for (let i = 1; i < points.length - 1; i++) {
-        const current = points[i];
-        const next = points[i + 1];
-        
-        // Point de contrôle pour la courbe (milieu entre points actuels)
-        const controlX = (current.x + next.x) / 2;
-        const controlY = (current.y + next.y) / 2;
-        
-        // Courbe quadratique vers le point de contrôle
-        path += ` Q ${current.x.toFixed(2)} ${current.y.toFixed(2)} ${controlX.toFixed(2)} ${controlY.toFixed(2)}`;
-      }
-      
-      // Ligne finale vers le dernier point
-      const lastPoint = points[points.length - 1];
-      path += ` L ${lastPoint.x.toFixed(2)} ${lastPoint.y.toFixed(2)}`;
-      
-      return path;
+      // Chemin simple ligne par ligne
+      return points.map((point, index) => 
+        `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`
+      ).join(' ');
     };
 
-    const smoothPath = generateSmoothPath();
+    const simplePath = generateSimplePath();
     
     return (
       <G>
-        {/* *** NOUVEAU: Définition des filtres SVG pour effets avancés *** */}
+        {/* *** FIX: Définition des gradients simplifiée *** */}
         <Defs>
-          {/* Gradient pour la trajectoire */}
           <LinearGradient id="trajectoryGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <Stop offset="0%" stopColor="#00ff88" stopOpacity="1" />
-            <Stop offset="50%" stopColor="#00ff00" stopOpacity="1" />
             <Stop offset="100%" stopColor="#88ff00" stopOpacity="1" />
           </LinearGradient>
         </Defs>
 
-        {/* *** NOUVEAU: Ombre portée de la trajectoire *** */}
+        {/* *** FIX: Ligne principale visible *** */}
         <Path
-          d={smoothPath}
-          stroke="#000000"
-          strokeWidth="2.5"
-          fill="none"
-          opacity="0.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          transform="translate(1,1)"
-        />
-        
-        {/* *** NOUVEAU: Ligne de base épaisse pour la profondeur *** */}
-        <Path
-          d={smoothPath}
-          stroke="#004400"
+          d={simplePath}
+          stroke="#00ff00"
           strokeWidth="3"
-          fill="none"
-          opacity="0.8"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        
-        {/* *** NOUVEAU: Ligne principale affinée avec gradient *** */}
-        <Path
-          d={smoothPath}
-          stroke="url(#trajectoryGradient)"
-          strokeWidth="1.5"
           fill="none"
           opacity="1.0"
           strokeLinecap="round"
           strokeLinejoin="round"
         />
         
-        {/* *** NOUVEAU: Effet de lueur avec ligne plus large *** */}
-        <Path
-          d={smoothPath}
-          stroke="#00ff00"
-          strokeWidth="4"
-          fill="none"
-          opacity="0.3"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        
-        {/* *** NOUVEAU: Points de trajectoire affinés *** */}
+        {/* *** FIX: Points de trajectoire visibles *** */}
         {state.trajectory.map((point, index) => {
           const svgPos = worldToSVG({ x: point.x, y: point.y });
           const isStartPoint = index === 0;
@@ -598,84 +536,47 @@ export default function MapScreen() {
           
           return (
             <G key={`trajectory-point-${index}`}>
-              {/* Ombre du point */}
-              <Circle
-                cx={svgPos.x + 0.5}
-                cy={svgPos.y + 0.5}
-                r={isStartPoint || isEndPoint ? "3" : "2"}
-                fill="#000000"
-                opacity="0.3"
-              />
-              
               {/* Point principal */}
               <Circle
                 cx={svgPos.x}
                 cy={svgPos.y}
-                r={isStartPoint || isEndPoint ? "3" : "2"}
+                r={isStartPoint || isEndPoint ? "4" : "3"}
                 fill={isStartPoint ? "#00ff88" : isEndPoint ? "#ff4400" : "#00ff00"}
                 stroke="#ffffff"
-                strokeWidth="0.5"
-                opacity="0.9"
+                strokeWidth="1"
+                opacity="1.0"
               />
               
-              {/* Indicateur spécial pour début et fin */}
+              {/* Indicateur spécial pour début */}
               {isStartPoint && (
                 <Circle
                   cx={svgPos.x}
                   cy={svgPos.y}
-                  r="5"
+                  r="8"
                   fill="none"
                   stroke="#00ff88"
-                  strokeWidth="1"
-                  strokeDasharray="2,2"
-                  opacity="0.7"
+                  strokeWidth="2"
+                  strokeDasharray="4,4"
+                  opacity="0.8"
                 />
               )}
               
+              {/* Indicateur spécial pour fin */}
               {isEndPoint && (
                 <Circle
                   cx={svgPos.x}
                   cy={svgPos.y}
-                  r="5"
+                  r="8"
                   fill="none"
                   stroke="#ff4400"
-                  strokeWidth="1"
-                  strokeDasharray="2,2"
-                  opacity="0.7"
+                  strokeWidth="2"
+                  strokeDasharray="4,4"
+                  opacity="0.8"
                 />
               )}
             </G>
           );
         })}
-        
-        {/* *** NOUVEAU: Flèche directionnelle sur le dernier segment *** */}
-        {state.trajectory.length >= 2 && (() => {
-          const lastPoint = worldToSVG({ 
-            x: state.trajectory[state.trajectory.length - 1].x, 
-            y: state.trajectory[state.trajectory.length - 1].y 
-          });
-          const secondLastPoint = worldToSVG({ 
-            x: state.trajectory[state.trajectory.length - 2].x, 
-            y: state.trajectory[state.trajectory.length - 2].y 
-          });
-          
-          // Calculer l'angle de direction
-          const dx = lastPoint.x - secondLastPoint.x;
-          const dy = lastPoint.y - secondLastPoint.y;
-          const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-          
-          return (
-            <G transform={`translate(${lastPoint.x}, ${lastPoint.y}) rotate(${angle})`}>
-              <Path
-                d="M -8 -3 L 0 0 L -8 3 Z"
-                fill="#00ff00"
-                stroke="#ffffff"
-                strokeWidth="0.5"
-                opacity="0.8"
-              />
-            </G>
-          );
-        })()}
       </G>
     );
   };
@@ -687,25 +588,30 @@ export default function MapScreen() {
   const renderCurrentPosition = () => {
     const svgPos = worldToSVG({ x: state.pose.x, y: state.pose.y });
     
-    // *** NOUVEAU: Utiliser l'orientation permanente ***
-    const currentOrientation = isOrientationActive ? continuousOrientation : 0;
+    // *** FIX: Utiliser l'orientation correcte avec fallback ***
+    let currentOrientation = 0;
+    if (isOrientationActive && continuousOrientation !== null) {
+      currentOrientation = continuousOrientation;
+    } else if (state.pose.theta !== undefined) {
+      currentOrientation = state.pose.theta;
+    }
     
     // *** SIMPLIFIÉ: Taille fixe pour éviter les problèmes de zoom ***
-    const radius = 8;
-    const headingLength = 20;
+    const radius = 6; // Augmenté pour meilleure visibilité
+    const headingLength = 25; // Augmenté pour meilleure visibilité
     const strokeWidth = 2;
-    const confidenceRadius = 20;
+    const confidenceRadius = 15;
     
     const headingX = svgPos.x + Math.cos(currentOrientation) * headingLength;
-    const headingY = svgPos.y - Math.sin(currentOrientation) * headingLength;
+    const headingY = svgPos.y - Math.sin(currentOrientation) * headingLength; // Inversion Y pour SVG
     
     // Couleur selon l'état du tracking
     const positionColor = state.isTracking ? "#00ff00" : "#ffaa00";
-    const orientationColor = isOrientationActive ? "#00ff88" : "#666666";
+    const orientationColor = "#ff0088"; // Couleur vive pour l'orientation
     
     return (
       <G>
-        {/* Ligne de direction */}
+        {/* *** FIX: Ligne de direction TOUJOURS visible *** */}
         <Line
           x1={svgPos.x}
           y1={svgPos.y}
@@ -713,8 +619,19 @@ export default function MapScreen() {
           y2={headingY}
           stroke={orientationColor}
           strokeWidth={strokeWidth}
-          opacity={isOrientationActive ? "1.0" : "0.5"}
+          opacity="1.0"
         />
+        
+        {/* *** FIX: Flèche directionnelle pour meilleure visibilité *** */}
+        <G transform={`translate(${headingX}, ${headingY}) rotate(${-currentOrientation * 180 / Math.PI + 90})`}>
+          <Path
+            d="M -4 -8 L 0 0 L 4 -8 Z"
+            fill={orientationColor}
+            stroke="#ffffff"
+            strokeWidth="1"
+            opacity="1.0"
+          />
+        </G>
         
         {/* Position actuelle */}
         <Circle
@@ -724,7 +641,16 @@ export default function MapScreen() {
           fill={positionColor}
           stroke="#ffffff"
           strokeWidth={strokeWidth}
-          opacity={state.isTracking ? "1.0" : "0.7"}
+          opacity="1.0"
+        />
+        
+        {/* *** FIX: Point central pour meilleure visibilité *** */}
+        <Circle
+          cx={svgPos.x}
+          cy={svgPos.y}
+          r={2}
+          fill="#ffffff"
+          opacity="1.0"
         />
         
         {/* Niveau de confiance - seulement en tracking */}
@@ -739,14 +665,14 @@ export default function MapScreen() {
           />
         )}
         
-        {/* *** NOUVEAU: Indicateur d'orientation permanente *** */}
-        {isOrientationActive && !state.isTracking && (
+        {/* *** FIX: Indicateur d'orientation active *** */}
+        {isOrientationActive && (
           <Circle
             cx={svgPos.x}
             cy={svgPos.y}
-            r={radius * 2}
+            r={radius + 5}
             fill="none"
-            stroke="#00ff88"
+            stroke="#ff0088"
             strokeWidth={1}
             strokeDasharray="4,4"
             opacity="0.8"
@@ -975,11 +901,9 @@ export default function MapScreen() {
         {
           text: 'Compris',
           onPress: () => {
-            // Réinitialiser l'historique de dérive pour permettre une nouvelle détection
-            const success = localizationSDK.resetCompassDrift();
-            if (success) {
-              console.log('Historique de dérive réinitialisé - Prêt pour nouvelle calibration');
-            }
+            // *** SUPPRIMÉ: Méthode inexistante ***
+            // hybridMotionService.resetCompassDrift();
+            console.log('Recalibration boussole demandée');
           }
         }
       ]
@@ -994,34 +918,11 @@ export default function MapScreen() {
   };
 
   /**
-   * *** NOUVEAU: Démarrer l'orientation continue via le SDK ***
+   * *** NOUVEAU: Démarrer l'orientation continue via le NativeEnhancedMotionService ***
    */
   const startContinuousOrientation = async () => {
-    try {
-      // Activer le mode orientation native dans le SDK
-      const success = localizationSDK.setOrientationMode('native_compass');
-      
-      if (success) {
-        setIsOrientationActive(true);
-        console.log('Orientation native activée via SDK');
-        
-        // Configurer le callback pour recevoir les mises à jour d'orientation
-        localizationSDK.callbacks.onOrientationUpdate = (orientationData) => {
-          setContinuousOrientation(orientationData.heading);
-          setOrientationConfidence(orientationData.confidence);
-          setOrientationSource('native_compass');
-        };
-        
-      } else {
-        console.warn('Impossible d\'activer l\'orientation native');
-        // Fallback vers mode gyro
-        setOrientationSource('pdr_gyro');
-      }
-      
-    } catch (error) {
-      console.error('Erreur démarrage orientation native:', error);
-      setOrientationSource('pdr_gyro');
-    }
+    // Le NativeEnhancedMotionService gère déjà l'orientation automatiquement
+    console.log('🧭 Orientation gérée automatiquement par NativeEnhancedMotionService');
   };
 
   /**
@@ -1029,22 +930,14 @@ export default function MapScreen() {
    */
   const stopContinuousOrientation = () => {
     try {
-      // Désactiver le mode orientation native dans le SDK
-      const success = localizationSDK.setOrientationMode('pdr_gyro');
-      
       setIsOrientationActive(false);
       setOrientationConfidence(0);
-      setOrientationSource('pdr_gyro');
+      setOrientationSource('auto');
       
-      // Supprimer le callback d'orientation
-      if (localizationSDK.callbacks.onOrientationUpdate) {
-        delete localizationSDK.callbacks.onOrientationUpdate;
-      }
-      
-      console.log('Orientation native arrêtée');
+      console.log('Orientation continue arrêtée');
       
     } catch (error) {
-      console.error('Erreur arrêt orientation native:', error);
+      console.error('Erreur arrêt orientation continue:', error);
     }
   };
 
@@ -1059,63 +952,58 @@ export default function MapScreen() {
     }
   };
 
-  // Effet pour démarrer l'orientation continue automatiquement
+  // *** FIX: Effet pour démarrer l'orientation continue automatiquement ***
   useEffect(() => {
-    if (isMapLoaded && state.isTracking) {
-      // Démarrer l'orientation continue automatiquement
+    if (isMapLoaded && !isOrientationActive) {
+      console.log('🧭 [ORIENTATION] Démarrage automatique de l\'orientation...');
+      setIsOrientationActive(true);
       startContinuousOrientation();
     }
-    
-    // Nettoyage à la fermeture
-    return () => {
-      if (isOrientationActive) {
-        stopContinuousOrientation();
-      }
-    };
-  }, [isMapLoaded, state.isTracking, isOrientationActive]);
+  }, [isMapLoaded]);
 
-  // Effet pour gérer les callbacks de calibration du SDK
-  useEffect(() => {
-    // Configurer les callbacks de calibration
-    localizationSDK.callbacks.onCalibrationProgress = (calibrationData) => {
-      if (calibrationData.step === 'immediate_calibration_start') {
-        setCalibrationModal({
-          visible: true,
-          progress: calibrationData.progress,
-          message: calibrationData.message,
-          step: calibrationData.step
-        });
-      } else if (calibrationData.step === 'immediate_calibration_complete') {
-        setCalibrationModal({
-          visible: false,
-          progress: 1.0,
-          message: calibrationData.message,
-          step: calibrationData.step
-        });
-        
-        // Afficher un message de succès temporaire
-        setTimeout(() => {
-          console.log('Calibration immédiate terminée avec succès');
-        }, 500);
-      }
-    };
-
-    // Configurer le callback de changement de posture
-    localizationSDK.callbacks.onPostureChange = (postureData) => {
-      console.log('Changement de posture détecté:', postureData.reason);
+  const startMotionTracking = async () => {
+    try {
+      console.log('🚀 [MOTION-TRACKING] ========================================');
+      console.log('🚀 [MOTION-TRACKING] Démarrage suivi mouvement...');
+      console.log('🚀 [MOTION-TRACKING] ========================================');
       
-      // Optionnel : afficher une notification à l'utilisateur
-      if (postureData.action === 'immediate_calibration_triggered') {
-        console.log('Calibration automatique déclenchée suite au changement de posture');
+      // *** FIX: Vérifier que le service existe ***
+      if (!hybridMotionService) {
+        throw new Error('Service NativeEnhancedMotionService non initialisé');
       }
-    };
+      
+      console.log('✅ [MOTION-TRACKING] Service trouvé, démarrage...');
+      
+      await hybridMotionService.start();
+      
+      console.log('✅ [MOTION-TRACKING] Service démarré avec succès');
+      console.log('🚀 [MOTION-TRACKING] ========================================');
+      
+      // *** FIX: Vérifier les stats du service ***
+      setTimeout(() => {
+        const stats = hybridMotionService.getStats();
+        console.log('📊 [MOTION-TRACKING] Stats du service:', stats);
+      }, 2000);
+      
+    } catch (error) {
+      console.error('❌ [MOTION-TRACKING] Erreur démarrage suivi mouvement:', error);
+      Alert.alert('Erreur', 'Impossible de démarrer le suivi de mouvement: ' + error.message);
+    }
+  };
 
-    return () => {
-      // Nettoyage des callbacks
-      delete localizationSDK.callbacks.onCalibrationProgress;
-      delete localizationSDK.callbacks.onPostureChange;
-    };
-  }, []);
+  const stopMotionTracking = async () => {
+    try {
+      hybridMotionService.stop();
+      
+      // ✅ SIMPLIFIÉ: Plus de configuration à refaire
+      
+      await hybridMotionService.start();
+      
+      console.log('🔄 Suivi mouvement redémarré');
+    } catch (error) {
+      console.error('❌ Erreur redémarrage suivi mouvement:', error);
+    }
+  };
 
   if (!isMapLoaded) {
     return (

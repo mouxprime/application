@@ -1,0 +1,30 @@
+{
+  "name": "expo-native-pedometer",
+  "version": "1.0.0",
+  "description": "Module natif Expo pour récupérer la longueur de pas en temps réel depuis CMPedometer",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "echo 'No build needed'"
+  },
+  "keywords": [
+    "expo",
+    "pedometer",
+    "cmpedometer",
+    "step-length",
+    "ios"
+  ],
+  "repository": "https://github.com/expo/expo",
+  "author": "Your Name <your.email@example.com>",
+  "license": "MIT",
+  "homepage": "https://docs.expo.dev/modules/",
+  "unimodulePeerDependencies": {
+    "expo": "*"
+  },
+  "peerDependencies": {
+    "expo": "*"
+  },
+  "expo": {
+    "name": "expo-native-pedometer",
+    "version": "1.0.0"
+  }
+} 

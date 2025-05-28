@@ -13,7 +13,7 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "infoPlist": {
         "NSMotionUsageDescription": "La détection de pas est utilisée pour la navigation intérieure.",
         "NSLocationWhenInUseUsageDescription": "La boussole est utilisée pour afficher l'orientation."
@@ -32,6 +32,9 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "./modules/expo-native-pedometer/plugin.js"
+    ]
   }
 }
