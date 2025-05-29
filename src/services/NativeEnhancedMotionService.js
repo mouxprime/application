@@ -29,19 +29,41 @@ export default class NativeEnhancedMotionService {
     this.sessionStartTime = null;
     this.stepCount = 0;
     
-    // Orientation filtrée
+    // *** NOUVEAU: Système hybride avec buffer d'orientations ***
+    this.orientationBuffer = []; // Buffer pour stocker les orientations avec timestamps
+    this.orientationBufferMaxSize = 100; // ~10 secondes à 10Hz
+    this.motionUpdateFrequency = 10; // Hz - fréquence de capture des orientations
+    this.yawSmoothingWindowSize = 5; // Nombre d'échantillons pour la moyenne mobile
+    this.lastSmoothedYaw = null;
+    this.isHybridOrientationActive = false; // *** NOUVEAU: État du système hybride ***
+    this.orientationSource = 'none'; // *** NOUVEAU: Source d'orientation active ***
+    
+    // *** AMÉLIORATION: Filtres d'orientation plus agressifs ***
     this.filteredYaw = null;
-    this.alphaYaw = 0.1;            // Facteur de lissage orientation
+    this.alphaYaw = 0.02; // Plus agressif (était 0.1) pour lisser davantage
+    this.rawYawHistory = []; // Rolling median pour stabilité
+    this.yawHistorySize = 5; // Taille du buffer pour le médian
+    
+    // *** NOUVEAU: Orientation de segment stabilisée ***
+    this.segmentYaw = null;          // Orientation du segment actuel
+    this.segmentStepCount = 0;       // Nombre de pas dans le segment actuel
+    this.segmentChangeThreshold = 10; // Réduit de 15° à 10° pour plus de réactivité
+    this.minSegmentSteps = 3;        // Minimum de pas avant de pouvoir changer de segment
+    this.orientationStabilityBuffer = []; // Buffer pour détecter un changement stable
+    this.orientationBufferSize = 5;  // Taille du buffer de stabilité
+    this.lastOrientationChangeTime = 0; // Timestamp du dernier changement
+    this.orientationStabilityDuration = 200; // 200ms minimum entre changements
     
     // Subscriptions
     this.headingSub = null;
     this.pedometerSub = null;
     this.nativePedometerSub = null;  // *** NOUVEAU: Subscription native ***
+    this.motionManagerSub = null;    // *** NOUVEAU: Subscription pour CMMotionManager ***
     
     // Données de pas pour calculs adaptatifs
     this.lastStepTime = null;
     this.stepHistory = [];
-    this.maxHistorySize = 10;
+    this.maxHistorySize = 50;
     
     // Métriques
     this.metrics = {
@@ -135,12 +157,26 @@ export default class NativeEnhancedMotionService {
       
       // *** NOUVEAU: Essayer d'abord le service natif iOS ***
       let nativeStarted = false;
+      let hybridOrientationActive = false; // *** NOUVEAU: Flag pour système hybride ***
+      
       if (Platform.OS === 'ios' && !this.USE_FALLBACK_ONLY) {
         try {
           console.log('🔧 [STEP-LENGTH-TRACE] Tentative démarrage service natif iOS...');
           nativeStarted = await this._startNativePedometer();
           if (nativeStarted) {
             console.log('🔧 [STEP-LENGTH-TRACE] Service natif iOS démarré - longueur de pas sera fournie par CMPedometer');
+            
+            // *** NOUVEAU: Démarrer le système hybride d'orientations ***
+            console.log('🎯 [HYBRID-SYSTEM] Démarrage du système hybride d\'orientations...');
+            const hybridStarted = await this._startHybridOrientationSystem();
+            if (hybridStarted) {
+              console.log('✅ [HYBRID-SYSTEM] Système hybride démarré avec succès - orientations capturées à 10Hz');
+              hybridOrientationActive = true; // *** NOUVEAU: Marquer le système hybride comme actif ***
+              this.isHybridOrientationActive = true;
+              this.orientationSource = 'hybrid_motion'; // *** NOUVEAU: Marquer la source ***
+            } else {
+              console.warn('⚠️ [HYBRID-SYSTEM] Système hybride échoué - fallback vers orientation traditionnelle');
+            }
           }
         } catch (error) {
           console.warn('⚠️ [NATIVE-ENHANCED] Service natif iOS échoué, fallback vers Expo:', error.message);
@@ -178,8 +214,14 @@ export default class NativeEnhancedMotionService {
         }
       }
       
-      // Démarrage de l'orientation
-      await this._startCompass();
+      // *** FIX: Démarrage de l'orientation seulement si le système hybride n'est PAS actif ***
+      if (!hybridOrientationActive) {
+        console.log('🧭 [ORIENTATION-FIX] Système hybride inactif - démarrage boussole traditionnelle');
+        this.orientationSource = 'compass'; // *** NOUVEAU: Marquer la source ***
+        await this._startCompass();
+      } else {
+        console.log('🎯 [ORIENTATION-FIX] Système hybride actif - SKIP boussole traditionnelle pour éviter les conflits');
+      }
       
       this.isRunning = true;
       
@@ -243,7 +285,7 @@ export default class NativeEnhancedMotionService {
   }
 
   /**
-   * *** NOUVEAU: Traitement des événements de pas natifs ***
+   * *** NOUVEAU: Traitement des événements de pas natifs avec système hybride ***
    */
   _handleNativeStepEvent(stepData) {
     try {
@@ -252,8 +294,8 @@ export default class NativeEnhancedMotionService {
       const {
         stepCount,
         stepLength,
-        dx,
-        dy,
+        dx: originalDx,
+        dy: originalDy,
         timestamp,
         totalSteps,
         confidence,
@@ -265,36 +307,69 @@ export default class NativeEnhancedMotionService {
         isFallback
       } = stepData;
       
-      // Mettre à jour les métriques
-      this.stepCount = totalSteps;
-      this.metrics.totalSteps = totalSteps;
-      this.metrics.totalDistance += Math.hypot(dx, dy);  // dx et dy représentent la distance totale pour tous les nouveaux pas
+      // *** SYSTÈME HYBRIDE: Répartir les pas avec orientations interpolées ***
+      console.log(`🎯 [HYBRID-SYSTEM] Traitement hybride de ${stepCount} pas avec orientations interpolées`);
+      
+      // Timestamps estimés pour la répartition des pas
+      const startTime = (timestamp - timeDelta) / 1000; // Début du batch en secondes
+      const endTime = timestamp / 1000; // Fin du batch en secondes
+      const timePerStep = (endTime - startTime) / stepCount; // Durée par pas
+      
+      console.log(`⏱️ [HYBRID-SYSTEM] Période: ${startTime.toFixed(3)}s → ${endTime.toFixed(3)}s (${timePerStep.toFixed(3)}s/pas)`);
+      
+      // Traiter chaque pas individuellement avec son orientation interpolée
+      for (let i = 0; i < stepCount; i++) {
+        // Timestamp estimé pour ce pas spécifique
+        const stepTimestamp = startTime + (timePerStep * (i + 0.5)); // Centre du pas
+        
+        // Obtenir l'orientation interpolée pour ce timestamp
+        const interpolatedYaw = this._getInterpolatedOrientation(stepTimestamp);
+        
+        // Calculer le déplacement pour ce pas avec son orientation spécifique
+        const yawRadians = interpolatedYaw * Math.PI / 180;
+        const stepDx = stepLength * Math.sin(yawRadians);
+        const stepDy = stepLength * Math.cos(yawRadians);
+        
+        // Incrémenter les compteurs
+        this.stepCount++;
+        this.metrics.totalSteps = this.stepCount;
+        this.metrics.totalDistance += stepLength;
+        
+        // *** ÉMISSION IMMÉDIATE: Chaque pas avec son orientation propre ***
+        if (this.onStep && typeof this.onStep === 'function') {
+          this.onStep({
+            stepCount: 1, // UN seul pas à la fois
+            stepLength: stepLength,
+            dx: stepDx,  // Déplacement calculé avec orientation interpolée
+            dy: stepDy,  // Déplacement calculé avec orientation interpolée
+            timestamp: stepTimestamp * 1000, // Retour en millisecondes
+            totalSteps: this.stepCount,
+            confidence: confidence,
+            source: source,
+            nativeStepLength: nativeStepLength,
+            averageStepLength: averageStepLength,
+            cadence: cadence,
+            timeDelta: timePerStep * 1000, // Durée individuelle en ms
+            isFallback: isFallback,
+            interpolatedYaw: interpolatedYaw, // *** NOUVEAU: Orientation interpolée ***
+            hybridSystem: true // *** NOUVEAU: Marqueur système hybride ***
+          });
+        }
+        
+        // Log détaillé pour le premier et dernier pas
+        if (i === 0 || i === stepCount - 1) {
+          console.log(`🎯 [HYBRID-STEP] Pas ${i + 1}/${stepCount}: t=${stepTimestamp.toFixed(3)}s, yaw=${interpolatedYaw.toFixed(1)}°, dx=${stepDx.toFixed(3)}, dy=${stepDy.toFixed(3)}`);
+        }
+      }
+      
+      // Mettre à jour les métriques finales
       this.metrics.lastUpdate = timestamp;
       this.metrics.averageStepLength = nativeStepLength || stepLength;
       
-      console.log(`🍎 [NATIVE-ENHANCED] Pas traité: ${stepCount} nouveaux pas (total: ${totalSteps})`);
-      console.log(`🔧 [STEP-LENGTH-TRACE] Longueur de pas native: ${stepLength.toFixed(3)}m`);
-      console.log(`🔧 [STEP-LENGTH-TRACE] Confiance: ${(confidence * 100).toFixed(1)}%`);
-      
-      // Appeler le callback principal
-      this.onStep({
-        stepCount: stepCount,
-        stepLength: stepLength,
-        dx: dx,
-        dy: dy,
-        timestamp: timestamp,
-        totalSteps: totalSteps,
-        confidence: confidence,
-        source: source,
-        nativeStepLength: nativeStepLength,
-        averageStepLength: averageStepLength,
-        cadence: cadence,
-        timeDelta: timeDelta,
-        isFallback: isFallback
-      });
+      console.log(`✅ [HYBRID-SYSTEM] ${stepCount} pas traités avec orientations interpolées (total: ${this.stepCount})`);
       
     } catch (error) {
-      console.error('❌ [NATIVE-ENHANCED] Erreur traitement événement natif:', error);
+      console.error('❌ [HYBRID-SYSTEM] Erreur traitement événement hybride:', error);
     }
   }
 
@@ -405,10 +480,19 @@ export default class NativeEnhancedMotionService {
     console.log(`  - Moyenne récente: ${avgStepLength.toFixed(3)}m`);
     console.log(`🔧 [STEP-LENGTH-TRACE] Longueur moyenne mise à jour: ${this.metrics.averageStepLength.toFixed(3)}m`);
     
-    // Calcul de la position
-    const yawRadians = this.filteredYaw ? (this.filteredYaw * Math.PI / 180) : 0;
-    const dx = adaptiveStepLength * Math.cos(yawRadians);
-    const dy = adaptiveStepLength * Math.sin(yawRadians);
+    // *** CORRECTION: Utiliser l'orientation de segment stabilisée ***
+    const currentFilteredYaw = this.filteredYaw || 0;
+    const stableYaw = this._updateSegmentOrientation(currentFilteredYaw);
+    
+    // Incrémenter le compteur de pas du segment
+    this.segmentStepCount += 1;
+    
+    // Calcul de la position avec orientation STABLE
+    const yawRadians = stableYaw ? (stableYaw * Math.PI / 180) : 0;
+    const dx = adaptiveStepLength * Math.sin(yawRadians);
+    const dy = adaptiveStepLength * Math.cos(yawRadians);
+    
+    console.log(`🧭 [ADAPTIVE-STEP] Orientation filtrée: ${currentFilteredYaw.toFixed(1)}°, Orientation segment: ${(stableYaw || 0).toFixed(1)}°`);
     
     this.stepCount++;
     this.metrics.totalSteps = this.stepCount;
@@ -527,7 +611,7 @@ export default class NativeEnhancedMotionService {
   }
 
   /**
-   * Gestion de l'orientation avec filtrage
+   * Gestion de l'orientation avec filtrage amélioré
    */
   _handleHeading({ trueHeading, accuracy, timestamp }) {
     // Normalisation de l'angle
@@ -535,19 +619,37 @@ export default class NativeEnhancedMotionService {
     while (normalizedHeading >= 360) normalizedHeading -= 360;
     while (normalizedHeading < 0) normalizedHeading += 360;
     
-    // Filtrage adaptatif
-    const adaptiveAlpha = accuracy < 10 ? this.alphaYaw * 1.5 : 
-                         accuracy > 30 ? this.alphaYaw * 0.5 : this.alphaYaw;
+    // *** AMÉLIORATION 1: Rolling median pour stabilité ***
+    this.rawYawHistory.push(normalizedHeading);
+    if (this.rawYawHistory.length > this.yawHistorySize) {
+      this.rawYawHistory.shift();
+    }
+    
+    // Calculer le médian des orientations récentes
+    let medianYaw = normalizedHeading;
+    if (this.rawYawHistory.length >= 3) {
+      const sortedHistory = [...this.rawYawHistory].sort((a, b) => a - b);
+      const middleIndex = Math.floor(sortedHistory.length / 2);
+      medianYaw = sortedHistory[middleIndex];
+    }
+    
+    // *** AMÉLIORATION 2: Filtrage plus agressif ***
+    const adaptiveAlpha = accuracy < 10 ? this.alphaYaw * 0.5 : 
+                         accuracy > 30 ? this.alphaYaw * 2.0 : this.alphaYaw;
     
     if (this.filteredYaw == null) {
-      this.filteredYaw = normalizedHeading;
+      this.filteredYaw = medianYaw;
     } else {
       // Gestion du passage 0°/360°
-      let angleDiff = normalizedHeading - this.filteredYaw;
+      let angleDiff = medianYaw - this.filteredYaw;
       if (angleDiff > 180) angleDiff -= 360;
       else if (angleDiff < -180) angleDiff += 360;
       
-      this.filteredYaw += adaptiveAlpha * angleDiff;
+      // *** AMÉLIORATION 3: Ignorer les petites variations pendant un segment ***
+      const minChangeThreshold = 3; // Ignorer les variations < 3°
+      if (Math.abs(angleDiff) > minChangeThreshold || this.segmentYaw === null) {
+        this.filteredYaw += adaptiveAlpha * angleDiff;
+      }
       
       // Normalisation du résultat
       while (this.filteredYaw >= 360) this.filteredYaw -= 360;
@@ -556,14 +658,23 @@ export default class NativeEnhancedMotionService {
 
     // Vérification que le callback existe avant de l'appeler
     if (this.onHeading && typeof this.onHeading === 'function') {
+      // *** NOUVEAU: Log de diagnostic des conflits ***
+      if (this.isHybridOrientationActive) {
+        console.warn(`🚨 [ORIENTATION-CONFLICT] Boussole traditionnelle active mais système hybride également actif!`);
+        console.warn(`🚨 [ORIENTATION-CONFLICT] orientationSource = ${this.orientationSource}, hybridActive = ${this.isHybridOrientationActive}`);
+      }
+      
       this.onHeading({
         yaw: this.filteredYaw * Math.PI / 180,
         accuracy,
         timestamp,
         rawHeading: normalizedHeading,
         filteredHeading: this.filteredYaw,
+        medianHeading: medianYaw,
         adaptiveAlpha,
-        source: 'compass'
+        source: 'compass',
+        activeOrientationSource: this.orientationSource, // *** NOUVEAU: Debug source ***
+        hybridConflict: this.isHybridOrientationActive // *** NOUVEAU: Flag conflit ***
       });
     }
   }
@@ -581,7 +692,21 @@ export default class NativeEnhancedMotionService {
     this.metrics.totalDistance = 0;
     this.metrics.adaptiveStepLength = 0.79;
     
-    console.log('🔄 [NATIVE-ENHANCED] Service réinitialisé');
+    // *** NOUVEAU: Réinitialisation des variables de segment ***
+    this.segmentYaw = null;
+    this.segmentStepCount = 0;
+    this.orientationStabilityBuffer = [];
+    
+    // *** NOUVEAU: Réinitialisation du système hybride ***
+    this.orientationBuffer = [];
+    this.lastSmoothedYaw = null;
+    this.isHybridOrientationActive = false; // *** NOUVEAU: Réinitialiser le flag ***
+    
+    // *** AMÉLIORATION: Réinitialisation des nouvelles variables de filtrage ***
+    this.rawYawHistory = [];
+    this.lastOrientationChangeTime = 0;
+    
+    console.log('🔄 [NATIVE-ENHANCED] Service réinitialisé avec système hybride d\'orientations');
   }
 
   /**
@@ -638,6 +763,18 @@ export default class NativeEnhancedMotionService {
         console.log('🛑 [NATIVE-ENHANCED] Service CMPedometer natif arrêté');
       } catch (error) {
         console.warn('⚠️ [NATIVE-ENHANCED] Erreur arrêt service natif:', error.message);
+      }
+    }
+    
+    // *** NOUVEAU: Arrêt du système hybride ***
+    if (this.motionManagerSub) {
+      try {
+        this.motionManagerSub.remove();
+        this.motionManagerSub = null;
+        this.isHybridOrientationActive = false; // *** NOUVEAU: Désactiver le flag ***
+        console.log('🛑 [HYBRID-SYSTEM] Système hybride d\'orientations arrêté');
+      } catch (error) {
+        console.warn('⚠️ [HYBRID-SYSTEM] Erreur arrêt système hybride:', error.message);
       }
     }
     
@@ -704,16 +841,6 @@ export default class NativeEnhancedMotionService {
       console.log(`✅ [STEP-LENGTH-TRACE] Longueur de pas correcte: ${stepLength}m`);
     }
     
-    // Calcul de la position avec orientation actuelle
-    const yawRadians = this.filteredYaw ? (this.filteredYaw * Math.PI / 180) : 0;
-    const dx = stepLength * Math.cos(yawRadians);
-    const dy = stepLength * Math.sin(yawRadians);
-    
-    this.stepCount++;
-    this.metrics.totalSteps = this.stepCount;
-    this.metrics.totalDistance += stepLength;
-    this.metrics.lastUpdate = now;
-    
     // Vérification que les métriques restent cohérentes
     console.log(`🔧 [STEP-LENGTH-TRACE] Métriques après pas:`);
     console.log(`  - averageStepLength: ${this.metrics.averageStepLength}m`);
@@ -722,6 +849,25 @@ export default class NativeEnhancedMotionService {
     console.log(`  - totalDistance: ${this.metrics.totalDistance.toFixed(2)}m`);
     
     console.log(`🆘 [FALLBACK-STEP] Pas simulé: ${stepLength}m (total: ${this.stepCount} pas, ${this.metrics.totalDistance.toFixed(2)}m)`);
+    
+    // *** CORRECTION: Utiliser l'orientation de segment stabilisée ***
+    const currentFilteredYaw = this.filteredYaw || 0;
+    const stableYaw = this._updateSegmentOrientation(currentFilteredYaw);
+    
+    // Incrémenter le compteur de pas du segment
+    this.segmentStepCount += 1;
+    
+    // Calcul de la position avec orientation STABLE
+    const yawRadians = stableYaw ? (stableYaw * Math.PI / 180) : 0;
+    const dx = stepLength * Math.sin(yawRadians);
+    const dy = stepLength * Math.cos(yawRadians);
+    
+    console.log(`🧭 [FALLBACK-STEP] Orientation filtrée: ${currentFilteredYaw.toFixed(1)}°, Orientation segment: ${(stableYaw || 0).toFixed(1)}°`);
+    
+    this.stepCount++;
+    this.metrics.totalSteps = this.stepCount;
+    this.metrics.totalDistance += stepLength;
+    this.metrics.lastUpdate = now;
     
     // Callback avec données de fallback
     if (this.onStep && typeof this.onStep === 'function') {
@@ -787,5 +933,297 @@ export default class NativeEnhancedMotionService {
     console.log(`  - usingNativeStepLength: ${this.metrics.usingNativeStepLength}`);
     console.log(`  - FALLBACK_STEP_LENGTH: ${this.FALLBACK_STEP_LENGTH}m`);
     console.log('🔧 [STEP-LENGTH-TRACE] === FIN ACTIVATION FORCÉE ===');
+  }
+
+  /**
+   * *** NOUVEAU: Gestion de l'orientation de segment stabilisée ***
+   */
+  _updateSegmentOrientation(currentYaw) {
+    // *** FIX 1: Initialisation immédiate de l'orientation de segment ***
+    if (this.segmentYaw === null) {
+      this.segmentYaw = currentYaw;
+      this.segmentStepCount = 0;
+      console.log(`🎯 [SEGMENT-ORIENTATION] Orientation de segment initialisée IMMÉDIATEMENT: ${this.segmentYaw.toFixed(1)}°`);
+      return this.segmentYaw;
+    }
+    
+    // Ajouter l'orientation actuelle au buffer de stabilité
+    this.orientationStabilityBuffer.push(currentYaw);
+    
+    // Maintenir la taille du buffer
+    if (this.orientationStabilityBuffer.length > this.orientationBufferSize) {
+      this.orientationStabilityBuffer.shift();
+    }
+    
+    // Vérifier si on a assez de pas dans le segment actuel pour considérer un changement
+    if (this.segmentStepCount < this.minSegmentSteps) {
+      return this.segmentYaw; // Garder l'orientation actuelle
+    }
+    
+    // Calculer la différence d'angle avec l'orientation du segment actuel
+    let angleDiff = currentYaw - this.segmentYaw;
+    if (angleDiff > 180) angleDiff -= 360;
+    else if (angleDiff < -180) angleDiff += 360;
+    
+    // Si la différence est significative et stable, changer de segment
+    if (Math.abs(angleDiff) > this.segmentChangeThreshold) {
+      // *** AMÉLIORATION: Vérifier la durée de stabilité ***
+      const now = Date.now();
+      const timeSinceLastChange = now - this.lastOrientationChangeTime;
+      
+      if (timeSinceLastChange < this.orientationStabilityDuration) {
+        return this.segmentYaw; // Trop tôt pour changer à nouveau
+      }
+      
+      // Vérifier la stabilité du changement
+      if (this.orientationStabilityBuffer.length >= this.orientationBufferSize) {
+        // Calculer l'écart type des orientations récentes
+        const recentOrientations = this.orientationStabilityBuffer;
+        let sumSin = 0, sumCos = 0;
+        recentOrientations.forEach(yaw => {
+          const rad = yaw * Math.PI / 180;
+          sumSin += Math.sin(rad);
+          sumCos += Math.cos(rad);
+        });
+        
+        const avgRecentYaw = (Math.atan2(sumSin, sumCos) * 180 / Math.PI + 360) % 360;
+        
+        // Vérifier si le changement est stable (toutes les orientations récentes vont dans la même direction)
+        let isStable = true;
+        const stabilityThreshold = 5; // Réduit de 10° à 5° pour plus de précision
+        
+        for (const yaw of recentOrientations) {
+          let diff = yaw - avgRecentYaw;
+          if (diff > 180) diff -= 360;
+          else if (diff < -180) diff += 360;
+          
+          if (Math.abs(diff) > stabilityThreshold) {
+            isStable = false;
+            break;
+          }
+        }
+        
+        if (isStable) {
+          const oldSegmentYaw = this.segmentYaw;
+          this.segmentYaw = avgRecentYaw;
+          this.segmentStepCount = 0;
+          this.orientationStabilityBuffer = []; // Reset du buffer
+          this.lastOrientationChangeTime = now; // *** NOUVEAU: Enregistrer le moment du changement ***
+          
+          console.log(`🔄 [SEGMENT-ORIENTATION] Changement de segment: ${oldSegmentYaw.toFixed(1)}° → ${this.segmentYaw.toFixed(1)}° (diff: ${angleDiff.toFixed(1)}°, stabilité: ${timeSinceLastChange}ms)`);
+        }
+      }
+    }
+    
+    return this.segmentYaw;
+  }
+
+  /**
+   * *** NOUVEAU: Démarrage du système hybride avec CMMotionManager ***
+   */
+  async _startHybridOrientationSystem() {
+    try {
+      console.log('🎯 [HYBRID-SYSTEM] Démarrage du système hybride orientation...');
+      
+      // Éviter le double démarrage
+      if (this.isHybridOrientationActive) {
+        console.log('⚠️ [HYBRID-SYSTEM] Système hybride déjà actif - skip');
+        return true;
+      }
+      
+      // Importer DeviceMotion depuis expo-sensors
+      const { DeviceMotion } = require('expo-sensors');
+      
+      // Vérifier la disponibilité
+      const isAvailable = await DeviceMotion.isAvailableAsync();
+      if (!isAvailable) {
+        throw new Error('DeviceMotion non disponible sur cet appareil');
+      }
+      
+      // Définir la fréquence de mise à jour
+      DeviceMotion.setUpdateInterval(1000 / this.motionUpdateFrequency); // 100ms pour 10Hz
+      
+      // Démarrer la capture des orientations
+      this.motionManagerSub = DeviceMotion.addListener((data) => {
+        this._handleDeviceMotionUpdate(data);
+      });
+      
+      // Marquer comme actif
+      this.isHybridOrientationActive = true;
+      this.orientationSource = 'hybrid_motion'; // *** NOUVEAU: Marquer la source ***
+      
+      console.log(`✅ [HYBRID-SYSTEM] Système hybride démarré à ${this.motionUpdateFrequency}Hz`);
+      return true;
+      
+    } catch (error) {
+      console.error('❌ [HYBRID-SYSTEM] Erreur démarrage système hybride:', error);
+      this.isHybridOrientationActive = false;
+      return false;
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Gestion des mises à jour de mouvement (simulation CMMotionManager) ***
+   */
+  _handleDeviceMotionUpdate(data) {
+    try {
+      // *** AMÉLIORATION: Utiliser les données d'attitude pour l'orientation ***
+      let yaw = 0;
+      let dataAvailable = false;
+      
+      // Priorité 1: Utiliser attitude.yaw si disponible (le plus précis)
+      if (data.orientation !== undefined && typeof data.orientation === 'number') {
+        yaw = data.orientation;
+        dataAvailable = true;
+        console.log(`🎯 [HYBRID-SYSTEM] Utilisation orientation directe: ${yaw.toFixed(1)}°`);
+      }
+      // Priorité 2: Utiliser rotation.alpha (yaw dans DeviceMotion)
+      else if (data.rotation && typeof data.rotation.alpha === 'number') {
+        yaw = data.rotation.alpha * (180 / Math.PI); // alpha = yaw en DeviceMotion
+        dataAvailable = true;
+        console.log(`🎯 [HYBRID-SYSTEM] Utilisation rotation.alpha: ${yaw.toFixed(1)}°`);
+      }
+      // Priorité 3: Utiliser rotation.gamma (moins précis mais disponible)
+      else if (data.rotation && typeof data.rotation.gamma === 'number') {
+        yaw = data.rotation.gamma * (180 / Math.PI);
+        dataAvailable = true;
+        console.log(`🎯 [HYBRID-SYSTEM] Utilisation rotation.gamma: ${yaw.toFixed(1)}°`);
+      }
+      // Priorité 4: Intégration rotationRate si disponible
+      else if (data.rotationRate && typeof data.rotationRate.alpha === 'number') {
+        if (this.lastSmoothedYaw !== null) {
+          const deltaTime = 1.0 / this.motionUpdateFrequency; // 0.1s à 10Hz
+          const deltaYaw = data.rotationRate.alpha * (180 / Math.PI) * deltaTime;
+          yaw = this.lastSmoothedYaw + deltaYaw;
+          dataAvailable = true;
+          console.log(`🎯 [HYBRID-SYSTEM] Utilisation intégration rotationRate: ${yaw.toFixed(1)}°`);
+        }
+      }
+      
+      // Si aucune donnée n'est disponible, conserver la dernière valeur
+      if (!dataAvailable) {
+        yaw = this.lastSmoothedYaw || 0;
+        console.warn('⚠️ [HYBRID-SYSTEM] Aucune donnée d\'orientation valide - conservation dernière valeur');
+        return; // Ne pas traiter si pas de nouvelles données
+      }
+      
+      // Normaliser l'angle
+      while (yaw >= 360) yaw -= 360;
+      while (yaw < 0) yaw += 360;
+      
+      const timestamp = Date.now() / 1000; // Timestamp en secondes
+      
+      // Ajouter au buffer d'orientations
+      this.orientationBuffer.push({
+        timestamp: timestamp,
+        yaw: yaw,
+        raw: data, // Conserver les données brutes pour debug
+        source: dataAvailable ? 'device_motion' : 'fallback'
+      });
+      
+      // Maintenir la taille du buffer
+      if (this.orientationBuffer.length > this.orientationBufferMaxSize) {
+        this.orientationBuffer.shift();
+      }
+      
+      // Mettre à jour l'orientation lissée actuelle
+      const previousSmoothedYaw = this.lastSmoothedYaw;
+      this.lastSmoothedYaw = this._smoothYaw(yaw);
+      
+      // *** NOUVEAU: Émettre les callbacks d'orientation comme l'ancien système ***
+      // Cela évite d'avoir deux sources d'orientation différentes
+      this._updateFilteredYawFromHybrid(this.lastSmoothedYaw);
+      
+      // Log périodique pour debug (toutes les 2 secondes)
+      if (!this.lastMotionLog || (timestamp - this.lastMotionLog) > 2.0) {
+        console.log(`🎯 [HYBRID-SYSTEM] Orientation: ${yaw.toFixed(1)}° → lissée: ${this.lastSmoothedYaw.toFixed(1)}° (Δ: ${(this.lastSmoothedYaw - (previousSmoothedYaw || 0)).toFixed(1)}°)`);
+        this.lastMotionLog = timestamp;
+      }
+      
+    } catch (error) {
+      console.warn('⚠️ [HYBRID-SYSTEM] Erreur traitement orientation:', error);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Mise à jour du filteredYaw depuis le système hybride ***
+   */
+  _updateFilteredYawFromHybrid(hybridYaw) {
+    // Mettre à jour filteredYaw avec les données hybrides
+    this.filteredYaw = hybridYaw;
+    
+    // *** NOUVEAU: Log de diagnostic des conflits ***
+    if (this.orientationSource !== 'hybrid_motion') {
+      console.warn(`🚨 [ORIENTATION-CONFLICT] Source hybride active mais orientationSource = ${this.orientationSource}`);
+    }
+    
+    // Émettre le callback d'orientation comme l'ancien système
+    if (this.onHeading && typeof this.onHeading === 'function') {
+      this.onHeading({
+        yaw: this.filteredYaw * Math.PI / 180, // Convertir en radians
+        accuracy: 5, // Bonne précision pour le système hybride
+        timestamp: Date.now(),
+        rawHeading: hybridYaw,
+        filteredHeading: this.filteredYaw,
+        source: 'hybrid_motion',
+        hybridSystem: true,
+        activeOrientationSource: this.orientationSource // *** NOUVEAU: Debug source ***
+      });
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Lissage du yaw par moyenne mobile ***
+   */
+  _smoothYaw(rawYaw) {
+    // Ajouter l'orientation brute à l'historique
+    this.rawYawHistory.push(rawYaw);
+    
+    // Maintenir la taille de la fenêtre de lissage
+    if (this.rawYawHistory.length > this.yawSmoothingWindowSize) {
+      this.rawYawHistory.shift();
+    }
+    
+    // Calculer la moyenne mobile en gérant le passage 0°/360°
+    if (this.rawYawHistory.length < 2) {
+      return rawYaw;
+    }
+    
+    // Utiliser la méthode trigonométrique pour éviter les problèmes 0°/360°
+    let sumSin = 0;
+    let sumCos = 0;
+    
+    this.rawYawHistory.forEach(yaw => {
+      const rad = yaw * Math.PI / 180;
+      sumSin += Math.sin(rad);
+      sumCos += Math.cos(rad);
+    });
+    
+    const avgYaw = (Math.atan2(sumSin, sumCos) * 180 / Math.PI + 360) % 360;
+    return avgYaw;
+  }
+
+  /**
+   * *** NOUVEAU: Interpolation de l'orientation pour un timestamp donné ***
+   */
+  _getInterpolatedOrientation(targetTimestamp) {
+    if (this.orientationBuffer.length === 0) {
+      return this.lastSmoothedYaw || 0;
+    }
+    
+    // Trouver l'orientation la plus proche du timestamp
+    let closestOrientation = this.orientationBuffer[0];
+    let minTimeDiff = Math.abs(closestOrientation.timestamp - targetTimestamp);
+    
+    for (const orientation of this.orientationBuffer) {
+      const timeDiff = Math.abs(orientation.timestamp - targetTimestamp);
+      if (timeDiff < minTimeDiff) {
+        minTimeDiff = timeDiff;
+        closestOrientation = orientation;
+      }
+    }
+    
+    // Retourner l'orientation lissée la plus proche
+    return this._smoothYaw(closestOrientation.yaw);
   }
 } 

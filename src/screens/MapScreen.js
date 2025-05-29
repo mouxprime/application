@@ -141,29 +141,28 @@ export default function MapScreen() {
     console.log(`🔧 [STEP-CALLBACK-DEBUG] stepConfidenceToUse: ${stepConfidenceToUse} (${(stepConfidenceToUse * 100).toFixed(1)}%)`);
     console.log(`🔧 [STEP-CALLBACK-DEBUG] === FIN ANALYSE CONFIANCE ===`);
     
-    // Mettre à jour la position
+    // Calculer la nouvelle position
     const newX = currentState.pose.x + dx;
     const newY = currentState.pose.y + dy;
     
-    // *** FIX: Utiliser l'orientation actuelle correcte ***
-    const currentTheta = isOrientationActive ? continuousOrientation : currentState.pose.theta;
-    
-    console.log(`📍 [STEP-CALLBACK] Nouvelle position: (${newX.toFixed(2)}, ${newY.toFixed(2)}), orientation: ${(currentTheta * 180 / Math.PI).toFixed(1)}°`);
-    
-    currentActions.updatePose({
-      x: newX,
-      y: newY,
-      theta: currentTheta,
-      confidence: stepConfidenceToUse
-    });
-    
-    // Ajouter le point à la trajectoire
+    // *** FIX: ORDRE CORRIGÉ - Ajouter le point à la trajectoire AVANT de mettre à jour la pose ***
+    // 1) D'abord ajouter le nouveau point à la trajectoire
     currentActions.addTrajectoryPoint({
       x: newX,
       y: newY,
       timestamp,
       confidence: stepConfidenceToUse
     });
+    
+    // 2) Ensuite mettre à jour la pose (qui déclenchera le re-rendu avec la trajectoire déjà mise à jour)
+    currentActions.updatePose({
+      x: newX,
+      y: newY,
+      // *** NE PAS METTRE À JOUR THETA *** - l'orientation est gérée séparément par la boussole
+      confidence: stepConfidenceToUse
+    });
+    
+    console.log(`📍 [STEP-CALLBACK] Nouvelle position: (${newX.toFixed(2)}, ${newY.toFixed(2)}), orientation CONSERVÉE`);
     
     // *** FIX: Calculer la distance totale correctement ***
     const totalDistance = (currentState.distance || 0) + Math.hypot(dx, dy);
@@ -179,7 +178,7 @@ export default function MapScreen() {
     
     console.log(`📊 [STEP-CALLBACK] Métriques mises à jour: ${stepCount} pas, distance: ${totalDistance.toFixed(2)}m, confiance: ${(stepConfidenceToUse * 100).toFixed(0)}%`);
     console.log(`🎯 [STEP-CALLBACK] Trajectoire: ${(currentState.trajectory?.length || 0) + 1} points`);
-  }, [isOrientationActive, continuousOrientation]);
+  }, []);
 
   const handleHeading = useCallback(({ yaw, accuracy, timestamp, source, filteredHeading, rawHeading }) => {
     // *** FIX: Utiliser les refs pour accéder aux valeurs actuelles ***
