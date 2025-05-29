@@ -82,8 +82,34 @@ export default function MapScreen() {
   });
   const [mapControls, setMapControls] = useState({
     centerOnUser: null,
-    viewFullMap: null
+    viewFullMap: null,
+    centerOnPoint: null,
+    setCustomZoom: null,
+    pointsOfInterest: []
   });
+
+  // *** NOUVEAU: Modal de sélection du point de départ ***
+  const [startingPointModal, setStartingPointModal] = useState({
+    visible: false, // Plus visible au démarrage
+    selectedPoint: null,
+    customX: '',
+    customY: '',
+    isLoading: false
+  });
+  
+  // *** NOUVEAU: Point par défaut "Entrée Fifi" ***
+  const getDefaultStartingPoint = () => {
+    return {
+      id: 'entree_fifi',
+      name: 'Entrée Fifi',
+      x: 12364,
+      y: 2612,
+      worldX: (12364 - MAP_TOTAL_WIDTH / 2) / 3.72,
+      worldY: -(2612 - MAP_TOTAL_HEIGHT / 2) / 3.72,
+      color: '#ff6b35',
+      description: 'Point d\'entrée principal'
+    };
+  };
   
   // *** FIX: CALLBACKS DÉFINIS AVANT L'INITIALISATION DU SERVICE ***
   const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, totalSteps, confidence, source, nativeStepLength, averageStepLength, cadence, timeDelta, isFallback }) => {
@@ -213,6 +239,23 @@ export default function MapScreen() {
   const svgWidth = screenWidth;
   const svgHeight = screenHeight - 200; // Espace pour les contrôles et métriques
 
+  // *** NOUVEAU: Calculer le zoom initial pour afficher 530x1000 pixels ***
+  const calculateInitialZoom = () => {
+    const targetViewportWidth = 530;  // pixels sur la carte
+    const targetViewportHeight = 1000; // pixels sur la carte
+    
+    // Zoom nécessaire pour afficher cette zone
+    const zoomX = screenWidth / targetViewportWidth;
+    const zoomY = (screenHeight - 200) / targetViewportHeight;
+    const initialZoom = Math.min(zoomX, zoomY);
+    
+    console.log(`🎯 [MAP-SCREEN] Zoom initial calculé pour ${targetViewportWidth}x${targetViewportHeight}px: ${initialZoom.toFixed(3)}x`);
+    return initialZoom;
+  };
+
+  const [initialZoom] = useState(() => calculateInitialZoom());
+  const [defaultPoint] = useState(() => getDefaultStartingPoint());
+
   useEffect(() => {
     initializeSystem();
     initializeBattery();
@@ -292,15 +335,21 @@ export default function MapScreen() {
       // *** MODIFICATION: Pas d'initialisation spéciale pour HybridMotionService ***
       // Il s'initialise automatiquement lors du start()
       
-      // Position initiale par défaut à (0, 0)
-      const initialPose = { x: 0, y: 0, theta: 0 };
+      // *** NOUVEAU: Position initiale par défaut à "Entrée Fifi" ***
+      const defaultPoint = getDefaultStartingPoint();
+      const initialPose = { 
+        x: defaultPoint.worldX, 
+        y: defaultPoint.worldY, 
+        theta: 0,
+        confidence: 0.8
+      };
       
       actions.resetPose(initialPose);
       actions.resetTrajectory();
       
       setIsMapLoaded(true);
       
-      console.log('✅ Système initialisé avec succès');
+      console.log(`✅ Système initialisé avec succès - Position par défaut: ${defaultPoint.name} (${defaultPoint.worldX.toFixed(2)}, ${defaultPoint.worldY.toFixed(2)})`);
     } catch (error) {
       console.error('❌ Erreur initialisation système:', error);
       Alert.alert('Erreur', 'Impossible d\'initialiser le système de localisation');
@@ -317,9 +366,16 @@ export default function MapScreen() {
       // *** MODIFICATION: Garder l'orientation active même hors tracking ***
       console.log('🧭 [ORIENTATION] Orientation maintenue active hors tracking');
     } else {
-      actions.setTracking(true);
-      
-      await startMotionTracking();
+      // *** NOUVEAU: Afficher le modal de sélection du point de départ avant de démarrer ***
+      // Pré-sélectionner "Entrée Fifi" par défaut
+      const defaultPoint = getDefaultStartingPoint();
+      setStartingPointModal(prev => ({ 
+        ...prev, 
+        visible: true,
+        selectedPoint: defaultPoint,
+        customX: '',
+        customY: ''
+      }));
     }
   };
 
@@ -1293,6 +1349,11 @@ export default function MapScreen() {
       
       console.log('✅ [MAP-SCREEN] Carte persistante initialisée:', stats);
       
+      // *** NOUVEAU: Centrer et zoomer sur "Entrée Fifi" après initialisation ***
+      setTimeout(() => {
+        centerOnDefaultPointWithCustomZoom();
+      }, 1000); // Délai pour s'assurer que la carte est prête
+      
     } catch (error) {
       console.error('❌ [MAP-SCREEN] Erreur initialisation carte persistante:', error);
       // Continuer sans la carte persistante
@@ -1309,13 +1370,31 @@ export default function MapScreen() {
     });
     
     // Sauvegarder les contrôles de la carte
-    if (info.centerOnUser && info.viewFullMap) {
+    if (info.centerOnUser && info.viewFullMap && info.centerOnPoint && info.setCustomZoom) {
       setMapControls({
         centerOnUser: info.centerOnUser,
-        viewFullMap: info.viewFullMap
+        viewFullMap: info.viewFullMap,
+        centerOnPoint: info.centerOnPoint,
+        setCustomZoom: info.setCustomZoom,
+        pointsOfInterest: info.pointsOfInterest || []
       });
     }
   }, []);
+
+  // *** SIMPLIFIÉ: Centrer sur le point par défaut avec zoom personnalisé ***
+  const centerOnDefaultPointWithCustomZoom = useCallback(() => {
+    if (mapControls.centerOnPoint && mapControls.setCustomZoom) {
+      // Centrer sur "Entrée Fifi"
+      mapControls.centerOnPoint(defaultPoint);
+      
+      // Définir le zoom pour afficher 530x1000 pixels
+      mapControls.setCustomZoom(initialZoom);
+      
+      console.log(`🎯 [MAP-SCREEN] Vue centrée sur ${defaultPoint.name} avec zoom ${initialZoom.toFixed(3)}x`);
+    } else {
+      console.warn('⚠️ [MAP-SCREEN] Contrôles de carte non disponibles pour le centrage');
+    }
+  }, [mapControls.centerOnPoint, mapControls.setCustomZoom, defaultPoint, initialZoom]);
 
   // *** NOUVEAU: Voir la carte entière ***
   const viewFullMap = useCallback(() => {
@@ -1323,6 +1402,94 @@ export default function MapScreen() {
       mapControls.viewFullMap();
     }
   }, [mapControls.viewFullMap]);
+
+  // *** NOUVEAU: Confirmer le point de départ ***
+  const confirmStartingPoint = async () => {
+    setStartingPointModal(prev => ({ ...prev, isLoading: true }));
+
+    try {
+      let startX = 0;
+      let startY = 0;
+
+      if (startingPointModal.selectedPoint) {
+        // Point prédéfini sélectionné
+        startX = startingPointModal.selectedPoint.worldX;
+        startY = startingPointModal.selectedPoint.worldY;
+        console.log(`🎯 [STARTING-POINT] Point prédéfini: ${startingPointModal.selectedPoint.name} (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
+      } else if (startingPointModal.customX && startingPointModal.customY) {
+        // Coordonnées personnalisées
+        startX = parseFloat(startingPointModal.customX);
+        startY = parseFloat(startingPointModal.customY);
+        
+        if (isNaN(startX) || isNaN(startY)) {
+          throw new Error('Coordonnées invalides');
+        }
+        
+        console.log(`🎯 [STARTING-POINT] Coordonnées personnalisées: (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
+      } else {
+        // Point par défaut "Entrée Fifi"
+        const defaultPoint = getDefaultStartingPoint();
+        startX = defaultPoint.worldX;
+        startY = defaultPoint.worldY;
+        console.log(`🎯 [STARTING-POINT] Point par défaut: ${defaultPoint.name} (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
+      }
+
+      // Définir la position de départ
+      const initialPose = { 
+        x: startX, 
+        y: startY, 
+        theta: 0,
+        confidence: 0.8
+      };
+      
+      actions.resetPose(initialPose);
+      actions.resetTrajectory();
+      
+      // Centrer la carte sur le point de départ si possible
+      if (mapControls.centerOnPoint && startingPointModal.selectedPoint) {
+        setTimeout(() => {
+          mapControls.centerOnPoint(startingPointModal.selectedPoint);
+        }, 500);
+      }
+
+      setStartingPointModal({ 
+        visible: false, 
+        selectedPoint: null, 
+        customX: '', 
+        customY: '', 
+        isLoading: false 
+      });
+
+      console.log(`✅ [STARTING-POINT] Point de départ défini: (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
+
+      // *** NOUVEAU: Démarrer le tracking après confirmation du point de départ ***
+      actions.setTracking(true);
+      await startMotionTracking();
+
+    } catch (error) {
+      console.error('❌ [STARTING-POINT] Erreur définition point de départ:', error);
+      Alert.alert('Erreur', error.message || 'Impossible de définir le point de départ');
+      setStartingPointModal(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  // *** NOUVEAU: Sélectionner un point prédéfini ***
+  const selectPredefinedPoint = (point) => {
+    setStartingPointModal(prev => ({
+      ...prev,
+      selectedPoint: point,
+      customX: '',
+      customY: ''
+    }));
+  };
+
+  // *** NOUVEAU: Utiliser coordonnées personnalisées ***
+  const useCustomCoordinates = () => {
+    setStartingPointModal(prev => ({
+      ...prev,
+      selectedPoint: null
+    }));
+  };
 
   if (!isMapLoaded) {
     return (
@@ -1344,6 +1511,8 @@ export default function MapScreen() {
         userPosition={state.pose}
         userOrientation={continuousOrientation}
         onViewportChange={handleViewportChange}
+        initialZoom={initialZoom}
+        initialCenterPoint={defaultPoint}
       />
 
       {/* Métriques en temps réel */}
@@ -1397,38 +1566,114 @@ export default function MapScreen() {
         >
           <Ionicons name="stats-chart" size={24} color="#00ff88" />
         </TouchableOpacity>
-
-        {/* *** NOUVEAU: Bouton réinitialiser carte persistante *** */}
-        <TouchableOpacity 
-          style={styles.controlButton} 
-          onPress={() => {
-            Alert.alert(
-              'Réinitialiser la carte',
-              'Êtes-vous sûr de vouloir effacer tous les trajets de la carte persistante ?',
-              [
-                { text: 'Annuler', style: 'cancel' },
-                { 
-                  text: 'Effacer', 
-                  style: 'destructive',
-                  onPress: async () => {
-                    try {
-                      await persistentMapService.resetMap();
-                      setPersistentMapSVG('');
-                      setMapStats(null);
-                      await initializePersistentMap();
-                      Alert.alert('Succès', 'Carte persistante réinitialisée');
-                    } catch (error) {
-                      Alert.alert('Erreur', 'Impossible de réinitialiser la carte');
-                    }
-                  }
-                }
-              ]
-            );
-          }}
-        >
-          <Ionicons name="trash" size={24} color="#ff4444" />
-        </TouchableOpacity>
       </View>
+
+      {/* *** NOUVEAU: Modal de sélection du point de départ *** */}
+      <Modal
+        visible={startingPointModal.visible}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.startingPointModalOverlay}>
+          <View style={styles.startingPointModalContent}>
+            <View style={styles.startingPointHeader}>
+              <Ionicons name="flag" size={32} color="#ffaa00" />
+              <Text style={styles.startingPointTitle}>Choisissez votre point de départ</Text>
+            </View>
+            
+            {/* Points prédéfinis */}
+            <Text style={styles.sectionTitle}>Points prédéfinis :</Text>
+            <View style={styles.predefinedPointsContainer}>
+              {mapControls.pointsOfInterest.map(point => (
+                <TouchableOpacity
+                  key={point.id}
+                  style={[
+                    styles.predefinedPointButton,
+                    startingPointModal.selectedPoint?.id === point.id && styles.selectedPointButton
+                  ]}
+                  onPress={() => selectPredefinedPoint(point)}
+                >
+                  <View style={[styles.pointColorIndicator, { backgroundColor: point.color }]} />
+                  <View style={styles.pointInfo}>
+                    <Text style={styles.pointName}>{point.name}</Text>
+                    <Text style={styles.pointCoordinates}>
+                      ({point.worldX.toFixed(1)}, {point.worldY.toFixed(1)})
+                    </Text>
+                    <Text style={styles.pointDescription}>{point.description}</Text>
+                  </View>
+                  {startingPointModal.selectedPoint?.id === point.id && (
+                    <Ionicons name="checkmark-circle" size={24} color="#00ff88" />
+                  )}
+                </TouchableOpacity>
+              ))}
+            </View>
+            
+            {/* Coordonnées personnalisées */}
+            <Text style={styles.sectionTitle}>Ou définissez vos coordonnées :</Text>
+            <TouchableOpacity
+              style={[
+                styles.customCoordinatesButton,
+                !startingPointModal.selectedPoint && styles.selectedCustomButton
+              ]}
+              onPress={useCustomCoordinates}
+            >
+              <Ionicons name="create" size={20} color="#00ff88" />
+              <Text style={styles.customCoordinatesText}>Coordonnées personnalisées</Text>
+            </TouchableOpacity>
+            
+            {!startingPointModal.selectedPoint && (
+              <View style={styles.customInputsContainer}>
+                <View style={styles.coordinateInputContainer}>
+                  <Text style={styles.coordinateLabel}>X :</Text>
+                  <TextInput
+                    style={styles.coordinateInput}
+                    value={startingPointModal.customX}
+                    onChangeText={(text) => setStartingPointModal(prev => ({ ...prev, customX: text }))}
+                    placeholder="0.0"
+                    placeholderTextColor="#666666"
+                    keyboardType="numeric"
+                  />
+                </View>
+                
+                <View style={styles.coordinateInputContainer}>
+                  <Text style={styles.coordinateLabel}>Y :</Text>
+                  <TextInput
+                    style={styles.coordinateInput}
+                    value={startingPointModal.customY}
+                    onChangeText={(text) => setStartingPointModal(prev => ({ ...prev, customY: text }))}
+                    placeholder="0.0"
+                    placeholderTextColor="#666666"
+                    keyboardType="numeric"
+                  />
+                </View>
+              </View>
+            )}
+            
+            {/* Boutons d'action */}
+            <View style={styles.startingPointActions}>
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={() => setStartingPointModal(prev => ({ ...prev, visible: false }))}
+                disabled={startingPointModal.isLoading}
+              >
+                <Text style={styles.cancelButtonText}>Annuler</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.confirmButton, startingPointModal.isLoading && styles.disabledButton]}
+                onPress={confirmStartingPoint}
+                disabled={startingPointModal.isLoading}
+              >
+                {startingPointModal.isLoading ? (
+                  <ActivityIndicator size="small" color="#000000" />
+                ) : (
+                  <Text style={styles.confirmButtonText}>Confirmer</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Modal de calibration */}
       <Modal
@@ -1667,5 +1912,169 @@ const styles = StyleSheet.create({
     borderColor: '#666666',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  // *** NOUVEAU: Styles pour le modal de sélection du point de départ ***
+  startingPointModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  startingPointModalContent: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 25,
+    margin: 20,
+    maxWidth: 350,
+    width: '90%',
+    borderWidth: 2,
+    borderColor: '#ffaa00',
+    maxHeight: '80%',
+  },
+  startingPointHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    justifyContent: 'center',
+  },
+  startingPointTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginLeft: 10,
+    textAlign: 'center',
+  },
+  sectionTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 15,
+    marginTop: 10,
+  },
+  predefinedPointsContainer: {
+    marginBottom: 20,
+  },
+  predefinedPointButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 170, 0, 0.1)',
+    borderWidth: 2,
+    borderColor: '#ffaa00',
+    borderRadius: 10,
+    padding: 15,
+    marginBottom: 10,
+  },
+  selectedPointButton: {
+    backgroundColor: 'rgba(255, 170, 0, 0.3)',
+    borderColor: '#00ff88',
+  },
+  pointColorIndicator: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    marginRight: 12,
+  },
+  pointInfo: {
+    flex: 1,
+  },
+  pointName: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 2,
+  },
+  pointCoordinates: {
+    color: '#cccccc',
+    fontSize: 12,
+    fontFamily: 'monospace',
+    marginBottom: 2,
+  },
+  pointDescription: {
+    color: '#888888',
+    fontSize: 12,
+    fontStyle: 'italic',
+  },
+  customCoordinatesButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    borderRadius: 10,
+    padding: 15,
+    marginBottom: 15,
+    justifyContent: 'center',
+  },
+  selectedCustomButton: {
+    backgroundColor: 'rgba(0, 255, 136, 0.3)',
+  },
+  customCoordinatesText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginLeft: 8,
+  },
+  customInputsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+    gap: 15,
+  },
+  coordinateInputContainer: {
+    flex: 1,
+  },
+  coordinateLabel: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginBottom: 5,
+  },
+  coordinateInput: {
+    color: '#ffffff',
+    fontSize: 16,
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    borderRadius: 8,
+    padding: 12,
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    textAlign: 'center',
+  },
+  startingPointActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 20,
+    gap: 15,
+  },
+  cancelButton: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 68, 68, 0.2)',
+    borderWidth: 2,
+    borderColor: '#ff4444',
+    borderRadius: 10,
+    padding: 15,
+    alignItems: 'center',
+  },
+  cancelButtonText: {
+    color: '#ff4444',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  confirmButton: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    borderRadius: 10,
+    padding: 15,
+    alignItems: 'center',
+  },
+  confirmButtonText: {
+    color: '#00ff88',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  disabledButton: {
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    borderColor: '#666666',
   },
 }); 
