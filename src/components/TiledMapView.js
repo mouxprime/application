@@ -110,7 +110,7 @@ export default function TiledMapView({
         
         // *** AMÉLIORÉ: Sensibilité adaptée au zoom avec meilleure réactivité ***
         // Formule ajustée pour une meilleure sensibilité aux zooms moyens
-        const sensitivity = Math.max(0.2, Math.min(3.0, 1.2 / zoom));
+        const sensitivity = Math.max(0.4, Math.min(6.0, 2.4 / zoom));
         
         // Calculer la nouvelle position basée sur la position de départ
         const deltaX = gestureState.dx * sensitivity;
@@ -620,7 +620,7 @@ export default function TiledMapView({
         </Text>
         {/* *** NOUVEAU: Afficher la sensibilité du pan *** */}
         <Text style={{ color: '#ff88aa', fontSize: 9, fontFamily: 'monospace' }}>
-          Sensibilité: {Math.max(0.2, Math.min(3.0, 1.2 / zoom)).toFixed(2)}x
+          Sensibilité: {Math.max(0.4, Math.min(6.0, 2.4 / zoom)).toFixed(2)}x
         </Text>
       </View>
 

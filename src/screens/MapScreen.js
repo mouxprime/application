@@ -166,7 +166,7 @@ export default function MapScreen() {
     });
     
     // *** FIX: Calculer la distance totale correctement ***
-    const totalDistance = (currentState.distance || 0) + stepLength;
+    const totalDistance = (currentState.distance || 0) + Math.hypot(dx, dy);
     
     // *** FIX: Mettre à jour les métriques PDR avec le bon stepCount ***
     currentActions.updatePDRMetrics({

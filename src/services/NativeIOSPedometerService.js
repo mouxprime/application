@@ -163,12 +163,12 @@ class NativeIOSPedometerService {
 
         // Appeler le callback avec les données
         this.stepCallback({
-          stepCount: currentSteps,
+          stepCount: newSteps,  // Nombre de nouveaux pas dans cet événement
           stepLength: stepLength,
           dx: dx,
           dy: dy,
           timestamp: Date.now(),
-          totalSteps: currentSteps,
+          totalSteps: currentSteps,  // Total cumulé
           confidence: 0.95, // CMPedometer est très fiable
           source: 'ios_cmpedometer',
           nativeStepLength: stepLength,

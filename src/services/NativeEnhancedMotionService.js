@@ -268,11 +268,11 @@ export default class NativeEnhancedMotionService {
       // Mettre à jour les métriques
       this.stepCount = totalSteps;
       this.metrics.totalSteps = totalSteps;
-      this.metrics.totalDistance += (dx * dx + dy * dy) ** 0.5;
+      this.metrics.totalDistance += Math.hypot(dx, dy);  // dx et dy représentent la distance totale pour tous les nouveaux pas
       this.metrics.lastUpdate = timestamp;
       this.metrics.averageStepLength = nativeStepLength || stepLength;
       
-      console.log(`🍎 [NATIVE-ENHANCED] Pas traité: ${stepCount} (total: ${totalSteps})`);
+      console.log(`🍎 [NATIVE-ENHANCED] Pas traité: ${stepCount} nouveaux pas (total: ${totalSteps})`);
       console.log(`🔧 [STEP-LENGTH-TRACE] Longueur de pas native: ${stepLength.toFixed(3)}m`);
       console.log(`🔧 [STEP-LENGTH-TRACE] Confiance: ${(confidence * 100).toFixed(1)}%`);
       

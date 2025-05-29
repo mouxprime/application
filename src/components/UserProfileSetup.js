@@ -233,24 +233,10 @@ export default function UserProfileSetup({ visible, onClose }) {
 
           {/* Conseils */}
           <View style={styles.tipsSection}>
-            <Text style={styles.sectionTitle}>Conseils</Text>
+            <Text style={styles.sectionTitle}>Informations</Text>
             
             <View style={styles.tipItem}>
-              <Ionicons name="checkmark-circle" size={16} color="#00ff88" />
-              <Text style={styles.tipText}>
-                Mesurez-vous pieds nus le matin pour plus de précision
-              </Text>
-            </View>
-            
-            <View style={styles.tipItem}>
-              <Ionicons name="checkmark-circle" size={16} color="#00ff88" />
-              <Text style={styles.tipText}>
-                Pesez-vous dans les mêmes conditions (même heure, même tenue)
-              </Text>
-            </View>
-            
-            <View style={styles.tipItem}>
-              <Ionicons name="checkmark-circle" size={16} color="#00ff88" />
+              <Ionicons name="lock-closed" size={16} color="#00ff88" />
               <Text style={styles.tipText}>
                 Ces données restent privées et stockées localement
               </Text>
