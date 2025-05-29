@@ -33,13 +33,13 @@ export default function TiledMapView({
   const TILE_SIZE = 512;
   
   // États du viewport
-  const [zoom, setZoom] = useState(initialZoom);
-  const [panX, setPanX] = useState(0);
-  const [panY, setPanY] = useState(0);
+  const [zoom, setZoom] = useState(4.03);
+  const [panX, setPanX] = useState(-49590);
+  const [panY, setPanY] = useState(-10231);
   
   // *** NOUVEAU: Refs pour maintenir les valeurs actuelles du pan ***
-  const panXRef = useRef(0);
-  const panYRef = useRef(0);
+  const panXRef = useRef(-49590);
+  const panYRef = useRef(-10231);
   
   // *** NOUVEAU: Synchroniser les refs avec les états ***
   useEffect(() => {
@@ -80,15 +80,6 @@ export default function TiledMapView({
     console.log(`🔍 [TILED-MAP] Zoom défini: ${clampedZoom.toFixed(3)}x`);
   }, []);
 
-  // *** NOUVEAU: Centrage initial sur le point spécifié ***
-  useEffect(() => {
-    if (initialCenterPoint) {
-      setTimeout(() => {
-        centerOnPoint(initialCenterPoint);
-      }, 500);
-    }
-  }, [initialCenterPoint]);
-
   /**
    * Configuration du PanResponder pour la navigation tactile - CORRIGÉ
    */
@@ -117,9 +108,9 @@ export default function TiledMapView({
           return;
         }
         
-        // *** NOUVEAU: Sensibilité adaptée au zoom ***
-        // Plus on zoome, moins le pan est sensible
-        const sensitivity = Math.max(0.1, Math.min(2.0, 1.0 / zoom));
+        // *** AMÉLIORÉ: Sensibilité adaptée au zoom avec meilleure réactivité ***
+        // Formule ajustée pour une meilleure sensibilité aux zooms moyens
+        const sensitivity = Math.max(0.2, Math.min(3.0, 1.2 / zoom));
         
         // Calculer la nouvelle position basée sur la position de départ
         const deltaX = gestureState.dx * sensitivity;
@@ -296,7 +287,6 @@ export default function TiledMapView({
   const renderPointsOfInterest = useCallback(() => {
     return pointsOfInterest.map(point => {
       const radius = Math.max(6, 12 / zoom);
-      const textSize = Math.max(10, 16 / zoom);
       
       return (
         <G key={point.id}>
@@ -327,36 +317,6 @@ export default function TiledMapView({
             r={Math.max(2, 4 / zoom)}
             fill="#ffffff"
           />
-          
-          {/* Nom du point (visible si zoom suffisant) */}
-          {zoom > 0.3 && (
-            <SvgText
-              x={point.x}
-              y={point.y - radius - 8}
-              fontSize={textSize}
-              fill="#ffffff"
-              textAnchor="middle"
-              fontWeight="bold"
-              stroke="#000000"
-              strokeWidth={Math.max(0.5, 1 / zoom)}
-            >
-              {point.name}
-            </SvgText>
-          )}
-          
-          {/* Coordonnées (visible si très zoomé) */}
-          {zoom > 2 && (
-            <SvgText
-              x={point.x}
-              y={point.y + radius + 15}
-              fontSize={Math.max(8, 12 / zoom)}
-              fill="#cccccc"
-              textAnchor="middle"
-              fontFamily="monospace"
-            >
-              ({point.worldX.toFixed(1)}, {point.worldY.toFixed(1)})
-            </SvgText>
-          )}
         </G>
       );
     });
@@ -493,25 +453,28 @@ export default function TiledMapView({
   }, [zoom]);
 
   /**
-   * Centrer sur l'utilisateur
+   * Centrer sur l'utilisateur avec zoom fixe 4.03x
    */
   const centerOnUser = useCallback(() => {
     if (!userPosition) return;
     
+    // *** MODIFIÉ: Forcer le zoom à 4.03x ***
+    const targetZoom = 4.03;
     const svgPos = worldToSVG(userPosition.x, userPosition.y);
     
-    // Calculer le pan nécessaire pour centrer l'utilisateur
-    const targetPanX = (screenWidth / 2 - svgPos.x) * zoom;
-    const targetPanY = ((screenHeight - 200) / 2 - svgPos.y) * zoom;
+    // Calculer le pan nécessaire pour centrer l'utilisateur avec le zoom 4.03x
+    const targetPanX = (screenWidth / 2 - svgPos.x) * targetZoom;
+    const targetPanY = ((screenHeight - 200) / 2 - svgPos.y) * targetZoom;
     
-    // *** CORRIGÉ: Mettre à jour les refs ET les états ***
+    // *** NOUVEAU: Mettre à jour le zoom ET le pan ***
+    setZoom(targetZoom);
     panXRef.current = targetPanX;
     panYRef.current = targetPanY;
     setPanX(targetPanX);
     setPanY(targetPanY);
     
-    console.log(`🎯 [TILED-MAP] Centré sur utilisateur: (${userPosition.x.toFixed(2)}, ${userPosition.y.toFixed(2)}), zoom=${zoom.toFixed(3)}`);
-  }, [userPosition, worldToSVG, zoom]);
+    console.log(`🎯 [TILED-MAP] Centré sur utilisateur: (${userPosition.x.toFixed(2)}, ${userPosition.y.toFixed(2)}), zoom fixe: ${targetZoom}x`);
+  }, [userPosition, worldToSVG]);
 
   /**
    * Centrer sur un point d'intérêt
@@ -539,6 +502,12 @@ export default function TiledMapView({
     const zoomY = (screenHeight - 200) / MAP_TOTAL_HEIGHT;
     const fullMapZoom = Math.min(zoomX, zoomY) * 0.9; // 90% pour avoir des marges
     
+    // *** CORRIGÉ: Éviter les appels répétés si déjà au bon zoom ***
+    if (Math.abs(zoom - fullMapZoom) < 0.001 && Math.abs(panXRef.current) < 10 && Math.abs(panYRef.current) < 10) {
+      console.log(`🗺️ [TILED-MAP] Déjà en vue carte entière`);
+      return;
+    }
+    
     setZoom(fullMapZoom);
     
     // *** CORRIGÉ: Remettre le pan à zéro avec les refs ***
@@ -555,7 +524,7 @@ export default function TiledMapView({
     calculateVisibleTiles();
   }, [calculateVisibleTiles]);
 
-  // Exposer les fonctions de contrôle
+  // Exposer les fonctions de contrôle - OPTIMISÉ pour éviter les boucles
   useEffect(() => {
     if (onViewportChange) {
       onViewportChange({
@@ -570,7 +539,7 @@ export default function TiledMapView({
         visibleTiles: visibleTiles.length
       });
     }
-  }, [zoom, panX, panY, centerOnUser, viewFullMap, centerOnPoint, setCustomZoom, pointsOfInterest, visibleTiles.length, onViewportChange]);
+  }, [zoom, panX, panY, visibleTiles.length]); // *** CORRIGÉ: Retirer les fonctions des dépendances ***
 
   return (
     <View style={{ flex: 1 }}>
@@ -651,7 +620,7 @@ export default function TiledMapView({
         </Text>
         {/* *** NOUVEAU: Afficher la sensibilité du pan *** */}
         <Text style={{ color: '#ff88aa', fontSize: 9, fontFamily: 'monospace' }}>
-          Sensibilité: {Math.max(0.1, Math.min(2.0, 1.0 / zoom)).toFixed(2)}x
+          Sensibilité: {Math.max(0.2, Math.min(3.0, 1.2 / zoom)).toFixed(2)}x
         </Text>
       </View>
 

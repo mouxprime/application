@@ -9,6 +9,8 @@ import {
   Modal,
   ActivityIndicator,
   TextInput,
+  Keyboard,
+  TouchableWithoutFeedback,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, LinearGradient, Stop } from 'react-native-svg';
@@ -50,6 +52,9 @@ export default function MapScreen() {
   // *** FIX: Utiliser des refs pour éviter les problèmes de closure ***
   const stateRef = useRef(state);
   const actionsRef = useRef(actions);
+  
+  // *** NOUVEAU: Ref pour le champ Y du modal ***
+  const yInputRef = useRef(null);
   
   // Mettre à jour les refs quand state/actions changent
   useEffect(() => {
@@ -1574,105 +1579,133 @@ export default function MapScreen() {
         transparent={true}
         animationType="slide"
       >
-        <View style={styles.startingPointModalOverlay}>
-          <View style={styles.startingPointModalContent}>
-            <View style={styles.startingPointHeader}>
-              <Ionicons name="flag" size={32} color="#ffaa00" />
-              <Text style={styles.startingPointTitle}>Choisissez votre point de départ</Text>
-            </View>
-            
-            {/* Points prédéfinis */}
-            <Text style={styles.sectionTitle}>Points prédéfinis :</Text>
-            <View style={styles.predefinedPointsContainer}>
-              {mapControls.pointsOfInterest.map(point => (
-                <TouchableOpacity
-                  key={point.id}
-                  style={[
-                    styles.predefinedPointButton,
-                    startingPointModal.selectedPoint?.id === point.id && styles.selectedPointButton
-                  ]}
-                  onPress={() => selectPredefinedPoint(point)}
-                >
-                  <View style={[styles.pointColorIndicator, { backgroundColor: point.color }]} />
-                  <View style={styles.pointInfo}>
-                    <Text style={styles.pointName}>{point.name}</Text>
-                    <Text style={styles.pointCoordinates}>
-                      ({point.worldX.toFixed(1)}, {point.worldY.toFixed(1)})
-                    </Text>
-                    <Text style={styles.pointDescription}>{point.description}</Text>
-                  </View>
-                  {startingPointModal.selectedPoint?.id === point.id && (
-                    <Ionicons name="checkmark-circle" size={24} color="#00ff88" />
-                  )}
-                </TouchableOpacity>
-              ))}
-            </View>
-            
-            {/* Coordonnées personnalisées */}
-            <Text style={styles.sectionTitle}>Ou définissez vos coordonnées :</Text>
-            <TouchableOpacity
-              style={[
-                styles.customCoordinatesButton,
-                !startingPointModal.selectedPoint && styles.selectedCustomButton
-              ]}
-              onPress={useCustomCoordinates}
-            >
-              <Ionicons name="create" size={20} color="#00ff88" />
-              <Text style={styles.customCoordinatesText}>Coordonnées personnalisées</Text>
-            </TouchableOpacity>
-            
-            {!startingPointModal.selectedPoint && (
-              <View style={styles.customInputsContainer}>
-                <View style={styles.coordinateInputContainer}>
-                  <Text style={styles.coordinateLabel}>X :</Text>
-                  <TextInput
-                    style={styles.coordinateInput}
-                    value={startingPointModal.customX}
-                    onChangeText={(text) => setStartingPointModal(prev => ({ ...prev, customX: text }))}
-                    placeholder="0.0"
-                    placeholderTextColor="#666666"
-                    keyboardType="numeric"
-                  />
+        <TouchableWithoutFeedback onPress={() => Keyboard.dismiss()}>
+          <View style={styles.startingPointModalOverlay}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <View style={styles.startingPointModalContent}>
+                <View style={styles.startingPointHeader}>
+                  <Ionicons name="flag" size={32} color="#ffaa00" />
+                  <Text style={styles.startingPointTitle}>Choisissez votre point de départ</Text>
                 </View>
                 
-                <View style={styles.coordinateInputContainer}>
-                  <Text style={styles.coordinateLabel}>Y :</Text>
-                  <TextInput
-                    style={styles.coordinateInput}
-                    value={startingPointModal.customY}
-                    onChangeText={(text) => setStartingPointModal(prev => ({ ...prev, customY: text }))}
-                    placeholder="0.0"
-                    placeholderTextColor="#666666"
-                    keyboardType="numeric"
-                  />
+                {/* Points prédéfinis */}
+                <Text style={styles.sectionTitle}>Points prédéfinis :</Text>
+                <View style={styles.predefinedPointsContainer}>
+                  {mapControls.pointsOfInterest.map(point => (
+                    <TouchableOpacity
+                      key={point.id}
+                      style={[
+                        styles.predefinedPointButton,
+                        startingPointModal.selectedPoint?.id === point.id && styles.selectedPointButton
+                      ]}
+                      onPress={() => selectPredefinedPoint(point)}
+                    >
+                      <View style={[styles.pointColorIndicator, { backgroundColor: point.color }]} />
+                      <View style={styles.pointInfo}>
+                        <Text style={styles.pointName}>{point.name}</Text>
+                        <Text style={styles.pointCoordinates}>
+                          ({point.worldX.toFixed(1)}, {point.worldY.toFixed(1)})
+                        </Text>
+                        <Text style={styles.pointDescription}>{point.description}</Text>
+                      </View>
+                      {startingPointModal.selectedPoint?.id === point.id && (
+                        <Ionicons name="checkmark-circle" size={24} color="#00ff88" />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                
+                {/* Coordonnées personnalisées */}
+                <Text style={styles.sectionTitle}>Ou définissez vos coordonnées :</Text>
+                <TouchableOpacity
+                  style={[
+                    styles.customCoordinatesButton,
+                    !startingPointModal.selectedPoint && styles.selectedCustomButton
+                  ]}
+                  onPress={useCustomCoordinates}
+                >
+                  <Ionicons name="create" size={20} color="#00ff88" />
+                  <Text style={styles.customCoordinatesText}>Coordonnées personnalisées</Text>
+                </TouchableOpacity>
+                
+                {!startingPointModal.selectedPoint && (
+                  <View style={styles.customInputsContainer}>
+                    <View style={styles.coordinateInputContainer}>
+                      <Text style={styles.coordinateLabel}>X :</Text>
+                      <TextInput
+                        style={styles.coordinateInput}
+                        value={startingPointModal.customX}
+                        onChangeText={(text) => setStartingPointModal(prev => ({ ...prev, customX: text }))}
+                        placeholder="0.0"
+                        placeholderTextColor="#666666"
+                        keyboardType="numeric"
+                        returnKeyType="next"
+                        blurOnSubmit={false}
+                        onSubmitEditing={() => {
+                          // Focus sur le champ Y
+                          if (yInputRef.current) {
+                            yInputRef.current.focus();
+                          }
+                        }}
+                      />
+                    </View>
+                    
+                    <View style={styles.coordinateInputContainer}>
+                      <Text style={styles.coordinateLabel}>Y :</Text>
+                      <TextInput
+                        ref={yInputRef}
+                        style={styles.coordinateInput}
+                        value={startingPointModal.customY}
+                        onChangeText={(text) => setStartingPointModal(prev => ({ ...prev, customY: text }))}
+                        placeholder="0.0"
+                        placeholderTextColor="#666666"
+                        keyboardType="numeric"
+                        returnKeyType="done"
+                        onSubmitEditing={() => {
+                          Keyboard.dismiss();
+                        }}
+                      />
+                    </View>
+                  </View>
+                )}
+                
+                {/* *** NOUVEAU: Bouton pour fermer le clavier *** */}
+                {!startingPointModal.selectedPoint && (
+                  <TouchableOpacity
+                    style={styles.dismissKeyboardButton}
+                    onPress={() => Keyboard.dismiss()}
+                  >
+                    <Ionicons name="keyboard" size={16} color="#00ff88" />
+                    <Text style={styles.dismissKeyboardText}>Fermer le clavier</Text>
+                  </TouchableOpacity>
+                )}
+                
+                {/* Boutons d'action */}
+                <View style={styles.startingPointActions}>
+                  <TouchableOpacity
+                    style={styles.cancelButton}
+                    onPress={() => setStartingPointModal(prev => ({ ...prev, visible: false }))}
+                    disabled={startingPointModal.isLoading}
+                  >
+                    <Text style={styles.cancelButtonText}>Annuler</Text>
+                  </TouchableOpacity>
+                  
+                  <TouchableOpacity
+                    style={[styles.confirmButton, startingPointModal.isLoading && styles.disabledButton]}
+                    onPress={confirmStartingPoint}
+                    disabled={startingPointModal.isLoading}
+                  >
+                    {startingPointModal.isLoading ? (
+                      <ActivityIndicator size="small" color="#000000" />
+                    ) : (
+                      <Text style={styles.confirmButtonText}>Confirmer</Text>
+                    )}
+                  </TouchableOpacity>
                 </View>
               </View>
-            )}
-            
-            {/* Boutons d'action */}
-            <View style={styles.startingPointActions}>
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => setStartingPointModal(prev => ({ ...prev, visible: false }))}
-                disabled={startingPointModal.isLoading}
-              >
-                <Text style={styles.cancelButtonText}>Annuler</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity
-                style={[styles.confirmButton, startingPointModal.isLoading && styles.disabledButton]}
-                onPress={confirmStartingPoint}
-                disabled={startingPointModal.isLoading}
-              >
-                {startingPointModal.isLoading ? (
-                  <ActivityIndicator size="small" color="#000000" />
-                ) : (
-                  <Text style={styles.confirmButtonText}>Confirmer</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+            </TouchableWithoutFeedback>
           </View>
-        </View>
+        </TouchableWithoutFeedback>
       </Modal>
 
       {/* Modal de calibration */}
@@ -2076,5 +2109,23 @@ const styles = StyleSheet.create({
   disabledButton: {
     backgroundColor: 'rgba(0, 255, 136, 0.1)',
     borderColor: '#666666',
+  },
+  dismissKeyboardButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    borderWidth: 1,
+    borderColor: '#00ff88',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  dismissKeyboardText: {
+    color: '#00ff88',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginLeft: 5,
   },
 }); 
