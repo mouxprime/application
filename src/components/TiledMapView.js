@@ -83,9 +83,62 @@ export default function TiledMapView({
     }
   ]);
   
-  // Refs pour la navigation tactile - SIMPLIFIÉ
+  // Refs pour la navigation tactile - AMÉLIORÉ avec zoom
   const panStartRef = useRef({ x: 0, y: 0 });
   const isDraggingRef = useRef(false);
+  
+  // *** NOUVEAU: Refs pour le zoom par pincement - CORRIGÉ ***
+  const isPinchingRef = useRef(false);
+  const initialPinchDistanceRef = useRef(0);
+  const baseZoomRef = useRef(1); // Zoom au début du geste (ne change pas pendant le geste)
+  const basePanRef = useRef({ x: 0, y: 0 }); // Pan au début du geste
+  const pinchCenterRef = useRef({ x: 0, y: 0 });
+
+  // *** NOUVEAU: Fonction pour calculer la distance entre deux points ***
+  const getDistance = (touches) => {
+    if (touches.length < 2) return 0;
+    
+    const dx = touches[0].pageX - touches[1].pageX;
+    const dy = touches[0].pageY - touches[1].pageY;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+
+  // *** NOUVEAU: Fonction pour calculer le centre entre deux points ***
+  const getCenter = (touches) => {
+    if (touches.length < 2) return { x: 0, y: 0 };
+    
+    return {
+      x: (touches[0].pageX + touches[1].pageX) / 2,
+      y: (touches[0].pageY + touches[1].pageY) / 2
+    };
+  };
+
+  // *** NOUVEAU: Fonction pour mettre à jour zoom et pan avec point focal ***
+  const updateZoomAndPan = useCallback((newZoom, focalX, focalY) => {
+    // Contraindre le zoom dans les limites
+    const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+    
+    // Convertir le point focal en coordonnées de la carte au zoom de base
+    const mapX = (focalX - basePanRef.current.x) / baseZoomRef.current;
+    const mapY = (focalY - basePanRef.current.y) / baseZoomRef.current;
+    
+    // Calculer le nouveau pan pour maintenir ce point sous le focal
+    const newPanX = -(mapX * clampedZoom - focalX);
+    const newPanY = -(mapY * clampedZoom - focalY);
+    
+    // Contraindre le pan
+    const constrained = constrainPan(newPanX, newPanY, clampedZoom);
+    
+    // Appliquer les changements
+    setZoom(clampedZoom);
+    zoomRef.current = clampedZoom;
+    panXRef.current = constrained.x;
+    panYRef.current = constrained.y;
+    setPanX(constrained.x);
+    setPanY(constrained.y);
+    
+    return clampedZoom;
+  }, [constrainPan]);
 
   // *** NOUVEAU: Fonction pour définir le zoom depuis l'extérieur ***
   const setCustomZoom = useCallback((newZoom) => {
@@ -150,7 +203,7 @@ export default function TiledMapView({
   }, []);
 
   /**
-   * Configuration du PanResponder pour la navigation tactile - CORRIGÉ
+   * Configuration du PanResponder pour la navigation tactile ET le zoom - AMÉLIORÉ
    */
   const panResponder = useRef(
     PanResponder.create({
@@ -159,83 +212,133 @@ export default function TiledMapView({
         return true;
       },
       onMoveShouldSetPanResponder: (evt, gestureState) => {
-        const shouldMove = Math.abs(gestureState.dx) > 2 || Math.abs(gestureState.dy) > 2;
-        return shouldMove;
+        // Détecter mouvement ou pincement
+        const isMovement = Math.abs(gestureState.dx) > 2 || Math.abs(gestureState.dy) > 2;
+        const isPinch = evt.nativeEvent.touches.length === 2;
+        return isMovement || isPinch;
       },
       
       // Démarrage du geste
       onPanResponderGrant: (evt, gestureState) => {
-        // *** CORRIGÉ: Utiliser les refs pour obtenir les valeurs actuelles ***
-        panStartRef.current = { x: panXRef.current, y: panYRef.current };
-        isDraggingRef.current = true;
-        console.log(`🖐️ [TILED-MAP] GRANT - Début navigation: panStart=(${panStartRef.current.x.toFixed(1)}, ${panStartRef.current.y.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}`);
+        const touches = evt.nativeEvent.touches;
+        
+        if (touches.length === 2) {
+          // *** DÉBUT DU PINCH-TO-ZOOM ***
+          isPinchingRef.current = true;
+          isDraggingRef.current = false;
+          
+          initialPinchDistanceRef.current = getDistance(touches);
+          baseZoomRef.current = zoomRef.current;
+          basePanRef.current = { x: panXRef.current, y: panYRef.current };
+          pinchCenterRef.current = getCenter(touches);
+          
+          console.log(`🤏 [PINCH] Début pinch-to-zoom: distance=${initialPinchDistanceRef.current.toFixed(1)}, zoom=${baseZoomRef.current.toFixed(3)}, centre=(${pinchCenterRef.current.x.toFixed(1)}, ${pinchCenterRef.current.y.toFixed(1)})`);
+        } else {
+          // *** DÉBUT DU PAN CLASSIQUE ***
+          panStartRef.current = { x: panXRef.current, y: panYRef.current };
+          isDraggingRef.current = true;
+          isPinchingRef.current = false;
+          
+          console.log(`🖐️ [PAN] Début navigation: panStart=(${panStartRef.current.x.toFixed(1)}, ${panStartRef.current.y.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}`);
+        }
       },
       
       // Mouvement du geste
       onPanResponderMove: (evt, gestureState) => {
-        if (!isDraggingRef.current) {
-          return;
-        }
+        const touches = evt.nativeEvent.touches;
         
-        // *** CORRIGÉ: Utiliser zoomRef.current pour la sensibilité ***
-        const currentZoom = zoomRef.current;
-        
-        // *** NOUVEAU: Sensibilité par paliers adaptés à chaque niveau de zoom ***
-        let sensitivity;
-        
-        if (currentZoom <= 0.5) {
-          // Zoom très éloigné : sensibilité très réduite
-          sensitivity = 0.3;
-        } else if (currentZoom <= 1.0) {
-          // Zoom éloigné : sensibilité réduite  
-          sensitivity = 0.5;
-        } else if (currentZoom <= 1.5) {
-          // Zoom moyen-éloigné : sensibilité modérée
-          sensitivity = 0.8;
-        } else if (currentZoom <= 2.5) {
-          // Zoom moyen : sensibilité normale (référence parfaite)
-          sensitivity = 1.1;
-        } else if (currentZoom <= 4.0) {
-          // Zoom rapproché : sensibilité réduite pour précision
-          sensitivity = 0.8;
-        } else if (currentZoom <= 6.0) {
-          // Zoom très rapproché : sensibilité fine
-          sensitivity = 0.6;
-        } else {
-          // Zoom maximum : sensibilité très fine
-          sensitivity = 0.4;
-        }
-        
-        console.log(`🎯 [SENSITIVITY] Zoom: ${currentZoom.toFixed(3)}x → Sensibilité: ${sensitivity.toFixed(1)} (palier optimisé)`);
-        
-        // Calculer la nouvelle position basée sur la position de départ
-        const deltaX = gestureState.dx * sensitivity;
-        const deltaY = gestureState.dy * sensitivity;
-        
-        const newPanX = panStartRef.current.x + deltaX;
-        const newPanY = panStartRef.current.y + deltaY;
-        
-        // *** CORRIGÉ: Utiliser zoomRef.current pour les contraintes ***
-        const constrained = constrainPan(newPanX, newPanY, currentZoom);
-        const clampedPanX = constrained.x;
-        const clampedPanY = constrained.y;
-        
-        // *** CORRIGÉ: Mettre à jour les refs ET les états ***
-        panXRef.current = clampedPanX;
-        panYRef.current = clampedPanY;
-        setPanX(clampedPanX);
-        setPanY(clampedPanY);
-        
-        // Log pour debug (moins fréquent)
-        if (Math.abs(gestureState.dx) % 20 < 5) { // Log tous les ~20px
-          console.log(`🖐️ [TILED-MAP] MOVE - pan: (${clampedPanX.toFixed(1)}, ${clampedPanY.toFixed(1)}), sensibilité: ${sensitivity.toFixed(2)}, zoom: ${currentZoom.toFixed(3)}, limite: ±${(MAP_TOTAL_WIDTH * currentZoom).toFixed(0)}`);
+        if (touches.length === 2 && isPinchingRef.current) {
+          // *** GESTION DU PINCH-TO-ZOOM CONTINU ***
+          const currentDistance = getDistance(touches);
+          const currentCenter = getCenter(touches);
+          
+          if (initialPinchDistanceRef.current > 0 && currentDistance > 0) {
+            // *** ZOOM CONTINU: Calculer le scale actuel ***
+            const rawScale = currentDistance / initialPinchDistanceRef.current;
+            
+            // *** SENSIBILITÉ RÉDUITE ***
+            const ZOOM_SENSITIVITY = 0.6;
+            const scaleDelta = rawScale - 1.0;
+            const smoothedScale = 1.0 + (scaleDelta * ZOOM_SENSITIVITY);
+            
+            // *** NOUVEAU ZOOM BASÉ SUR LE ZOOM DE DÉPART ***
+            const newZoom = baseZoomRef.current * smoothedScale;
+            
+            // *** POINT FOCAL: Utiliser le centre INITIAL du pincement ***
+            const focalX = pinchCenterRef.current.x;
+            const focalY = pinchCenterRef.current.y;
+            
+            // *** MISE À JOUR CONTINUE AVEC POINT FOCAL ***
+            updateZoomAndPan(newZoom, focalX, focalY);
+            
+            // Log pour debug (moins fréquent)
+            if (Math.abs(currentDistance - initialPinchDistanceRef.current) % 50 < 10) {
+              console.log(`🤏 [PINCH-CONTINU] Zoom: ${newZoom.toFixed(3)}x, scale: ${rawScale.toFixed(3)} → ${smoothedScale.toFixed(3)}, focal: (${focalX.toFixed(1)}, ${focalY.toFixed(1)})`);
+            }
+          }
+        } else if (touches.length === 1 && isDraggingRef.current && !isPinchingRef.current) {
+          // *** GESTION DU PAN CLASSIQUE ***
+          const currentZoom = zoomRef.current;
+          
+          // Sensibilité par paliers adaptés à chaque niveau de zoom
+          let sensitivity;
+          
+          if (currentZoom <= 0.5) {
+            sensitivity = 0.3;
+          } else if (currentZoom <= 1.0) {
+            sensitivity = 0.5;
+          } else if (currentZoom <= 1.5) {
+            sensitivity = 0.8;
+          } else if (currentZoom <= 2.5) {
+            sensitivity = 1.1;
+          } else if (currentZoom <= 4.0) {
+            sensitivity = 0.8;
+          } else if (currentZoom <= 6.0) {
+            sensitivity = 0.6;
+          } else {
+            sensitivity = 0.4;
+          }
+          
+          // Calculer la nouvelle position basée sur la position de départ
+          const deltaX = gestureState.dx * sensitivity;
+          const deltaY = gestureState.dy * sensitivity;
+          
+          const newPanX = panStartRef.current.x + deltaX;
+          const newPanY = panStartRef.current.y + deltaY;
+          
+          // Contraindre le pan
+          const constrained = constrainPan(newPanX, newPanY, currentZoom);
+          const clampedPanX = constrained.x;
+          const clampedPanY = constrained.y;
+          
+          // Mettre à jour les refs ET les états
+          panXRef.current = clampedPanX;
+          panYRef.current = clampedPanY;
+          setPanX(clampedPanX);
+          setPanY(clampedPanY);
+          
+          // Log pour debug (moins fréquent)
+          if (Math.abs(gestureState.dx) % 20 < 5) {
+            console.log(`🖐️ [PAN] pan: (${clampedPanX.toFixed(1)}, ${clampedPanY.toFixed(1)}), sensibilité: ${sensitivity.toFixed(2)}, zoom: ${currentZoom.toFixed(3)}`);
+          }
         }
       },
       
       // Fin du geste
       onPanResponderRelease: (evt, gestureState) => {
+        if (isPinchingRef.current) {
+          // *** FIN DU PINCH: Figer le zoom de base ***
+          baseZoomRef.current = zoomRef.current;
+          basePanRef.current = { x: panXRef.current, y: panYRef.current };
+          console.log(`🤏 [PINCH] Fin pinch-to-zoom: zoom figé=${zoomRef.current.toFixed(3)}x`);
+        } else if (isDraggingRef.current) {
+          console.log(`🖐️ [PAN] Fin navigation: pan final=(${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}`);
+        }
+        
+        // Réinitialiser les états
         isDraggingRef.current = false;
-        console.log(`🖐️ [TILED-MAP] RELEASE - Navigation terminée: pan final=(${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}, sensibilité=${(1.0 / zoomRef.current).toFixed(3)}`);
+        isPinchingRef.current = false;
+        initialPinchDistanceRef.current = 0;
       },
       
       // Gestion des interruptions
@@ -244,8 +347,16 @@ export default function TiledMapView({
       },
       
       onPanResponderTerminate: () => {
+        // *** FIN FORCÉE: Figer l'état actuel ***
+        if (isPinchingRef.current) {
+          baseZoomRef.current = zoomRef.current;
+          basePanRef.current = { x: panXRef.current, y: panYRef.current };
+        }
+        
         isDraggingRef.current = false;
-        console.log(`🖐️ [TILED-MAP] Gesture terminated`);
+        isPinchingRef.current = false;
+        initialPinchDistanceRef.current = 0;
+        console.log(`🖐️ [GESTURE] Geste interrompu`);
       },
     })
   ).current;
@@ -451,6 +562,13 @@ export default function TiledMapView({
     const svgPos = worldToSVG(userPosition.x, userPosition.y);
     const radius = Math.max(4, 8 / zoom);
     const headingLength = Math.max(15, 30 / zoom);
+    
+    // *** DEBUG: Log pour vérifier l'orientation ***
+    if (userOrientation !== undefined && userOrientation !== null) {
+      console.log(`🧭 [RENDER-USER] Orientation reçue: ${userOrientation.toFixed(3)} rad (${(userOrientation * 180 / Math.PI).toFixed(1)}°)`);
+    } else {
+      console.log(`🧭 [RENDER-USER] ⚠️ Orientation manquante ou null`);
+    }
     
     // Calcul de l'orientation
     const svgOrientation = (userOrientation || 0) - Math.PI / 2;
@@ -780,6 +898,9 @@ export default function TiledMapView({
       <View 
         style={{ flex: 1 }}
         {...panResponder.panHandlers}
+        // *** NOUVEAU: Propriétés pour le multi-touch ***
+        collapsable={false}
+        removeClippedSubviews={false}
       >
         <Svg
           width={screenWidth}

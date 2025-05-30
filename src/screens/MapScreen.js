@@ -1512,6 +1512,9 @@ export default function MapScreen() {
     // Convertir en radians
     const headingRadians = (normalizedHeading * Math.PI) / 180;
     
+    // *** DEBUG: Log pour vérifier l'orientation mise à jour ***
+    console.log(`🧭 [COMPASS-UPDATE] Orientation: ${normalizedHeading.toFixed(1)}° → ${headingRadians.toFixed(3)} rad, précision: ${accuracy}`);
+    
     // Mettre à jour les états d'orientation
     setContinuousOrientation(headingRadians);
     continuousOrientationRef.current = headingRadians;
