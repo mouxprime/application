@@ -4,10 +4,30 @@ import { Platform } from 'react-native';
 const STORAGE_KEYS = {
   PEDOMETER_MODE: '@config_pedometer_mode',
   COMPASS_MODE: '@config_compass_mode',
-  SETTINGS_VERSION: '@config_settings_version'
+  SETTINGS_VERSION: '@config_settings_version',
+  // *** NOUVEAU: Clés pour la configuration des capteurs ***
+  SENSORS_FREQUENCY: '@config_sensors_frequency',
+  SENSORS_ENABLED: '@config_sensors_enabled'
 };
 
 const CURRENT_SETTINGS_VERSION = '1.0.0';
+
+// Configuration par défaut
+const DEFAULT_CONFIG = {
+  pedometerMode: 'application',
+  compassMode: 'native',
+  // *** NOUVEAU: Configuration de la fréquence des capteurs ***
+  sensorsFrequency: 50, // Hz, entre 5 et 75
+  sensorsEnabled: {
+    accelerometer: true,
+    gyroscope: true,
+    // Magnétomètre supprimé car on utilise la boussole native
+  }
+};
+
+// *** NOUVEAU: Limites pour la fréquence des capteurs ***
+const SENSORS_FREQUENCY_MIN = 5;   // Hz minimum
+const SENSORS_FREQUENCY_MAX = 75;  // Hz maximum
 
 /**
  * Service de gestion de la configuration utilisateur
@@ -18,6 +38,13 @@ export class ConfigurationService {
     this.config = {
       pedometerMode: 'application', // 'application' ou 'native'
       compassMode: 'native',        // Toujours 'native' maintenant
+      // *** NOUVEAU: Configuration des capteurs ***
+      sensorsFrequency: 50,         // Hz, entre 5 et 75
+      sensorsEnabled: {
+        accelerometer: true,
+        gyroscope: true
+        // Magnétomètre supprimé car on utilise la boussole native
+      },
       settingsVersion: CURRENT_SETTINGS_VERSION
     };
     
@@ -46,10 +73,12 @@ export class ConfigurationService {
    */
   async loadConfiguration() {
     try {
-      const [pedometerMode, compassMode, settingsVersion] = await AsyncStorage.multiGet([
+      const [pedometerMode, compassMode, settingsVersion, sensorsFrequency, sensorsEnabled] = await AsyncStorage.multiGet([
         STORAGE_KEYS.PEDOMETER_MODE,
         STORAGE_KEYS.COMPASS_MODE,
-        STORAGE_KEYS.SETTINGS_VERSION
+        STORAGE_KEYS.SETTINGS_VERSION,
+        STORAGE_KEYS.SENSORS_FREQUENCY,
+        STORAGE_KEYS.SENSORS_ENABLED
       ]);
 
       if (pedometerMode[1]) {
@@ -60,6 +89,17 @@ export class ConfigurationService {
       }
       if (settingsVersion[1]) {
         this.config.settingsVersion = settingsVersion[1];
+      }
+      // *** NOUVEAU: Chargement configuration capteurs ***
+      if (sensorsFrequency[1]) {
+        this.config.sensorsFrequency = parseInt(sensorsFrequency[1], 10);
+      }
+      if (sensorsEnabled[1]) {
+        try {
+          this.config.sensorsEnabled = JSON.parse(sensorsEnabled[1]);
+        } catch (error) {
+          console.warn('Erreur parsing sensorsEnabled, utilisation valeur par défaut');
+        }
       }
 
       console.log('Configuration chargée:', this.config);
@@ -76,7 +116,10 @@ export class ConfigurationService {
       await AsyncStorage.multiSet([
         [STORAGE_KEYS.PEDOMETER_MODE, this.config.pedometerMode],
         [STORAGE_KEYS.COMPASS_MODE, this.config.compassMode],
-        [STORAGE_KEYS.SETTINGS_VERSION, this.config.settingsVersion]
+        [STORAGE_KEYS.SETTINGS_VERSION, this.config.settingsVersion],
+        // *** NOUVEAU: Sauvegarde configuration capteurs ***
+        [STORAGE_KEYS.SENSORS_FREQUENCY, this.config.sensorsFrequency.toString()],
+        [STORAGE_KEYS.SENSORS_ENABLED, JSON.stringify(this.config.sensorsEnabled)]
       ]);
       
       console.log('Configuration sauvegardée:', this.config);
@@ -223,12 +266,72 @@ export class ConfigurationService {
   }
 
   /**
+   * *** NOUVEAU: Définir la fréquence des capteurs ***
+   */
+  async setSensorsFrequency(frequency) {
+    if (typeof frequency !== 'number' || frequency < SENSORS_FREQUENCY_MIN || frequency > SENSORS_FREQUENCY_MAX) {
+      throw new Error(`Fréquence capteurs invalide: ${frequency}. Doit être entre ${SENSORS_FREQUENCY_MIN} et ${SENSORS_FREQUENCY_MAX} Hz`);
+    }
+    
+    this.config.sensorsFrequency = frequency;
+    await this.saveConfiguration();
+    console.log(`🔧 [CONFIG] Fréquence capteurs mise à jour: ${frequency} Hz`);
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir la fréquence des capteurs ***
+   */
+  getSensorsFrequency() {
+    return this.config.sensorsFrequency;
+  }
+
+  /**
+   * *** NOUVEAU: Activer/désactiver un capteur ***
+   */
+  async setSensorEnabled(sensorName, enabled) {
+    if (!['accelerometer', 'gyroscope'].includes(sensorName)) {
+      throw new Error(`Capteur invalide: ${sensorName}. Capteurs supportés: accelerometer, gyroscope`);
+    }
+    
+    this.config.sensorsEnabled[sensorName] = enabled;
+    await this.saveConfiguration();
+    console.log(`🔧 [CONFIG] Capteur ${sensorName} ${enabled ? 'activé' : 'désactivé'}`);
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir l'état des capteurs ***
+   */
+  getSensorsEnabled() {
+    return { ...this.config.sensorsEnabled };
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir la configuration complète des capteurs ***
+   */
+  getSensorsConfiguration() {
+    return {
+      frequency: this.config.sensorsFrequency,
+      enabled: { ...this.config.sensorsEnabled },
+      limits: {
+        minFrequency: SENSORS_FREQUENCY_MIN,
+        maxFrequency: SENSORS_FREQUENCY_MAX
+      }
+    };
+  }
+
+  /**
    * Réinitialiser la configuration aux valeurs par défaut
    */
   async resetToDefaults() {
     this.config = {
       pedometerMode: 'application',
       compassMode: 'native',
+      // *** NOUVEAU: Réinitialisation configuration capteurs ***
+      sensorsFrequency: 50,
+      sensorsEnabled: {
+        accelerometer: true,
+        gyroscope: true
+      },
       settingsVersion: CURRENT_SETTINGS_VERSION
     };
     

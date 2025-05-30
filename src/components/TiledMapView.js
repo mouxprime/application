@@ -22,7 +22,8 @@ export default function TiledMapView({
   userOrientation,
   onViewportChange,
   initialZoom = 0.1,
-  initialCenterPoint = null
+  initialCenterPoint = null,
+  appearanceConfig = null
 }) {
   // Dimensions de la carte complète
   const MAP_TOTAL_WIDTH = 14629;
@@ -32,24 +33,36 @@ export default function TiledMapView({
   // Taille des tuiles (en pixels)
   const TILE_SIZE = 512;
   
+  // *** NOUVEAU: Extraire les couleurs de la configuration ou utiliser les valeurs par défaut ***
+  const colors = {
+    background: appearanceConfig?.backgroundColor || '#000000',
+    trajectory: appearanceConfig?.trajectoryColor || '#00ff00',
+    grid: appearanceConfig?.gridColor || '#333333',
+    user: appearanceConfig?.userColor || '#00ff00',
+    orientation: appearanceConfig?.orientationColor || '#ff0088',
+    pointsOfInterest: appearanceConfig?.pointsOfInterestColor || '#ff6b35'
+  };
+  
   // États du viewport
   const [zoom, setZoom] = useState(4.03);
   const [panX, setPanX] = useState(-49590);
   const [panY, setPanY] = useState(-10231);
   
-  // *** NOUVEAU: Refs pour maintenir les valeurs actuelles du pan ***
+  // *** NOUVEAU: Refs pour maintenir les valeurs actuelles du pan ET du zoom ***
   const panXRef = useRef(-49590);
   const panYRef = useRef(-10231);
+  const zoomRef = useRef(4.03); // *** NOUVEAU: Ref pour le zoom ***
   
   // *** NOUVEAU: Synchroniser les refs avec les états ***
   useEffect(() => {
     panXRef.current = panX;
     panYRef.current = panY;
-  }, [panX, panY]);
+    zoomRef.current = zoom; // *** NOUVEAU: Synchroniser le zoom ***
+  }, [panX, panY, zoom]);
   
   // Limites de zoom
-  const MIN_ZOOM = 0.05; // Très dézoomé pour voir toute la carte
-  const MAX_ZOOM = 20;   // Zoom très élevé pour les détails fins
+  const MIN_ZOOM = 0.25; // *** CORRIGÉ: Zoom minimum plus élevé pour empêcher de voir hors carte ***
+  const MAX_ZOOM = 15;   // *** CORRIGÉ: Zoom maximum réduit à 15x ***
   
   // Cache des tuiles
   const [loadedTiles, setLoadedTiles] = useState(new Map());
@@ -80,6 +93,61 @@ export default function TiledMapView({
     console.log(`🔍 [TILED-MAP] Zoom défini: ${clampedZoom.toFixed(3)}x`);
   }, []);
 
+  // *** NOUVEAU: Fonction pour contraindre le pan dans les limites de la carte ***
+  const constrainPan = useCallback((newPanX, newPanY, currentZoom) => {
+    // *** CORRIGÉ: Contraintes adaptatives selon le zoom pour éviter les blocages ***
+    
+    // Taille de la carte à l'échelle actuelle
+    const scaledMapWidth = MAP_TOTAL_WIDTH * currentZoom;
+    const scaledMapHeight = MAP_TOTAL_HEIGHT * currentZoom;
+    
+    // Taille de l'écran disponible
+    const availableWidth = screenWidth;
+    const availableHeight = screenHeight - 200;
+    
+    // *** NOUVEAU: Marge adaptative selon le zoom ***
+    // Plus le zoom est élevé, plus on permet de liberté de mouvement
+    const dynamicMargin = Math.min(100, Math.max(20, currentZoom * 10));
+    
+    // Calculer les limites avec marges adaptatives
+    let minPanX, maxPanX, minPanY, maxPanY;
+    
+    if (scaledMapWidth <= availableWidth) {
+      // Carte plus petite que l'écran → permettre mouvement autour du centre
+      const centerOffset = (availableWidth - scaledMapWidth) / 2;
+      const margin = Math.min(100, availableWidth * 0.2); // 20% de l'écran max
+      minPanX = centerOffset - margin;
+      maxPanX = centerOffset + margin;
+    } else {
+      // Carte plus grande que l'écran → contraintes avec marge dynamique
+      minPanX = availableWidth - scaledMapWidth - dynamicMargin;
+      maxPanX = dynamicMargin;
+    }
+    
+    if (scaledMapHeight <= availableHeight) {
+      // Carte plus petite que l'écran → permettre mouvement autour du centre
+      const centerOffset = (availableHeight - scaledMapHeight) / 2;
+      const margin = Math.min(100, availableHeight * 0.2); // 20% de l'écran max
+      minPanY = centerOffset - margin;
+      maxPanY = centerOffset + margin;
+    } else {
+      // Carte plus grande que l'écran → contraintes avec marge dynamique
+      minPanY = availableHeight - scaledMapHeight - dynamicMargin;
+      maxPanY = dynamicMargin;
+    }
+    
+    // Contraindre les valeurs
+    const constrainedPanX = Math.max(minPanX, Math.min(maxPanX, newPanX));
+    const constrainedPanY = Math.max(minPanY, Math.min(maxPanY, newPanY));
+    
+    // *** DEBUG: Log les contraintes quand elles sont actives ***
+    if (newPanX !== constrainedPanX || newPanY !== constrainedPanY) {
+      console.log(`🚧 [TILED-MAP] Contrainte pan: (${newPanX.toFixed(1)}, ${newPanY.toFixed(1)}) → (${constrainedPanX.toFixed(1)}, ${constrainedPanY.toFixed(1)}), zoom=${currentZoom.toFixed(3)}, marges=[${minPanX.toFixed(1)}, ${maxPanX.toFixed(1)}]`);
+    }
+    
+    return { x: constrainedPanX, y: constrainedPanY };
+  }, []);
+
   /**
    * Configuration du PanResponder pour la navigation tactile - CORRIGÉ
    */
@@ -99,7 +167,7 @@ export default function TiledMapView({
         // *** CORRIGÉ: Utiliser les refs pour obtenir les valeurs actuelles ***
         panStartRef.current = { x: panXRef.current, y: panYRef.current };
         isDraggingRef.current = true;
-        console.log(`🖐️ [TILED-MAP] GRANT - Début navigation: panStart=(${panStartRef.current.x.toFixed(1)}, ${panStartRef.current.y.toFixed(1)}), zoom=${zoom.toFixed(3)}`);
+        console.log(`🖐️ [TILED-MAP] GRANT - Début navigation: panStart=(${panStartRef.current.x.toFixed(1)}, ${panStartRef.current.y.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}`);
       },
       
       // Mouvement du geste
@@ -108,9 +176,9 @@ export default function TiledMapView({
           return;
         }
         
-        // *** AMÉLIORÉ: Sensibilité adaptée au zoom avec meilleure réactivité ***
-        // Formule ajustée pour une meilleure sensibilité aux zooms moyens
-        const sensitivity = Math.max(0.4, Math.min(6.0, 2.4 / zoom));
+        // *** CORRIGÉ: Utiliser zoomRef.current pour la sensibilité ***
+        const currentZoom = zoomRef.current;
+        const sensitivity = Math.max(0.4, Math.min(6.0, 2.4 / currentZoom));
         
         // Calculer la nouvelle position basée sur la position de départ
         const deltaX = gestureState.dx * sensitivity;
@@ -119,11 +187,10 @@ export default function TiledMapView({
         const newPanX = panStartRef.current.x + deltaX;
         const newPanY = panStartRef.current.y + deltaY;
         
-        // *** SIMPLIFIÉ: Limites très larges pour navigation libre ***
-        // Permettre de naviguer bien au-delà des bords de la carte
-        const maxLimit = MAP_TOTAL_WIDTH * 15; // Très large - 10x la taille de la carte
-        const clampedPanX = Math.max(-maxLimit, Math.min(maxLimit, newPanX));
-        const clampedPanY = Math.max(-maxLimit, Math.min(maxLimit, newPanY));
+        // *** CORRIGÉ: Utiliser zoomRef.current pour les contraintes ***
+        const constrained = constrainPan(newPanX, newPanY, currentZoom);
+        const clampedPanX = constrained.x;
+        const clampedPanY = constrained.y;
         
         // *** CORRIGÉ: Mettre à jour les refs ET les états ***
         panXRef.current = clampedPanX;
@@ -133,14 +200,14 @@ export default function TiledMapView({
         
         // Log pour debug (moins fréquent)
         if (Math.abs(gestureState.dx) % 20 < 5) { // Log tous les ~20px
-          console.log(`🖐️ [TILED-MAP] MOVE - pan: (${clampedPanX.toFixed(1)}, ${clampedPanY.toFixed(1)}), sensibilité: ${sensitivity.toFixed(2)}, limite: ±${maxLimit.toFixed(0)}`);
+          console.log(`🖐️ [TILED-MAP] MOVE - pan: (${clampedPanX.toFixed(1)}, ${clampedPanY.toFixed(1)}), sensibilité: ${sensitivity.toFixed(2)}, zoom: ${currentZoom.toFixed(3)}, limite: ±${(MAP_TOTAL_WIDTH * currentZoom).toFixed(0)}`);
         }
       },
       
       // Fin du geste
       onPanResponderRelease: (evt, gestureState) => {
         isDraggingRef.current = false;
-        console.log(`🖐️ [TILED-MAP] RELEASE - Navigation terminée: pan final=(${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}), zoom=${zoom.toFixed(3)}, sensibilité=${(1.0 / zoom).toFixed(3)}`);
+        console.log(`🖐️ [TILED-MAP] RELEASE - Navigation terminée: pan final=(${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}, sensibilité=${(1.0 / zoomRef.current).toFixed(3)}`);
       },
       
       // Gestion des interruptions
@@ -233,7 +300,7 @@ export default function TiledMapView({
               y1={tileTop}
               x2={x}
               y2={tileBottom}
-              stroke="#333333"
+              stroke={colors.grid}
               strokeWidth="1"
               opacity="0.3"
             />
@@ -252,7 +319,7 @@ export default function TiledMapView({
               y1={y}
               x2={tileRight}
               y2={y}
-              stroke="#333333"
+              stroke={colors.grid}
               strokeWidth="1"
               opacity="0.3"
             />
@@ -262,7 +329,7 @@ export default function TiledMapView({
     }
     
     return elements;
-  }, [zoom]);
+  }, [zoom, colors.grid]);
 
   /**
    * Convertir coordonnées monde vers SVG
@@ -286,41 +353,42 @@ export default function TiledMapView({
    */
   const renderPointsOfInterest = useCallback(() => {
     return pointsOfInterest.map(point => {
-      const radius = Math.max(6, 12 / zoom);
+      // *** MODIFICATION: Réduire la taille de moitié pour Entrée Fifi ***
+      const radius = Math.max(3, 6 / zoom); // Réduit de Math.max(6, 12 / zoom)
       
       return (
         <G key={point.id}>
-          {/* Cercle extérieur (halo) */}
+          {/* Cercle extérieur (halo) - taille réduite */}
           <Circle
             cx={point.x}
             cy={point.y}
-            r={radius + 3}
+            r={radius + 1.5} // Réduit de radius + 3
             fill="rgba(255, 255, 255, 0.3)"
             stroke="rgba(255, 255, 255, 0.6)"
-            strokeWidth={Math.max(1, 2 / zoom)}
+            strokeWidth={Math.max(0.5, 1 / zoom)} // Réduit de Math.max(1, 2 / zoom)
           />
           
-          {/* Point principal */}
+          {/* Point principal - taille réduite */}
           <Circle
             cx={point.x}
             cy={point.y}
             r={radius}
-            fill={point.color}
+            fill={colors.pointsOfInterest}
             stroke="#ffffff"
-            strokeWidth={Math.max(1, 2 / zoom)}
+            strokeWidth={Math.max(0.5, 1 / zoom)} // Réduit de Math.max(1, 2 / zoom)
           />
           
-          {/* Point central */}
+          {/* Point central - taille réduite */}
           <Circle
             cx={point.x}
             cy={point.y}
-            r={Math.max(2, 4 / zoom)}
+            r={Math.max(1, 2 / zoom)} // Réduit de Math.max(2, 4 / zoom)
             fill="#ffffff"
           />
         </G>
       );
     });
-  }, [pointsOfInterest, zoom]);
+  }, [pointsOfInterest, zoom, colors.pointsOfInterest]);
 
   /**
    * Rendu de la trajectoire actuelle
@@ -336,7 +404,7 @@ export default function TiledMapView({
     return (
       <Path
         d={path}
-        stroke="#00ff00"
+        stroke={colors.trajectory}
         strokeWidth={Math.max(2, 4 / zoom)}
         fill="none"
         opacity="1.0"
@@ -344,7 +412,7 @@ export default function TiledMapView({
         strokeLinejoin="round"
       />
     );
-  }, [currentTrajectory, worldToSVG, zoom]);
+  }, [currentTrajectory, worldToSVG, zoom, colors.trajectory]);
 
   /**
    * Rendu de la position utilisateur
@@ -369,7 +437,7 @@ export default function TiledMapView({
           y1={svgPos.y}
           x2={headingX}
           y2={headingY}
-          stroke="#ff0088"
+          stroke={colors.orientation}
           strokeWidth={Math.max(2, 4 / zoom)}
           opacity="1.0"
         />
@@ -379,7 +447,7 @@ export default function TiledMapView({
           cx={svgPos.x}
           cy={svgPos.y}
           r={radius}
-          fill="#00ff00"
+          fill={colors.user}
           stroke="#ffffff"
           strokeWidth={Math.max(1, 2 / zoom)}
           opacity="1.0"
@@ -395,7 +463,7 @@ export default function TiledMapView({
         />
       </G>
     );
-  }, [userPosition, userOrientation, worldToSVG, zoom]);
+  }, [userPosition, userOrientation, worldToSVG, zoom, colors.user, colors.orientation]);
 
   /**
    * Contrôles de zoom avec préservation du point central
@@ -404,53 +472,59 @@ export default function TiledMapView({
     const zoomFactor = zoom < 1 ? 1.5 : zoom < 5 ? 1.3 : 1.2; // Progression adaptée
     const newZoom = Math.min(MAX_ZOOM, zoom * zoomFactor);
     
-    // *** NOUVEAU: Calculer le point central actuel de l'écran ***
+    // *** CORRIGÉ: Logique de zoom centrée simplifiée ***
+    // Le zoom se fait autour du centre de l'écran
     const centerScreenX = screenWidth / 2;
     const centerScreenY = (screenHeight - 200) / 2;
     
-    // Point dans la carte correspondant au centre de l'écran AVANT zoom
-    const centerMapX = (-panXRef.current + centerScreenX) / zoom;
-    const centerMapY = (-panYRef.current + centerScreenY) / zoom;
+    // Calculer le nouveau pan pour maintenir le centre visuel
+    const zoomRatio = newZoom / zoom;
     
-    // Calculer le nouveau pan pour garder ce point au centre APRÈS zoom
-    const newPanX = -(centerMapX * newZoom - centerScreenX);
-    const newPanY = -(centerMapY * newZoom - centerScreenY);
+    // Ajuster le pan proportionnellement au changement de zoom
+    const newPanX = panXRef.current * zoomRatio + centerScreenX * (1 - zoomRatio);
+    const newPanY = panYRef.current * zoomRatio + centerScreenY * (1 - zoomRatio);
+    
+    // *** NOUVEAU: Contraindre le pan dans les limites de la carte ***
+    const constrained = constrainPan(newPanX, newPanY, newZoom);
     
     // Appliquer les changements
     setZoom(newZoom);
-    panXRef.current = newPanX;
-    panYRef.current = newPanY;
-    setPanX(newPanX);
-    setPanY(newPanY);
+    panXRef.current = constrained.x;
+    panYRef.current = constrained.y;
+    setPanX(constrained.x);
+    setPanY(constrained.y);
     
-    console.log(`🔍 [TILED-MAP] Zoom in: ${newZoom.toFixed(3)}x, centre préservé: (${centerMapX.toFixed(1)}, ${centerMapY.toFixed(1)})`);
-  }, [zoom]);
+    console.log(`🔍 [TILED-MAP] Zoom in: ${zoom.toFixed(3)}x → ${newZoom.toFixed(3)}x, pan: (${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}) → (${constrained.x.toFixed(1)}, ${constrained.y.toFixed(1)})`);
+  }, [zoom, constrainPan]);
 
   const zoomOut = useCallback(() => {
     const zoomFactor = zoom > 5 ? 1.2 : zoom > 1 ? 1.3 : 1.5; // Progression adaptée
     const newZoom = Math.max(MIN_ZOOM, zoom / zoomFactor);
     
-    // *** NOUVEAU: Calculer le point central actuel de l'écran ***
+    // *** CORRIGÉ: Logique de zoom centrée simplifiée ***
+    // Le zoom se fait autour du centre de l'écran
     const centerScreenX = screenWidth / 2;
     const centerScreenY = (screenHeight - 200) / 2;
     
-    // Point dans la carte correspondant au centre de l'écran AVANT zoom
-    const centerMapX = (-panXRef.current + centerScreenX) / zoom;
-    const centerMapY = (-panYRef.current + centerScreenY) / zoom;
+    // Calculer le nouveau pan pour maintenir le centre visuel
+    const zoomRatio = newZoom / zoom;
     
-    // Calculer le nouveau pan pour garder ce point au centre APRÈS zoom
-    const newPanX = -(centerMapX * newZoom - centerScreenX);
-    const newPanY = -(centerMapY * newZoom - centerScreenY);
+    // Ajuster le pan proportionnellement au changement de zoom
+    const newPanX = panXRef.current * zoomRatio + centerScreenX * (1 - zoomRatio);
+    const newPanY = panYRef.current * zoomRatio + centerScreenY * (1 - zoomRatio);
+    
+    // *** NOUVEAU: Contraindre le pan dans les limites de la carte ***
+    const constrained = constrainPan(newPanX, newPanY, newZoom);
     
     // Appliquer les changements
     setZoom(newZoom);
-    panXRef.current = newPanX;
-    panYRef.current = newPanY;
-    setPanX(newPanX);
-    setPanY(newPanY);
+    panXRef.current = constrained.x;
+    panYRef.current = constrained.y;
+    setPanX(constrained.x);
+    setPanY(constrained.y);
     
-    console.log(`🔍 [TILED-MAP] Zoom out: ${newZoom.toFixed(3)}x, centre préservé: (${centerMapX.toFixed(1)}, ${centerMapY.toFixed(1)})`);
-  }, [zoom]);
+    console.log(`🔍 [TILED-MAP] Zoom out: ${zoom.toFixed(3)}x → ${newZoom.toFixed(3)}x, pan: (${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}) → (${constrained.x.toFixed(1)}, ${constrained.y.toFixed(1)})`);
+  }, [zoom, constrainPan]);
 
   /**
    * Centrer sur l'utilisateur avec zoom fixe 4.03x
@@ -640,7 +714,7 @@ export default function TiledMapView({
             y={-panY / zoom - 1000}
             width={screenWidth / zoom + 2000}
             height={(screenHeight - 200) / zoom + 2000}
-            fill="#000000"
+            fill={colors.background}
           />
           
           {/* Bordure de la carte */}

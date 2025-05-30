@@ -7,12 +7,16 @@ import {
   TouchableOpacity,
   Dimensions,
   Alert,
+  Modal,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path, Circle, Line, Text as SvgText, G } from 'react-native-svg';
+import * as Battery from 'expo-battery';
 
 import { useLocalization } from '../context/LocalizationContext';
+import { configurationService } from '../services/ConfigurationService';
 
 const { width: screenWidth } = Dimensions.get('window');
 
@@ -24,6 +28,63 @@ export default function SensorsScreen() {
     magnetometer: []
   });
   const [maxHistoryLength] = useState(100); // Nombre de points à afficher
+
+  // États pour la batterie réelle
+  const [batteryLevel, setBatteryLevel] = useState(1.0);
+  const [batteryState, setBatteryState] = useState('unknown');
+  
+  // États pour la configuration des capteurs
+  const [sensorsConfig, setSensorsConfig] = useState({
+    frequency: 50,
+    enabled: { accelerometer: true, gyroscope: true },
+    limits: { minFrequency: 5, maxFrequency: 75 }
+  });
+  
+  // États pour les modales
+  const [showSamplingModal, setShowSamplingModal] = useState(false);
+  const [tempSamplingRate, setTempSamplingRate] = useState(50);
+
+  // Initialisation de la batterie et configuration
+  useEffect(() => {
+    const initializeBatteryAndConfig = async () => {
+      try {
+        // Initialiser la batterie
+        const level = await Battery.getBatteryLevelAsync();
+        const batteryState = await Battery.getBatteryStateAsync();
+        setBatteryLevel(level);
+        setBatteryState(batteryState);
+        
+        // Initialiser la configuration des capteurs
+        if (!configurationService.isInitialized) {
+          await configurationService.initialize();
+        }
+        const config = configurationService.getSensorsConfiguration();
+        setSensorsConfig(config);
+        setTempSamplingRate(config.frequency);
+        
+        console.log('🔋 [SENSORS-SCREEN] Batterie:', (level * 100).toFixed(1) + '%', batteryState);
+        console.log('🔧 [SENSORS-SCREEN] Configuration capteurs:', config);
+      } catch (error) {
+        console.error('❌ [SENSORS-SCREEN] Erreur initialisation:', error);
+      }
+    };
+
+    initializeBatteryAndConfig();
+
+    // Mise à jour batterie toutes les 30 secondes
+    const batteryInterval = setInterval(async () => {
+      try {
+        const level = await Battery.getBatteryLevelAsync();
+        const batteryState = await Battery.getBatteryStateAsync();
+        setBatteryLevel(level);
+        setBatteryState(batteryState);
+      } catch (error) {
+        console.warn('⚠️ [SENSORS-SCREEN] Erreur mise à jour batterie:', error);
+      }
+    }, 30000);
+
+    return () => clearInterval(batteryInterval);
+  }, []);
 
   // *** CORRECTION: Mise à jour de l'historique des capteurs avec throttling ***
   useEffect(() => {
@@ -237,6 +298,21 @@ export default function SensorsScreen() {
       }
     };
 
+    const getBatteryColor = () => {
+      if (batteryState === 'charging') return '#00ff88';
+      if (batteryLevel > 0.5) return '#00ff88';
+      if (batteryLevel > 0.25) return '#ffaa00';
+      return '#ff4444';
+    };
+
+    const getBatteryIcon = () => {
+      if (batteryState === 'charging') return 'battery-charging';
+      if (batteryLevel > 0.75) return 'battery-full';
+      if (batteryLevel > 0.5) return 'battery-half';
+      if (batteryLevel > 0.25) return 'battery-dead';
+      return 'battery-dead';
+    };
+
     return (
       <View style={styles.metricsContainer}>
         <Text style={styles.sectionTitle}>Métriques PDR</Text>
@@ -258,18 +334,25 @@ export default function SensorsScreen() {
         </View>
 
         <View style={styles.metricRow}>
-          <View style={styles.metricCard}>
+          <TouchableOpacity 
+            style={styles.metricCard} 
+            onPress={() => setShowSamplingModal(true)}
+          >
             <Ionicons name="analytics" size={24} color="#0088ff" />
             <Text style={styles.metricLabel}>Échantillonnage</Text>
-            <Text style={styles.metricValue}>{state.sampleRate || 25} Hz</Text>
-          </View>
+            <Text style={styles.metricValue}>{sensorsConfig.frequency} Hz</Text>
+            <Text style={styles.editHint}>Appuyer pour modifier</Text>
+          </TouchableOpacity>
           
           <View style={styles.metricCard}>
-            <Ionicons name="battery-half" size={24} color="#ffaa00" />
-            <Text style={styles.metricLabel}>Énergie</Text>
-            <Text style={styles.metricValue}>
-              {((state.energyLevel || 1.0) * 100).toFixed(0)}%
+            <Ionicons name={getBatteryIcon()} size={24} color={getBatteryColor()} />
+            <Text style={styles.metricLabel}>Batterie</Text>
+            <Text style={[styles.metricValue, { color: getBatteryColor() }]}>
+              {(batteryLevel * 100).toFixed(0)}%
             </Text>
+            {batteryState === 'charging' && (
+              <Text style={styles.batteryStatus}>En charge</Text>
+            )}
           </View>
         </View>
 
@@ -390,6 +473,127 @@ export default function SensorsScreen() {
     );
   };
 
+  /**
+   * Modal pour régler l'échantillonnage
+   */
+  const renderSamplingModal = () => {
+    const handleSave = async () => {
+      try {
+        await configurationService.setSensorsFrequency(tempSamplingRate);
+        const updatedConfig = configurationService.getSensorsConfiguration();
+        setSensorsConfig(updatedConfig);
+        setShowSamplingModal(false);
+        
+        Alert.alert(
+          'Succès', 
+          `Fréquence d'échantillonnage mise à jour : ${tempSamplingRate} Hz`
+        );
+      } catch (error) {
+        console.error('❌ [SENSORS-SCREEN] Erreur sauvegarde fréquence:', error);
+        Alert.alert('Erreur', 'Impossible de sauvegarder la fréquence : ' + error.message);
+      }
+    };
+
+    return (
+      <Modal
+        visible={showSamplingModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowSamplingModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="analytics" size={24} color="#0088ff" />
+              <Text style={styles.modalTitle}>Échantillonnage des Capteurs</Text>
+              <TouchableOpacity onPress={() => setShowSamplingModal(false)}>
+                <Ionicons name="close" size={24} color="#ffffff" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.modalBody}>
+              <Text style={styles.modalDescription}>
+                Ajustez la fréquence d'échantillonnage des capteurs entre {sensorsConfig.limits.minFrequency} et {sensorsConfig.limits.maxFrequency} Hz.
+              </Text>
+              
+              <View style={styles.sliderContainer}>
+                <Text style={styles.sliderLabel}>Fréquence : {tempSamplingRate} Hz</Text>
+                <TextInput
+                  style={styles.frequencyInput}
+                  keyboardType="numeric"
+                  value={tempSamplingRate.toString()}
+                  onChangeText={(text) => {
+                    const value = parseInt(text);
+                    if (!isNaN(value) && value >= sensorsConfig.limits.minFrequency && value <= sensorsConfig.limits.maxFrequency) {
+                      setTempSamplingRate(value);
+                    } else if (text === '') {
+                      // Permettre la saisie vide temporairement
+                      setTempSamplingRate(sensorsConfig.limits.minFrequency);
+                    }
+                  }}
+                  placeholder={`${sensorsConfig.limits.minFrequency}-${sensorsConfig.limits.maxFrequency}`}
+                  placeholderTextColor="#666666"
+                />
+                
+                <View style={styles.frequencyButtons}>
+                  <TouchableOpacity 
+                    style={styles.frequencyPreset}
+                    onPress={() => setTempSamplingRate(10)}
+                  >
+                    <Text style={styles.presetText}>10 Hz</Text>
+                    <Text style={styles.presetLabel}>Économique</Text>
+                  </TouchableOpacity>
+                  
+                  <TouchableOpacity 
+                    style={styles.frequencyPreset}
+                    onPress={() => setTempSamplingRate(25)}
+                  >
+                    <Text style={styles.presetText}>25 Hz</Text>
+                    <Text style={styles.presetLabel}>Normal</Text>
+                  </TouchableOpacity>
+                  
+                  <TouchableOpacity 
+                    style={styles.frequencyPreset}
+                    onPress={() => setTempSamplingRate(50)}
+                  >
+                    <Text style={styles.presetText}>50 Hz</Text>
+                    <Text style={styles.presetLabel}>Précis</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <View style={styles.frequencyInfo}>
+                <Text style={styles.infoTitle}>Recommandations :</Text>
+                <Text style={styles.infoText}>• 5-15 Hz : Économie d'énergie maximale</Text>
+                <Text style={styles.infoText}>• 20-30 Hz : Usage normal recommandé</Text>
+                <Text style={styles.infoText}>• 50-75 Hz : Précision maximale (plus de batterie)</Text>
+              </View>
+
+              <View style={styles.modalButtons}>
+                <TouchableOpacity 
+                  style={styles.cancelButton}
+                  onPress={() => {
+                    setTempSamplingRate(sensorsConfig.frequency);
+                    setShowSamplingModal(false);
+                  }}
+                >
+                  <Text style={styles.cancelButtonText}>Annuler</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity 
+                  style={styles.saveButton}
+                  onPress={handleSave}
+                >
+                  <Text style={styles.saveButtonText}>Sauvegarder</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView showsVerticalScrollIndicator={false}>
@@ -432,6 +636,9 @@ export default function SensorsScreen() {
           <Ionicons name="refresh" size={20} color="#ffffff" />
           <Text style={styles.resetButtonText}>Réinitialiser les données</Text>
         </TouchableOpacity>
+
+        {/* Modal pour régler l'échantillonnage */}
+        {renderSamplingModal()}
 
         <View style={styles.spacer} />
       </ScrollView>
@@ -590,5 +797,129 @@ const styles = StyleSheet.create({
   },
   spacer: {
     height: 40,
+  },
+  editHint: {
+    color: '#888888',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  batteryStatus: {
+    color: '#888888',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 12,
+    padding: 20,
+    width: '80%',
+    maxHeight: '80%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  modalTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginLeft: 10,
+  },
+  modalBody: {
+    flex: 1,
+  },
+  modalDescription: {
+    color: '#cccccc',
+    fontSize: 14,
+    marginBottom: 20,
+  },
+  sliderContainer: {
+    marginBottom: 20,
+  },
+  sliderLabel: {
+    color: '#cccccc',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  frequencyInput: {
+    width: '100%',
+    height: 40,
+    borderWidth: 1,
+    borderColor: '#333333',
+    borderRadius: 8,
+    padding: 12,
+    color: '#ffffff',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    textAlign: 'center',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  frequencyButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  frequencyPreset: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: '#333333',
+    borderRadius: 8,
+    padding: 12,
+  },
+  presetText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  presetLabel: {
+    color: '#888888',
+    fontSize: 12,
+  },
+  frequencyInfo: {
+    marginBottom: 20,
+  },
+  infoTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  infoText: {
+    color: '#cccccc',
+    fontSize: 14,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  cancelButton: {
+    backgroundColor: 'rgba(255, 68, 68, 0.2)',
+    borderWidth: 1,
+    borderColor: '#ff4444',
+    borderRadius: 8,
+    padding: 12,
+  },
+  cancelButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  saveButton: {
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 255, 136, 0.3)',
+    borderRadius: 8,
+    padding: 12,
+  },
+  saveButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
   },
 }); 

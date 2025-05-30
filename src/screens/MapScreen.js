@@ -27,6 +27,7 @@ import ZoomableView from '../components/ZoomableView';
 import NativeEnhancedMotionService from '../services/NativeEnhancedMotionService';
 import { PersistentMapService } from '../services/PersistentMapService';
 import TiledMapView from '../components/TiledMapView';
+import { appearanceService } from '../services/AppearanceService';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
@@ -93,6 +94,9 @@ export default function MapScreen() {
     pointsOfInterest: []
   });
 
+  // *** NOUVEAU: Configuration des couleurs ***
+  const [appearanceConfig, setAppearanceConfig] = useState(null);
+  
   // *** NOUVEAU: Modal de sélection du point de départ ***
   const [startingPointModal, setStartingPointModal] = useState({
     visible: false, // Plus visible au démarrage
@@ -104,13 +108,34 @@ export default function MapScreen() {
   
   // *** NOUVEAU: Point par défaut "Entrée Fifi" ***
   const getDefaultStartingPoint = () => {
+    // *** CORRIGÉ: Coordonnées cohérentes avec TiledMapView ***
+    // La carte fait 14629px × 13764px avec échelle 3.72 px/m
+    // Le centre de la carte est à (7314.5, 6882) en pixels
+    // Pour convertir des coordonnées pixel en coordonnées monde :
+    // worldX = (pixelX - centerX) / SCALE
+    // worldY = -(pixelY - centerY) / SCALE (inversion Y)
+    
+    const pixelX = 12364; // Position en pixels dans la carte
+    const pixelY = 2612;  // Position en pixels dans la carte
+    const SCALE = 3.72;   // pixels par mètre
+    const centerX = MAP_TOTAL_WIDTH / 2;  // 7314.5
+    const centerY = MAP_TOTAL_HEIGHT / 2; // 6882
+    
+    const worldX = (pixelX - centerX) / SCALE;
+    const worldY = -(pixelY - centerY) / SCALE; // Inversion Y pour coordonnées monde
+    
+    console.log(`📍 [POINT-DEFAULT] Calcul "Entrée Fifi":`);
+    console.log(`  - Pixels: (${pixelX}, ${pixelY})`);
+    console.log(`  - Centre carte: (${centerX}, ${centerY})`);
+    console.log(`  - Monde: (${worldX.toFixed(2)}, ${worldY.toFixed(2)})`);
+    
     return {
       id: 'entree_fifi',
       name: 'Entrée Fifi',
-      x: 12364,
-      y: 2612,
-      worldX: (12364 - MAP_TOTAL_WIDTH / 2) / 3.72,
-      worldY: -(2612 - MAP_TOTAL_HEIGHT / 2) / 3.72,
+      x: pixelX,     // Coordonnées en pixels pour TiledMapView
+      y: pixelY,     // Coordonnées en pixels pour TiledMapView
+      worldX: worldX, // Coordonnées monde pour la logique métier
+      worldY: worldY, // Coordonnées monde pour la logique métier
       color: '#ff6b35',
       description: 'Point d\'entrée principal'
     };
@@ -199,10 +224,23 @@ export default function MapScreen() {
       confidence: currentState.pose.confidence
     });
   }, []);
+
+  // *** NOUVEAU: Callback pour les données des capteurs ***
+  const handleSensors = useCallback((sensorData) => {
+    const currentActions = actionsRef.current;
+    
+    // Mettre à jour les données des capteurs dans le contexte
+    currentActions.updateSensors({
+      accelerometer: sensorData.accelerometer,
+      gyroscope: sensorData.gyroscope,
+      magnetometer: sensorData.magnetometer
+    });
+  }, []);
   
   const [hybridMotionService] = useState(() => new NativeEnhancedMotionService(
     handleStepDetected,
-    handleHeading
+    handleHeading,
+    handleSensors
   ));
   
   // Convertisseur d'échelle avec l'échelle de référence CORRIGÉE
@@ -266,6 +304,9 @@ export default function MapScreen() {
     
     // *** NOUVEAU: Initialiser la carte persistante ***
     initializePersistentMap();
+    
+    // *** NOUVEAU: Initialiser l'apparence ***
+    initializeAppearance();
     
     // *** NOUVEAU: Démarrer la boussole native indépendante ***
     startNativeCompass();
@@ -1364,6 +1405,31 @@ export default function MapScreen() {
     }
   };
 
+  // *** NOUVEAU: Initialisation de l'apparence ***
+  const initializeAppearance = async () => {
+    try {
+      console.log('🎨 [MAP-SCREEN] Initialisation de l\'apparence...');
+      
+      await appearanceService.initialize();
+      const config = appearanceService.getConfiguration();
+      setAppearanceConfig(config);
+      
+      // Écouter les changements de configuration
+      const unsubscribe = appearanceService.addListener((newConfig) => {
+        console.log('🎨 [MAP-SCREEN] Configuration couleurs mise à jour:', newConfig);
+        setAppearanceConfig(newConfig);
+      });
+      
+      console.log('✅ [MAP-SCREEN] Apparence initialisée:', config);
+      
+      // Retourner la fonction de nettoyage sera gérée par le composant parent
+      
+    } catch (error) {
+      console.error('❌ [MAP-SCREEN] Erreur initialisation apparence:', error);
+      // Continuer avec les couleurs par défaut
+    }
+  };
+
   // *** NOUVEAU: Gestionnaire de changement de viewport ***
   const handleViewportChange = useCallback((info) => {
     setViewportInfo({
@@ -1429,7 +1495,21 @@ export default function MapScreen() {
           throw new Error('Coordonnées invalides');
         }
         
-        console.log(`🎯 [STARTING-POINT] Coordonnées personnalisées: (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
+        // *** NOUVEAU: Validation des limites de la carte ***
+        const SCALE = 3.72;
+        const centerX = MAP_TOTAL_WIDTH / 2;
+        const centerY = MAP_TOTAL_HEIGHT / 2;
+        
+        const minWorldX = (0 - centerX) / SCALE;           // ~-1966
+        const maxWorldX = (MAP_TOTAL_WIDTH - centerX) / SCALE;  // ~+1966
+        const minWorldY = -(MAP_TOTAL_HEIGHT - centerY) / SCALE; // ~-1850
+        const maxWorldY = -(0 - centerY) / SCALE;              // ~+1850
+        
+        if (startX < minWorldX || startX > maxWorldX || startY < minWorldY || startY > maxWorldY) {
+          throw new Error(`Coordonnées hors limites de la carte.\nLimites valides:\nX: ${minWorldX.toFixed(0)} à ${maxWorldX.toFixed(0)}\nY: ${minWorldY.toFixed(0)} à ${maxWorldY.toFixed(0)}\nVous avez saisi: (${startX}, ${startY})`);
+        }
+        
+        console.log(`🎯 [STARTING-POINT] Coordonnées personnalisées: (${startX.toFixed(2)}, ${startY.toFixed(2)}) - Validées dans les limites`);
       } else {
         // Point par défaut "Entrée Fifi"
         const defaultPoint = getDefaultStartingPoint();
@@ -1517,6 +1597,7 @@ export default function MapScreen() {
         onViewportChange={handleViewportChange}
         initialZoom={initialZoom}
         initialCenterPoint={defaultPoint}
+        appearanceConfig={appearanceConfig}
       />
 
       {/* Métriques en temps réel */}
@@ -1674,7 +1755,7 @@ export default function MapScreen() {
                     style={styles.dismissKeyboardButton}
                     onPress={() => Keyboard.dismiss()}
                   >
-                    <Ionicons name="keyboard" size={16} color="#00ff88" />
+                    <Ionicons name="keypad" size={16} color="#00ff88" />
                     <Text style={styles.dismissKeyboardText}>Fermer le clavier</Text>
                   </TouchableOpacity>
                 )}

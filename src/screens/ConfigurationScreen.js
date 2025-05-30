@@ -6,7 +6,8 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
-  Platform
+  Platform,
+  Modal
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -14,6 +15,7 @@ import UserProfileSetup from '../components/UserProfileSetup';
 import { configurationService } from '../services/ConfigurationService';
 import { diagnosticService } from '../services/DiagnosticService';
 import { userProfileService } from '../services/UserProfileService';
+import { appearanceService } from '../services/AppearanceService';
 
 export default function ConfigurationScreen() {
   // États pour la configuration des outils
@@ -26,9 +28,23 @@ export default function ConfigurationScreen() {
   const [showProfileSetup, setShowProfileSetup] = useState(false);
   const [userProfile, setUserProfile] = useState(null);
 
+  // *** NOUVEAU: États pour la configuration des couleurs ***
+  const [appearanceConfig, setAppearanceConfig] = useState(null);
+  const [showColorPicker, setShowColorPicker] = useState({ visible: false, colorKey: '', currentColor: '' });
+
+  // *** NOUVEAU: États pour la configuration des capteurs ***
+  const [sensorsConfig, setSensorsConfig] = useState({
+    frequency: 50,
+    enabled: {
+      accelerometer: true,
+      gyroscope: true
+    }
+  });
+
   useEffect(() => {
     initializeConfiguration();
     initializeUserProfile();
+    initializeAppearance();
   }, []);
 
   const initializeConfiguration = async () => {
@@ -40,6 +56,10 @@ export default function ConfigurationScreen() {
       const config = configurationService.getConfiguration();
       setPedometerMode(config.pedometerMode);
       setCompassMode(config.compassMode);
+      
+      // *** NOUVEAU: Charger la configuration des capteurs ***
+      const sensorsConfiguration = configurationService.getSensorsConfiguration();
+      setSensorsConfig(sensorsConfiguration);
       
       // Vérifier la disponibilité du podomètre natif
       const nativeAvailable = await configurationService.isNativePedometerAvailable();
@@ -68,6 +88,16 @@ export default function ConfigurationScreen() {
     }
   };
 
+  const initializeAppearance = async () => {
+    try {
+      await appearanceService.initialize();
+      const config = appearanceService.getConfiguration();
+      setAppearanceConfig(config);
+    } catch (error) {
+      console.error('❌ [APPEARANCE] Erreur initialisation configuration:', error);
+    }
+  };
+
   const handlePedometerModeChange = async (mode) => {
     try {
       await configurationService.setPedometerMode(mode);
@@ -88,6 +118,47 @@ export default function ConfigurationScreen() {
 
   const handleUserProfileSetup = () => {
     setShowProfileSetup(true);
+  };
+
+  // *** NOUVEAU: Gestion des couleurs ***
+  const handleColorSelection = (colorKey, colorValue) => {
+    setShowColorPicker({ visible: true, colorKey, currentColor: colorValue });
+  };
+
+  const applyColorChange = async (newColor) => {
+    try {
+      await appearanceService.setColor(showColorPicker.colorKey, newColor);
+      const updatedConfig = appearanceService.getConfiguration();
+      setAppearanceConfig(updatedConfig);
+      setShowColorPicker({ visible: false, colorKey: '', currentColor: '' });
+    } catch (error) {
+      console.error('❌ [APPEARANCE] Erreur application couleur:', error);
+      Alert.alert('Erreur', 'Impossible d\'appliquer la couleur: ' + error.message);
+    }
+  };
+
+  const resetAppearanceToDefaults = () => {
+    Alert.alert(
+      'Réinitialiser l\'apparence',
+      'Êtes-vous sûr de vouloir réinitialiser toutes les couleurs aux valeurs par défaut ?',
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Réinitialiser',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await appearanceService.resetToDefaults();
+              const config = appearanceService.getConfiguration();
+              setAppearanceConfig(config);
+              Alert.alert('Succès', 'Couleurs réinitialisées');
+            } catch (error) {
+              Alert.alert('Erreur', 'Impossible de réinitialiser les couleurs');
+            }
+          }
+        }
+      ]
+    );
   };
 
   const handlePedometerDiagnostic = async () => {
@@ -153,6 +224,29 @@ export default function ConfigurationScreen() {
         }
       ]
     );
+  };
+
+  // *** NOUVEAU: Gestion des capteurs ***
+  const handleSensorsFrequencyChange = async (frequency) => {
+    try {
+      await configurationService.setSensorsFrequency(frequency);
+      const updatedConfig = configurationService.getSensorsConfiguration();
+      setSensorsConfig(updatedConfig);
+    } catch (error) {
+      console.error('❌ [CONFIGURATION] Erreur changement fréquence capteurs:', error);
+      Alert.alert('Erreur', 'Impossible de sauvegarder la fréquence des capteurs: ' + error.message);
+    }
+  };
+
+  const handleSensorToggle = async (sensorName, enabled) => {
+    try {
+      await configurationService.setSensorEnabled(sensorName, enabled);
+      const updatedConfig = configurationService.getSensorsConfiguration();
+      setSensorsConfig(updatedConfig);
+    } catch (error) {
+      console.error('❌ [CONFIGURATION] Erreur activation/désactivation capteur:', error);
+      Alert.alert('Erreur', 'Impossible de sauvegarder la configuration des capteurs: ' + error.message);
+    }
   };
 
   const diagnosticSettings = [
@@ -405,6 +499,92 @@ export default function ConfigurationScreen() {
           </View>
         </View>
 
+        {/* *** NOUVEAU: Section Configuration des Couleurs *** */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Configuration des Couleurs</Text>
+          
+          {appearanceConfig && (
+            <View style={styles.colorsContainer}>
+              {/* Couleur de fond */}
+              <View style={styles.colorItem}>
+                <Text style={styles.colorLabel}>Fond de carte</Text>
+                <TouchableOpacity
+                  style={[styles.colorPreview, { backgroundColor: appearanceConfig.backgroundColor }]}
+                  onPress={() => handleColorSelection('backgroundColor', appearanceConfig.backgroundColor)}
+                >
+                  <Text style={styles.colorValue}>{appearanceConfig.backgroundColor}</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Couleur de trajectoire */}
+              <View style={styles.colorItem}>
+                <Text style={styles.colorLabel}>Tracé de trajectoire</Text>
+                <TouchableOpacity
+                  style={[styles.colorPreview, { backgroundColor: appearanceConfig.trajectoryColor }]}
+                  onPress={() => handleColorSelection('trajectoryColor', appearanceConfig.trajectoryColor)}
+                >
+                  <Text style={[styles.colorValue, { 
+                    color: appearanceConfig.trajectoryColor === '#000000' ? '#ffffff' : '#000000' 
+                  }]}>
+                    {appearanceConfig.trajectoryColor}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Couleur de grille */}
+              <View style={styles.colorItem}>
+                <Text style={styles.colorLabel}>Grille de référence</Text>
+                <TouchableOpacity
+                  style={[styles.colorPreview, { backgroundColor: appearanceConfig.gridColor }]}
+                  onPress={() => handleColorSelection('gridColor', appearanceConfig.gridColor)}
+                >
+                  <Text style={[styles.colorValue, { 
+                    color: appearanceConfig.gridColor === '#000000' ? '#ffffff' : '#000000' 
+                  }]}>
+                    {appearanceConfig.gridColor}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Couleur utilisateur */}
+              <View style={styles.colorItem}>
+                <Text style={styles.colorLabel}>Position utilisateur</Text>
+                <TouchableOpacity
+                  style={[styles.colorPreview, { backgroundColor: appearanceConfig.userColor }]}
+                  onPress={() => handleColorSelection('userColor', appearanceConfig.userColor)}
+                >
+                  <Text style={[styles.colorValue, { 
+                    color: appearanceConfig.userColor === '#000000' ? '#ffffff' : '#000000' 
+                  }]}>
+                    {appearanceConfig.userColor}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Couleur orientation */}
+              <View style={styles.colorItem}>
+                <Text style={styles.colorLabel}>Direction/Orientation</Text>
+                <TouchableOpacity
+                  style={[styles.colorPreview, { backgroundColor: appearanceConfig.orientationColor }]}
+                  onPress={() => handleColorSelection('orientationColor', appearanceConfig.orientationColor)}
+                >
+                  <Text style={[styles.colorValue, { 
+                    color: appearanceConfig.orientationColor === '#000000' ? '#ffffff' : '#000000' 
+                  }]}>
+                    {appearanceConfig.orientationColor}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Bouton de réinitialisation */}
+              <TouchableOpacity style={styles.resetColorsButton} onPress={resetAppearanceToDefaults}>
+                <Ionicons name="color-palette" size={20} color="#ff6b35" />
+                <Text style={styles.resetColorsButtonText}>Réinitialiser les couleurs</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
         {/* Section Diagnostic */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Diagnostic</Text>
@@ -426,7 +606,7 @@ export default function ConfigurationScreen() {
               <Text style={styles.infoValue}>{Platform.OS}</Text>
             </View>
             <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Podomètre natif:</Text>
+              <Text style={styles.infoLabel}>Podomètre natif</Text>
               <Text style={[
                 styles.infoValue,
                 hasNativePedometer ? styles.infoValueSuccess : styles.infoValueError
@@ -435,9 +615,18 @@ export default function ConfigurationScreen() {
               </Text>
             </View>
             <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Boussole native:</Text>
+              <Text style={styles.infoLabel}>Boussole native</Text>
               <Text style={[styles.infoValue, styles.infoValueSuccess]}>
                 Disponible
+              </Text>
+            </View>
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Mode actuel</Text>
+              <Text style={[
+                styles.infoValue,
+                pedometerMode === 'native' ? styles.infoValueSuccess : styles.infoValueWarning
+              ]}>
+                {pedometerMode === 'native' ? 'NATIF' : 'APPLICATION'}
               </Text>
             </View>
           </View>
@@ -460,6 +649,70 @@ export default function ConfigurationScreen() {
         visible={showProfileSetup}
         onClose={() => setShowProfileSetup(false)}
       />
+
+      {/* *** NOUVEAU: Modal de sélection de couleurs *** */}
+      <Modal
+        visible={showColorPicker.visible}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.colorPickerOverlay}>
+          <View style={styles.colorPickerContent}>
+            <View style={styles.colorPickerHeader}>
+              <Ionicons name="color-palette" size={32} color="#00ff88" />
+              <Text style={styles.colorPickerTitle}>Choisir une couleur</Text>
+              <TouchableOpacity 
+                onPress={() => setShowColorPicker({ visible: false, colorKey: '', currentColor: '' })}
+                style={styles.colorPickerClose}
+              >
+                <Ionicons name="close" size={24} color="#888888" />
+              </TouchableOpacity>
+            </View>
+            
+            <Text style={styles.colorPickerSubtitle}>
+              {showColorPicker.colorKey === 'backgroundColor' ? 'Fond de carte' :
+               showColorPicker.colorKey === 'trajectoryColor' ? 'Tracé de trajectoire' :
+               showColorPicker.colorKey === 'gridColor' ? 'Grille de référence' :
+               showColorPicker.colorKey === 'userColor' ? 'Position utilisateur' :
+               showColorPicker.colorKey === 'orientationColor' ? 'Direction/Orientation' : ''}
+            </Text>
+            
+            {/* Couleur actuelle */}
+            <View style={styles.currentColorSection}>
+              <Text style={styles.currentColorLabel}>Couleur actuelle :</Text>
+              <View style={[styles.currentColorPreview, { backgroundColor: showColorPicker.currentColor }]}>
+                <Text style={[styles.currentColorText, { 
+                  color: showColorPicker.currentColor === '#000000' ? '#ffffff' : '#000000' 
+                }]}>
+                  {showColorPicker.currentColor}
+                </Text>
+              </View>
+            </View>
+            
+            {/* Couleurs prédéfinies */}
+            <Text style={styles.presetColorsTitle}>Couleurs prédéfinies :</Text>
+            <View style={styles.presetColorsGrid}>
+              {(showColorPicker.colorKey === 'backgroundColor' ? 
+                appearanceService.getPresetColors().backgrounds : 
+                appearanceService.getPresetColors().trajectories
+              ).map((preset, index) => (
+                <TouchableOpacity
+                  key={index}
+                  style={[styles.presetColorItem, { backgroundColor: preset.value }]}
+                  onPress={() => applyColorChange(preset.value)}
+                >
+                  <Text style={[styles.presetColorName, { 
+                    color: preset.value === '#000000' ? '#ffffff' : '#000000',
+                    opacity: preset.value === '#000000' || preset.value === '#ffffff' ? 1 : 0
+                  }]}>
+                    {preset.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -672,6 +925,9 @@ const styles = StyleSheet.create({
   infoValueError: {
     color: '#ff4444',
   },
+  infoValueWarning: {
+    color: '#ffaa00',
+  },
   resetButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -748,5 +1004,128 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#000000',
     marginLeft: 8,
+  },
+  colorsContainer: {
+    backgroundColor: '#2a2a2a',
+    borderRadius: 12,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#333333',
+    gap: 10,
+  },
+  colorItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  colorLabel: {
+    color: '#888888',
+    fontSize: 14,
+  },
+  colorPreview: {
+    width: 100,
+    height: 40,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  colorValue: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  resetColorsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 15,
+    backgroundColor: '#2a1a1a',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ff4444',
+  },
+  resetColorsButtonText: {
+    color: '#ff4444',
+    fontSize: 16,
+    fontWeight: '500',
+    marginLeft: 8,
+  },
+  colorPickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  colorPickerContent: {
+    backgroundColor: '#1a1a1a',
+    padding: 20,
+    borderRadius: 12,
+    width: '80%',
+    maxHeight: '80%',
+  },
+  colorPickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  colorPickerTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: 'bold',
+    flex: 1,
+  },
+  colorPickerClose: {
+    padding: 5,
+  },
+  colorPickerSubtitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  currentColorSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  currentColorLabel: {
+    color: '#ffffff',
+    fontSize: 14,
+    marginRight: 10,
+  },
+  currentColorPreview: {
+    width: 100,
+    height: 40,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  currentColorText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  presetColorsTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  presetColorsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  presetColorItem: {
+    width: '30%',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#333333',
+  },
+  presetColorName: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
 }); 

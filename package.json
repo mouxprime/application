@@ -17,6 +17,7 @@
     "expo": "~53.0.9",
     "expo-battery": "~9.1.4",
     "expo-dev-client": "~5.1.8",
+    "expo-device": "~7.1.4",
     "expo-file-system": "~18.1.10",
     "expo-haptics": "^14.1.4",
     "expo-image-picker": "~16.1.4",
@@ -33,8 +34,7 @@
     "react-native-safe-area-context": "^5.4.0",
     "react-native-screens": "~4.10.0",
     "react-native-svg": "15.11.2",
-    "react-native-vector-icons": "^10.2.0",
-    "expo-device": "~7.1.4"
+    "react-native-vector-icons": "^10.2.0"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
