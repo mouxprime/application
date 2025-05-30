@@ -11,6 +11,8 @@ import {
   TextInput,
   Keyboard,
   TouchableWithoutFeedback,
+  Animated,
+  Easing,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, LinearGradient, Stop } from 'react-native-svg';
@@ -275,6 +277,49 @@ export default function MapScreen() {
     trajectoryName: '',
     isLoading: false
   });
+
+  // *** NOUVEAU: États pour l'ajout d'éléments sur la carte ***
+  const [addElementModal, setAddElementModal] = useState({
+    visible: false,
+    showElementsList: false,
+    selectedElementType: null,
+    elementName: '',
+    isLoading: false
+  });
+
+  // *** NOUVEAU: État pour la sauvegarde automatique à la fin du trajet ***
+  const [endTrajectoryModal, setEndTrajectoryModal] = useState({
+    visible: false,
+    trajectoryData: null,
+    isLoading: false
+  });
+
+  // *** NOUVEAU: Types d'éléments disponibles ***
+  const [availableElements] = useState([
+    { id: 'room', name: 'Salle', icon: 'home', color: '#00ff88', requiresName: true },
+    { id: 'well', name: 'Puit', icon: 'water', color: '#0088ff', requiresName: false },
+    { id: 'catflap', name: 'Chattière', icon: 'paw', color: '#ff8800', requiresName: false },
+    { id: 'custom', name: 'Élément personnalisé', icon: 'create', color: '#ff00ff', requiresName: true },
+    { id: 'entrance', name: 'Entrée', icon: 'enter', color: '#ffaa00', requiresName: false },
+    { id: 'exit', name: 'Sortie', icon: 'exit', color: '#ff4444', requiresName: false }
+  ]);
+
+  // *** NOUVEAU: Liste des éléments ajoutés par l'utilisateur ***
+  const [userElements, setUserElements] = useState([]);
+  
+  // *** NOUVEAU: Ref pour suivre si c'est la première fois qu'on arrête le tracking ***
+  const isFirstStopRef = useRef(true);
+  
+  // *** NOUVEAU: État pour le menu flottant animé ***
+  const [isFloatingMenuOpen, setIsFloatingMenuOpen] = useState(false);
+  
+  // *** NOUVEAU: État pour gérer PAUSE/STOP du tracking ***
+  const [trackingMode, setTrackingMode] = useState('stopped'); // 'stopped', 'running', 'paused'
+  const [pausedPosition, setPausedPosition] = useState(null); // Position lors de la pause
+  
+  // *** NOUVEAU: Valeurs animées pour le menu flottant ***
+  const menuAnimation = useRef(new Animated.Value(0)).current;
+  const rotationAnimation = useRef(new Animated.Value(0)).current;
   
   // *** CORRECTION: Dimensions SVG adaptées à l'écran avec zoom intelligent ***
   // Dimensions de l'affichage SVG - RETOUR À LA TAILLE ÉCRAN
@@ -402,14 +447,13 @@ export default function MapScreen() {
   };
 
   /**
-   * Démarrage/arrêt du tracking
+   * Démarrage/arrêt du tracking avec sauvegarde automatique
    */
   const toggleTracking = async () => {
     if (state.isTracking) {
-      actions.setTracking(false);
-      hybridMotionService.stop();
-      // *** MODIFICATION: Garder l'orientation active même hors tracking ***
-      console.log('🧭 [ORIENTATION] Orientation maintenue active hors tracking');
+      // *** SUPPRIMÉ: Plus d'arrêt direct, utiliser pauseTracking ou stopTracking ***
+      console.warn('⚠️ [TRACKING] Utiliser pauseTracking() ou stopTracking() au lieu de toggleTracking()');
+      return;
     } else {
       // *** NOUVEAU: Afficher le modal de sélection du point de départ avant de démarrer ***
       // Pré-sélectionner "Entrée Fifi" par défaut
@@ -421,6 +465,116 @@ export default function MapScreen() {
         customX: '',
         customY: ''
       }));
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Démarrage du tracking ***
+   */
+  const startTracking = async () => {
+    try {
+      setTrackingMode('running');
+      actions.setTracking(true);
+      await startMotionTracking();
+      console.log('✅ [TRACKING] Tracking démarré');
+    } catch (error) {
+      console.error('❌ [TRACKING] Erreur démarrage:', error);
+      setTrackingMode('stopped');
+      Alert.alert('Erreur', 'Impossible de démarrer le tracking');
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Pause du tracking (garde la position) ***
+   */
+  const pauseTracking = async () => {
+    try {
+      // Sauvegarder la position actuelle
+      setPausedPosition({
+        x: state.pose.x,
+        y: state.pose.y,
+        theta: state.pose.theta,
+        confidence: state.pose.confidence
+      });
+      
+      setTrackingMode('paused');
+      actions.setTracking(false);
+      hybridMotionService.stop();
+      
+      console.log(`⏸️ [TRACKING] Tracking mis en pause à la position (${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})`);
+    } catch (error) {
+      console.error('❌ [TRACKING] Erreur mise en pause:', error);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Reprendre le tracking (depuis la position de pause) ***
+   */
+  const resumeTracking = async () => {
+    try {
+      if (pausedPosition) {
+        // Restaurer la position de pause
+        actions.updatePose(pausedPosition);
+        console.log(`▶️ [TRACKING] Reprise du tracking depuis la position (${pausedPosition.x.toFixed(2)}, ${pausedPosition.y.toFixed(2)})`);
+      }
+      
+      setTrackingMode('running');
+      actions.setTracking(true);
+      await startMotionTracking();
+      
+      console.log('▶️ [TRACKING] Tracking repris');
+    } catch (error) {
+      console.error('❌ [TRACKING] Erreur reprise:', error);
+      setTrackingMode('paused');
+      Alert.alert('Erreur', 'Impossible de reprendre le tracking');
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Arrêt définitif du tracking (termine le trajet) ***
+   */
+  const stopTracking = async () => {
+    try {
+      // Arrêter le tracking
+      setTrackingMode('stopped');
+      actions.setTracking(false);
+      hybridMotionService.stop();
+      setPausedPosition(null);
+      
+      // *** NOUVEAU: Sauvegarde automatique à la fin du trajet ***
+      const hasTrajectory = state.trajectory && state.trajectory.length > 0;
+      
+      if (hasTrajectory) {
+        if (authState.isAuthenticated) {
+          // *** UTILISATEUR CONNECTÉ: Sauvegarde automatique ***
+          console.log('🔄 [AUTO-SAVE] Utilisateur connecté - Sauvegarde automatique du trajet');
+          try {
+            await saveTrajectoryAutomatically();
+            Alert.alert('✅ Trajet terminé', 'Votre trajet a été automatiquement sauvegardé dans votre compte.');
+          } catch (error) {
+            console.error('❌ [AUTO-SAVE] Erreur sauvegarde automatique:', error);
+            Alert.alert('⚠️ Erreur de sauvegarde', 'Impossible de sauvegarder automatiquement. Essayez à nouveau.');
+          }
+        } else {
+          // *** UTILISATEUR NON CONNECTÉ: Proposer sauvegarde locale ***
+          console.log('💾 [LOCAL-SAVE] Utilisateur non connecté - Proposition de sauvegarde locale');
+          setEndTrajectoryModal({
+            visible: true,
+            trajectoryData: {
+              trajectory: state.trajectory,
+              stepCount: state.stepCount || 0,
+              distance: state.distance || 0,
+              startTime: state.trajectory[0]?.timestamp,
+              endTime: state.trajectory[state.trajectory.length - 1]?.timestamp
+            },
+            isLoading: false
+          });
+        }
+      }
+      
+      console.log('🛑 [TRACKING] Tracking arrêté définitivement');
+    } catch (error) {
+      console.error('❌ [TRACKING] Erreur arrêt:', error);
     }
   };
 
@@ -1546,9 +1700,8 @@ export default function MapScreen() {
 
       console.log(`✅ [STARTING-POINT] Point de départ défini: (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
 
-      // *** NOUVEAU: Démarrer le tracking après confirmation du point de départ ***
-      actions.setTracking(true);
-      await startMotionTracking();
+      // *** MODIFIÉ: Utiliser la nouvelle fonction startTracking ***
+      await startTracking();
 
     } catch (error) {
       console.error('❌ [STARTING-POINT] Erreur définition point de départ:', error);
@@ -1575,6 +1728,219 @@ export default function MapScreen() {
     }));
   };
 
+  /**
+   * *** NOUVEAU: Sauvegarde automatique du trajet ***
+   */
+  const saveTrajectoryAutomatically = async () => {
+    try {
+      // Sauvegarder dans la carte persistante
+      const trajectoryId = await saveTrajectoryToPersistentMap();
+      
+      // Générer le chemin SVG
+      const svgPath = generateSVGPath();
+      
+      // Préparer les données du trajet avec un nom automatique
+      const timestamp = new Date().toLocaleString('fr-FR');
+      const trajectoryData = {
+        name: `Trajet ${timestamp}`,
+        points: state.trajectory,
+        svgPath: svgPath,
+        stepCount: state.stepCount || 0,
+        distance: state.distance || 0,
+        duration: 0 // TODO: calculer la durée réelle
+      };
+
+      // Sauvegarder via le contexte d'authentification
+      const result = await authActions.saveTrajectory(trajectoryData);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Erreur de sauvegarde');
+      }
+
+      console.log(`✅ [AUTO-SAVE] Trajet sauvegardé automatiquement: ${trajectoryData.name}`);
+      
+      // Réinitialiser le trajet actuel
+      actions.resetTrajectory();
+      
+      return result;
+    } catch (error) {
+      console.error('❌ [AUTO-SAVE] Erreur sauvegarde automatique:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Centrer sur l'utilisateur avec zoom x4.7 ***
+   */
+  const centerOnUserWithZoom = useCallback(() => {
+    if (mapControls.centerOnUser && mapControls.setCustomZoom) {
+      // Définir le zoom à exactement 4.7x
+      mapControls.setCustomZoom(4.7);
+      
+      // Centrer sur l'utilisateur
+      setTimeout(() => {
+        mapControls.centerOnUser();
+      }, 100); // Petit délai pour laisser le zoom s'appliquer
+      
+      console.log(`🎯 [CENTER-USER] Recentrage sur utilisateur avec zoom 4.7x`);
+    } else {
+      console.warn('⚠️ [CENTER-USER] Contrôles de carte non disponibles');
+    }
+  }, [mapControls.centerOnUser, mapControls.setCustomZoom]);
+
+  /**
+   * *** NOUVEAU: Ouvrir/fermer la liste d'ajout d'éléments ***
+   */
+  const toggleAddElementsList = () => {
+    setAddElementModal(prev => ({
+      ...prev,
+      visible: !prev.visible,
+      showElementsList: !prev.visible,
+      selectedElementType: null,
+      elementName: ''
+    }));
+  };
+
+  /**
+   * *** NOUVEAU: Sélectionner un type d'élément à ajouter ***
+   */
+  const selectElementType = (elementType) => {
+    setAddElementModal(prev => ({
+      ...prev,
+      selectedElementType: elementType,
+      showElementsList: false,
+      elementName: elementType.requiresName ? '' : elementType.name
+    }));
+  };
+
+  /**
+   * *** NOUVEAU: Confirmer l'ajout d'un élément ***
+   */
+  const confirmAddElement = async () => {
+    const { selectedElementType, elementName } = addElementModal;
+    
+    if (!selectedElementType) return;
+    
+    // Vérifier que le nom est fourni si requis
+    if (selectedElementType.requiresName && !elementName.trim()) {
+      Alert.alert('Nom requis', `Veuillez donner un nom pour ${selectedElementType.name.toLowerCase()}`);
+      return;
+    }
+
+    setAddElementModal(prev => ({ ...prev, isLoading: true }));
+
+    try {
+      // Créer l'élément à la position actuelle de l'utilisateur
+      const element = {
+        id: `${selectedElementType.id}_${Date.now()}`,
+        type: selectedElementType.id,
+        name: elementName.trim() || selectedElementType.name,
+        icon: selectedElementType.icon,
+        color: selectedElementType.color,
+        worldX: state.pose.x,
+        worldY: state.pose.y,
+        pixelX: (state.pose.x * SCALE) + (MAP_TOTAL_WIDTH / 2), // Conversion vers coordonnées pixel
+        pixelY: -(state.pose.y * SCALE) + (MAP_TOTAL_HEIGHT / 2), // Conversion vers coordonnées pixel
+        timestamp: Date.now(),
+        addedBy: authState.user?.id || 'anonymous'
+      };
+
+      // Ajouter l'élément à la liste locale
+      setUserElements(prev => [...prev, element]);
+
+      // TODO: Sauvegarder dans la carte persistante si nécessaire
+      console.log(`✅ [ADD-ELEMENT] Élément ajouté: ${element.name} à (${element.worldX.toFixed(2)}, ${element.worldY.toFixed(2)})`);
+
+      // Fermer le modal
+      setAddElementModal({
+        visible: false,
+        showElementsList: false,
+        selectedElementType: null,
+        elementName: '',
+        isLoading: false
+      });
+
+      Alert.alert('✅ Élément ajouté', `${element.name} a été ajouté à votre position actuelle.`);
+
+    } catch (error) {
+      console.error('❌ [ADD-ELEMENT] Erreur ajout élément:', error);
+      Alert.alert('Erreur', 'Impossible d\'ajouter l\'élément');
+      setAddElementModal(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Confirmer la sauvegarde locale à la fin du trajet ***
+   */
+  const confirmLocalSave = async () => {
+    setEndTrajectoryModal(prev => ({ ...prev, isLoading: true }));
+
+    try {
+      // Sauvegarder localement dans la carte persistante
+      await saveTrajectoryToPersistentMap();
+      
+      setEndTrajectoryModal({ visible: false, trajectoryData: null, isLoading: false });
+      
+      Alert.alert('✅ Trajet sauvegardé', 'Votre trajet a été sauvegardé localement sur cet appareil.');
+      
+      // Réinitialiser le trajet actuel
+      actions.resetTrajectory();
+
+    } catch (error) {
+      console.error('❌ [LOCAL-SAVE] Erreur sauvegarde locale:', error);
+      Alert.alert('Erreur', 'Impossible de sauvegarder le trajet localement');
+      setEndTrajectoryModal(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Refuser la sauvegarde locale ***
+   */
+  const declineLocalSave = () => {
+    setEndTrajectoryModal({ visible: false, trajectoryData: null, isLoading: false });
+    
+    // Réinitialiser le trajet actuel sans sauvegarder
+    actions.resetTrajectory();
+    
+    console.log('❌ [LOCAL-SAVE] Trajet non sauvegardé à la demande de l\'utilisateur');
+  };
+
+  /**
+   * *** NOUVEAU: Basculer le menu flottant animé ***
+   */
+  const toggleFloatingMenu = () => {
+    const toValue = isFloatingMenuOpen ? 0 : 1;
+    
+    setIsFloatingMenuOpen(!isFloatingMenuOpen);
+    
+    // Animation du menu
+    Animated.parallel([
+      Animated.spring(menuAnimation, {
+        toValue,
+        tension: 80,
+        friction: 7,
+        useNativeDriver: true,
+      }),
+      Animated.timing(rotationAnimation, {
+        toValue,
+        duration: 300,
+        easing: Easing.bezier(0.25, 0.46, 0.45, 0.94),
+        useNativeDriver: true,
+      }),
+    ]).start();
+    
+    // Fermer le menu d'ajout d'éléments si ouvert
+    if (addElementModal.visible) {
+      setAddElementModal({
+        visible: false,
+        showElementsList: false,
+        selectedElementType: null,
+        elementName: '',
+        isLoading: false
+      });
+    }
+  };
+
   if (!isMapLoaded) {
     return (
       <SafeAreaView style={styles.container}>
@@ -1594,6 +1960,7 @@ export default function MapScreen() {
         currentTrajectory={state.trajectory}
         userPosition={state.pose}
         userOrientation={continuousOrientation}
+        userElements={userElements}
         onViewportChange={handleViewportChange}
         initialZoom={initialZoom}
         initialCenterPoint={defaultPoint}
@@ -1603,55 +1970,337 @@ export default function MapScreen() {
       {/* Métriques en temps réel */}
       {renderMetrics()}
 
-      {/* Contrôles */}
-      <View style={styles.controlsContainer}>
-        {/* *** NOUVEAU: Bouton d'affichage métriques quand masqué *** */}
-        {!isMetricsPanelVisible && (
-          <TouchableOpacity 
-            style={[styles.controlButton, styles.metricsToggleButton]} 
-            onPress={toggleMetricsPanel}
+      {/* *** NOUVEAU: Système de bouton flottant animé *** */}
+      <View style={styles.floatingMenuContainer}>
+        {/* Boutons secondaires en arc autour du bouton principal */}
+        <>
+          {/* *** BOUTON MÉTRIQUES *** */}
+          {!isMetricsPanelVisible && (
+            <Animated.View style={[
+              styles.floatingSecondaryButton, 
+              styles.floatingButton1,
+              {
+                transform: [
+                  { 
+                    translateX: menuAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, -85] // Arc position 1
+                    })
+                  },
+                  { 
+                    translateY: menuAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, -45] // Arc position 1
+                    })
+                  },
+                  { 
+                    scale: menuAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, 1]
+                    })
+                  }
+                ],
+                opacity: menuAnimation
+              }
+            ]}>
+              <TouchableOpacity 
+                style={styles.floatingButtonInner}
+                onPress={toggleMetricsPanel}
+              >
+                <Ionicons name="eye" size={20} color="#ffffff" />
+              </TouchableOpacity>
+            </Animated.View>
+          )}
+          
+          {/* *** BOUTON START/PAUSE TRACKING *** */}
+          <Animated.View style={[
+            styles.floatingSecondaryButton, 
+            styles.floatingButton2,
+            trackingMode === 'running' && styles.floatingButtonActive,
+            {
+              transform: [
+                { 
+                  translateX: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, -35] // Arc position 2
+                  })
+                },
+                { 
+                  translateY: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, -90] // Arc position 2
+                  })
+                },
+                { 
+                  scale: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, 1]
+                  })
+                }
+              ],
+              opacity: menuAnimation
+            }
+          ]}>
+            <TouchableOpacity
+              style={styles.floatingButtonInner}
+              onPress={() => {
+                if (trackingMode === 'stopped') {
+                  toggleTracking(); // Ouvre le modal de point de départ
+                } else if (trackingMode === 'running') {
+                  pauseTracking();
+                } else if (trackingMode === 'paused') {
+                  resumeTracking();
+                }
+              }}
+            >
+              <Ionicons 
+                name={
+                  trackingMode === 'stopped' ? "play" :
+                  trackingMode === 'running' ? "pause" : 
+                  "play" // paused
+                } 
+                size={20} 
+                color={trackingMode === 'running' ? "#000000" : "#ffffff"} 
+              />
+            </TouchableOpacity>
+          </Animated.View>
+          
+          {/* *** BOUTON STOP (visible seulement si tracking actif ou en pause) *** */}
+          {(trackingMode === 'running' || trackingMode === 'paused') && (
+            <Animated.View style={[
+              styles.floatingSecondaryButton, 
+              styles.floatingButtonStop,
+              {
+                transform: [
+                  { 
+                    translateX: menuAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, 35] // Arc position 3 (centre)
+                    })
+                  },
+                  { 
+                    translateY: menuAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, -90] // Arc position 3 (centre)
+                    })
+                  },
+                  { 
+                    scale: menuAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, 1]
+                    })
+                  }
+                ],
+                opacity: menuAnimation
+              }
+            ]}>
+              <TouchableOpacity
+                style={styles.floatingButtonInner}
+                onPress={stopTracking}
+              >
+                <Ionicons 
+                  name="stop" 
+                  size={20} 
+                  color="#ffffff" 
+                />
+              </TouchableOpacity>
+            </Animated.View>
+          )}
+          
+          {/* *** BOUTON POSITION *** */}
+          <Animated.View style={[
+            styles.floatingSecondaryButton, 
+            styles.floatingButton3,
+            {
+              transform: [
+                { 
+                  translateX: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, trackingMode === 'stopped' ? 35 : 85] // Adjust based on stop button presence
+                  })
+                },
+                { 
+                  translateY: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, trackingMode === 'stopped' ? -90 : -45] // Adjust based on stop button presence
+                  })
+                },
+                { 
+                  scale: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, 1]
+                  })
+                }
+              ],
+              opacity: menuAnimation
+            }
+          ]}>
+            <TouchableOpacity 
+              style={styles.floatingButtonInner}
+              onPress={centerOnUserWithZoom}
+            >
+              <Ionicons name="locate" size={20} color="#ffffff" />
+            </TouchableOpacity>
+          </Animated.View>
+          
+          {/* *** BOUTON AJOUT D'ÉLÉMENTS *** */}
+          <Animated.View style={[
+            styles.floatingSecondaryButton, 
+            styles.floatingButton4,
+            addElementModal.visible && styles.floatingButtonActive,
+            {
+              transform: [
+                { 
+                  translateX: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, trackingMode === 'stopped' ? 85 : 95] // Arc position finale
+                  })
+                },
+                { 
+                  translateY: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, trackingMode === 'stopped' ? -45 : -15] // Arc position finale
+                  })
+                },
+                { 
+                  scale: menuAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0, 1]
+                  })
+                }
+              ],
+              opacity: menuAnimation
+            }
+          ]}>
+            <TouchableOpacity 
+              style={styles.floatingButtonInner}
+              onPress={toggleAddElementsList}
+            >
+              <Ionicons 
+                name={addElementModal.visible ? "close" : "add"} 
+                size={20} 
+                color={addElementModal.visible ? "#000000" : "#ffffff"} 
+              />
+            </TouchableOpacity>
+          </Animated.View>
+        </>
+        
+        {/* Bouton principal flottant */}
+        <Animated.View style={[
+          styles.floatingMainButton,
+          {
+            transform: [
+              { 
+                rotate: rotationAnimation.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: ['0deg', '45deg']
+                })
+              }
+            ]
+          }
+        ]}>
+          <TouchableOpacity
+            style={styles.floatingButtonInner}
+            onPress={toggleFloatingMenu}
           >
-            <Ionicons name="eye" size={24} color="#00ff88" />
+            <Ionicons 
+              name={isFloatingMenuOpen ? "close" : "menu"} 
+              size={28} 
+              color="#ffffff"
+            />
           </TouchableOpacity>
-        )}
-        
-        <TouchableOpacity
-          style={[styles.controlButton, state.isTracking && styles.activeButton]}
-          onPress={toggleTracking}
-        >
-          <Ionicons 
-            name={state.isTracking ? "pause" : "play"} 
-            size={24} 
-            color={state.isTracking ? "#000000" : "#00ff88"} 
-          />
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.controlButton} onPress={centerOnUser}>
-          <Ionicons name="locate" size={24} color="#00ff88" />
-        </TouchableOpacity>
-        
-        {/* *** NOUVEAU: Bouton voir carte entière *** */}
-        <TouchableOpacity style={styles.controlButton} onPress={viewFullMap}>
-          <Ionicons name="scan" size={24} color="#00ff88" />
-        </TouchableOpacity>
-        
-        {/* *** NOUVEAU: Bouton sauvegarder trajet dans carte persistante *** */}
-        <TouchableOpacity 
-          style={[styles.controlButton, (!state.trajectory || state.trajectory.length === 0) && styles.disabledControlButton]} 
-          onPress={handleSaveTrajectory}
-          disabled={!state.trajectory || state.trajectory.length === 0}
-        >
-          <Ionicons name="save" size={24} color={(!state.trajectory || state.trajectory.length === 0) ? "#666666" : "#00ff88"} />
-        </TouchableOpacity>
-
-        {/* *** NOUVEAU: Bouton statistiques de la carte *** */}
-        <TouchableOpacity 
-          style={styles.controlButton} 
-          onPress={showMapStats}
-        >
-          <Ionicons name="stats-chart" size={24} color="#00ff88" />
-        </TouchableOpacity>
+        </Animated.View>
       </View>
+
+      {/* *** NOUVEAU: Menu flottant d'ajout d'éléments *** */}
+      {addElementModal.visible && (
+        <View style={styles.addElementsMenu}>
+          {addElementModal.showElementsList ? (
+            // Liste des types d'éléments
+            <View style={styles.elementsListContainer}>
+              <Text style={styles.elementsListTitle}>Ajouter un élément</Text>
+              <Text style={styles.elementsListSubtitle}>📍 Position: ({state.pose.x.toFixed(1)}, {state.pose.y.toFixed(1)})</Text>
+              
+              {availableElements.map(element => (
+                <TouchableOpacity
+                  key={element.id}
+                  style={styles.elementTypeButton}
+                  onPress={() => selectElementType(element)}
+                >
+                  <View style={[styles.elementIcon, { backgroundColor: element.color }]}>
+                    <Ionicons name={element.icon} size={20} color="#ffffff" />
+                  </View>
+                  <Text style={styles.elementTypeName}>{element.name}</Text>
+                  {element.requiresName && (
+                    <Ionicons name="create" size={16} color="#ffaa00" />
+                  )}
+                </TouchableOpacity>
+              ))}
+              
+              {/* *** NOUVEAU: Bouton Annuler *** */}
+              <TouchableOpacity
+                style={styles.elementCancelTypeButton}
+                onPress={() => setAddElementModal({ visible: false, showElementsList: false, selectedElementType: null, elementName: '', isLoading: false })}
+              >
+                <View style={[styles.elementIcon, { backgroundColor: '#ff4444' }]}>
+                  <Ionicons name="close" size={20} color="#ffffff" />
+                </View>
+                <Text style={styles.elementCancelTypeName}>Annuler</Text>
+              </TouchableOpacity>
+            </View>
+          ) : addElementModal.selectedElementType ? (
+            // Formulaire de saisie du nom (si requis)
+            <View style={styles.elementFormContainer}>
+              <View style={styles.elementFormHeader}>
+                <View style={[styles.elementIcon, { backgroundColor: addElementModal.selectedElementType.color }]}>
+                  <Ionicons name={addElementModal.selectedElementType.icon} size={20} color="#ffffff" />
+                </View>
+                <Text style={styles.elementFormTitle}>{addElementModal.selectedElementType.name}</Text>
+              </View>
+              
+              <Text style={styles.elementFormPosition}>
+                📍 Position: ({state.pose.x.toFixed(1)}, {state.pose.y.toFixed(1)})
+              </Text>
+              
+              {addElementModal.selectedElementType.requiresName && (
+                <View style={styles.elementNameInputContainer}>
+                  <Text style={styles.elementNameLabel}>Nom :</Text>
+                  <TextInput
+                    style={styles.elementNameInput}
+                    value={addElementModal.elementName}
+                    onChangeText={(text) => setAddElementModal(prev => ({ ...prev, elementName: text }))}
+                    placeholder={`Nom de ${addElementModal.selectedElementType.name.toLowerCase()}`}
+                    placeholderTextColor="#666666"
+                    returnKeyType="done"
+                    onSubmitEditing={confirmAddElement}
+                  />
+                </View>
+              )}
+              
+              <View style={styles.elementFormActions}>
+                <TouchableOpacity
+                  style={styles.elementCancelButton}
+                  onPress={() => setAddElementModal(prev => ({ ...prev, showElementsList: true, selectedElementType: null }))}
+                >
+                  <Text style={styles.elementCancelButtonText}>Retour</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity
+                  style={[styles.elementConfirmButton, addElementModal.isLoading && styles.disabledButton]}
+                  onPress={confirmAddElement}
+                  disabled={addElementModal.isLoading}
+                >
+                  {addElementModal.isLoading ? (
+                    <ActivityIndicator size="small" color="#000000" />
+                  ) : (
+                    <Text style={styles.elementConfirmButtonText}>Ajouter</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : null}
+        </View>
+      )}
 
       {/* *** NOUVEAU: Modal de sélection du point de départ *** */}
       <Modal
@@ -1833,6 +2482,57 @@ export default function MapScreen() {
                 <Text style={styles.successText}>Calibration terminée !</Text>
               </View>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* *** NOUVEAU: Modal de sauvegarde locale à la fin du trajet *** */}
+      <Modal
+        visible={endTrajectoryModal.visible}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.endTrajectoryModalOverlay}>
+          <View style={styles.endTrajectoryModalContent}>
+            <View style={styles.endTrajectoryHeader}>
+              <Ionicons name="flag-outline" size={32} color="#ffaa00" />
+              <Text style={styles.endTrajectoryTitle}>Trajet terminé</Text>
+            </View>
+            
+            <Text style={styles.endTrajectoryMessage}>
+              Votre trajet contient {endTrajectoryModal.trajectoryData?.trajectory?.length || 0} points 
+              pour une distance de {(endTrajectoryModal.trajectoryData?.distance || 0).toFixed(1)}m
+            </Text>
+            
+            <Text style={styles.endTrajectorySubtitle}>
+              💾 Souhaitez-vous sauvegarder ce trajet localement sur cet appareil ?
+            </Text>
+            
+            <View style={styles.endTrajectoryActions}>
+              <TouchableOpacity
+                style={styles.declineButton}
+                onPress={declineLocalSave}
+                disabled={endTrajectoryModal.isLoading}
+              >
+                <Text style={styles.declineButtonText}>Non, supprimer</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.saveButton, endTrajectoryModal.isLoading && styles.disabledButton]}
+                onPress={confirmLocalSave}
+                disabled={endTrajectoryModal.isLoading}
+              >
+                {endTrajectoryModal.isLoading ? (
+                  <ActivityIndicator size="small" color="#000000" />
+                ) : (
+                  <Text style={styles.saveButtonText}>Oui, sauvegarder</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+            
+            <Text style={styles.endTrajectoryNote}>
+              💡 Connectez-vous pour bénéficier de la sauvegarde automatique
+            </Text>
           </View>
         </View>
       </Modal>
@@ -2207,5 +2907,309 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
     marginLeft: 5,
+  },
+  addElementsMenu: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  elementsListContainer: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 20,
+    margin: 20,
+    minWidth: 300,
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    alignItems: 'center',
+  },
+  elementsListTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  elementsListSubtitle: {
+    color: '#cccccc',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  elementTypeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 170, 0, 0.1)',
+    borderWidth: 2,
+    borderColor: '#ffaa00',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+  },
+  elementIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    marginRight: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  elementTypeName: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  elementFormContainer: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 20,
+    margin: 20,
+    minWidth: 300,
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    alignItems: 'center',
+  },
+  elementFormHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  elementFormTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginLeft: 10,
+  },
+  elementFormPosition: {
+    color: '#cccccc',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 10,
+  },
+  elementNameInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  elementNameLabel: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginRight: 5,
+  },
+  elementNameInput: {
+    color: '#ffffff',
+    fontSize: 16,
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    borderRadius: 8,
+    padding: 12,
+    backgroundColor: 'rgba(0, 255, 136, 0.1)',
+    textAlign: 'center',
+  },
+  elementFormActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  elementCancelButton: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 68, 68, 0.2)',
+    borderWidth: 2,
+    borderColor: '#ff4444',
+    borderRadius: 10,
+    padding: 10,
+    alignItems: 'center',
+  },
+  elementCancelButtonText: {
+    color: '#ff4444',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  elementConfirmButton: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    borderRadius: 10,
+    padding: 10,
+    alignItems: 'center',
+  },
+  elementConfirmButtonText: {
+    color: '#00ff88',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  endTrajectoryModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  endTrajectoryModalContent: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 15,
+    padding: 25,
+    margin: 20,
+    maxWidth: 300,
+    width: '90%',
+    borderWidth: 2,
+    borderColor: '#ffaa00',
+    maxHeight: '80%',
+  },
+  endTrajectoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    justifyContent: 'center',
+  },
+  endTrajectoryTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginLeft: 10,
+  },
+  endTrajectoryMessage: {
+    color: '#cccccc',
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 15,
+    fontFamily: 'monospace',
+  },
+  endTrajectorySubtitle: {
+    color: '#ffaa00',
+    fontSize: 12,
+    textAlign: 'center',
+    marginBottom: 20,
+    fontStyle: 'italic',
+  },
+  endTrajectoryActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+    gap: 15,
+  },
+  declineButton: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 68, 68, 0.2)',
+    borderWidth: 2,
+    borderColor: '#ff4444',
+    borderRadius: 10,
+    padding: 10,
+    alignItems: 'center',
+  },
+  declineButtonText: {
+    color: '#ff4444',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  saveButton: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 255, 136, 0.2)',
+    borderWidth: 2,
+    borderColor: '#00ff88',
+    borderRadius: 10,
+    padding: 10,
+    alignItems: 'center',
+  },
+  saveButtonText: {
+    color: '#00ff88',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  endTrajectoryNote: {
+    color: '#888888',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 10,
+    fontStyle: 'italic',
+  },
+  elementCancelTypeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 68, 68, 0.2)',
+    borderWidth: 2,
+    borderColor: '#ff4444',
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  elementCancelTypeName: {
+    color: '#ff4444',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginLeft: 5,
+  },
+  floatingMenuContainer: {
+    position: 'absolute',
+    bottom: 30,
+    left: '50%',
+    transform: [{ translateX: -30 }], // -30 pour centrer un bouton de 60px
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  floatingSecondaryButton: {
+    position: 'absolute',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#00ff88',
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  floatingButtonInner: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 25,
+  },
+  floatingButton1: {
+    backgroundColor: '#0088ff', // Bleu pour métriques
+  },
+  floatingButton2: {
+    backgroundColor: '#00ff88', // Vert principal pour play/pause
+  },
+  floatingButton3: {
+    backgroundColor: '#ffaa00', // Orange pour position
+  },
+  floatingButton4: {
+    backgroundColor: '#ff6b35', // Orange-rouge pour ajout d'éléments
+  },
+  floatingButtonActive: {
+    backgroundColor: '#ffffff', // Blanc quand actif
+  },
+  floatingMainButton: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#00ff88', // Vert principal
+    borderWidth: 3,
+    borderColor: '#ffffff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 8,
+  },
+  floatingMainButtonActive: {
+    backgroundColor: '#ff4444',
+  },
+  floatingButtonStop: {
+    backgroundColor: '#ff4444', // Rouge pour stop
   },
 }); 

@@ -20,6 +20,7 @@ export default function TiledMapView({
   currentTrajectory, 
   userPosition, 
   userOrientation,
+  userElements = [],
   onViewportChange,
   initialZoom = 0.1,
   initialCenterPoint = null,
@@ -178,7 +179,34 @@ export default function TiledMapView({
         
         // *** CORRIGÉ: Utiliser zoomRef.current pour la sensibilité ***
         const currentZoom = zoomRef.current;
-        const sensitivity = Math.max(0.4, Math.min(6.0, 2.4 / currentZoom));
+        
+        // *** NOUVEAU: Sensibilité par paliers adaptés à chaque niveau de zoom ***
+        let sensitivity;
+        
+        if (currentZoom <= 0.5) {
+          // Zoom très éloigné : sensibilité très réduite
+          sensitivity = 0.3;
+        } else if (currentZoom <= 1.0) {
+          // Zoom éloigné : sensibilité réduite  
+          sensitivity = 0.5;
+        } else if (currentZoom <= 1.5) {
+          // Zoom moyen-éloigné : sensibilité modérée
+          sensitivity = 0.8;
+        } else if (currentZoom <= 2.5) {
+          // Zoom moyen : sensibilité normale (référence parfaite)
+          sensitivity = 1.1;
+        } else if (currentZoom <= 4.0) {
+          // Zoom rapproché : sensibilité réduite pour précision
+          sensitivity = 0.8;
+        } else if (currentZoom <= 6.0) {
+          // Zoom très rapproché : sensibilité fine
+          sensitivity = 0.6;
+        } else {
+          // Zoom maximum : sensibilité très fine
+          sensitivity = 0.4;
+        }
+        
+        console.log(`🎯 [SENSITIVITY] Zoom: ${currentZoom.toFixed(3)}x → Sensibilité: ${sensitivity.toFixed(1)} (palier optimisé)`);
         
         // Calculer la nouvelle position basée sur la position de départ
         const deltaX = gestureState.dx * sensitivity;
@@ -466,6 +494,73 @@ export default function TiledMapView({
   }, [userPosition, userOrientation, worldToSVG, zoom, colors.user, colors.orientation]);
 
   /**
+   * *** NOUVEAU: Rendu des éléments ajoutés par l'utilisateur ***
+   */
+  const renderUserElements = useCallback(() => {
+    if (!userElements || userElements.length === 0) return null;
+    
+    return userElements.map(element => {
+      const radius = Math.max(4, 8 / zoom);
+      
+      return (
+        <G key={element.id}>
+          {/* Cercle extérieur (halo) */}
+          <Circle
+            cx={element.pixelX}
+            cy={element.pixelY}
+            r={radius + 2}
+            fill="rgba(255, 255, 255, 0.3)"
+            stroke="rgba(255, 255, 255, 0.6)"
+            strokeWidth={Math.max(0.5, 1 / zoom)}
+          />
+          
+          {/* Élément principal */}
+          <Circle
+            cx={element.pixelX}
+            cy={element.pixelY}
+            r={radius}
+            fill={element.color}
+            stroke="#ffffff"
+            strokeWidth={Math.max(1, 2 / zoom)}
+          />
+          
+          {/* Icône (si zoom suffisant) */}
+          {zoom > 1 && (
+            <SvgText
+              x={element.pixelX}
+              y={element.pixelY + 2}
+              fontSize={Math.max(8, 12 / zoom)}
+              fill="#ffffff"
+              textAnchor="middle"
+              fontWeight="bold"
+            >
+              {element.type === 'room' ? '🏠' : 
+               element.type === 'well' ? '🚿' :
+               element.type === 'catflap' ? '🐾' :
+               element.type === 'entrance' ? '🚪' :
+               element.type === 'exit' ? '🔚' : '📍'}
+            </SvgText>
+          )}
+          
+          {/* Nom de l'élément (si zoom suffisant) */}
+          {zoom > 2 && element.name && (
+            <SvgText
+              x={element.pixelX}
+              y={element.pixelY + radius + 8}
+              fontSize={Math.max(6, 10 / zoom)}
+              fill={element.color}
+              textAnchor="middle"
+              fontWeight="bold"
+            >
+              {element.name}
+            </SvgText>
+          )}
+        </G>
+      );
+    });
+  }, [userElements, zoom]);
+
+  /**
    * Contrôles de zoom avec préservation du point central
    */
   const zoomIn = useCallback(() => {
@@ -679,23 +774,6 @@ export default function TiledMapView({
         <Text style={{ color: '#00ff88', fontSize: 11, fontFamily: 'monospace' }}>
           🖐️ Glissez pour naviguer
         </Text>
-        <Text style={{ color: '#888', fontSize: 10, fontFamily: 'monospace' }}>
-          Tuiles: {visibleTiles.length}
-        </Text>
-        <Text style={{ color: '#ff6b35', fontSize: 10, fontFamily: 'monospace' }}>
-          📍 Points: {pointsOfInterest.length}
-        </Text>
-        {/* DEBUG: Afficher les valeurs de pan */}
-        <Text style={{ color: '#ffaa00', fontSize: 9, fontFamily: 'monospace' }}>
-          Pan: ({panX.toFixed(0)}, {panY.toFixed(0)})
-        </Text>
-        <Text style={{ color: '#ffaa00', fontSize: 9, fontFamily: 'monospace' }}>
-          Zoom: {zoom.toFixed(3)}x
-        </Text>
-        {/* *** NOUVEAU: Afficher la sensibilité du pan *** */}
-        <Text style={{ color: '#ff88aa', fontSize: 9, fontFamily: 'monospace' }}>
-          Sensibilité: {Math.max(0.4, Math.min(6.0, 2.4 / zoom)).toFixed(2)}x
-        </Text>
       </View>
 
       {/* Carte SVG avec navigation tactile */}
@@ -746,6 +824,9 @@ export default function TiledMapView({
           
           {/* Position utilisateur */}
           {renderUserPosition()}
+          
+          {/* Éléments ajoutés par l'utilisateur */}
+          {renderUserElements()}
         </Svg>
       </View>
     </View>
