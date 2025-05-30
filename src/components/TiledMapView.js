@@ -157,7 +157,7 @@ export default function TiledMapView({
     
     // Taille de l'écran disponible
     const availableWidth = screenWidth;
-    const availableHeight = screenHeight - 200;
+    const availableHeight = screenHeight;
     
     // *** NOUVEAU: Marge adaptative selon le zoom ***
     // Plus le zoom est élevé, plus on permet de liberté de mouvement
@@ -367,7 +367,7 @@ export default function TiledMapView({
   const calculateVisibleTiles = useCallback(() => {
     // Dimensions du viewport en coordonnées carte
     const viewportWidth = screenWidth / zoom;
-    const viewportHeight = (screenHeight - 200) / zoom;
+    const viewportHeight = screenHeight / zoom;
     
     // Position du viewport dans la carte
     const viewportLeft = -panX / zoom;
@@ -563,12 +563,6 @@ export default function TiledMapView({
     const radius = Math.max(4, 8 / zoom);
     const headingLength = Math.max(15, 30 / zoom);
     
-    // *** DEBUG: Log pour vérifier l'orientation ***
-    if (userOrientation !== undefined && userOrientation !== null) {
-      console.log(`🧭 [RENDER-USER] Orientation reçue: ${userOrientation.toFixed(3)} rad (${(userOrientation * 180 / Math.PI).toFixed(1)}°)`);
-    } else {
-      console.log(`🧭 [RENDER-USER] ⚠️ Orientation manquante ou null`);
-    }
     
     // Calcul de l'orientation
     const svgOrientation = (userOrientation || 0) - Math.PI / 2;
@@ -679,67 +673,6 @@ export default function TiledMapView({
   }, [userElements, zoom]);
 
   /**
-   * Contrôles de zoom avec préservation du point central
-   */
-  const zoomIn = useCallback(() => {
-    const zoomFactor = zoom < 1 ? 1.5 : zoom < 5 ? 1.3 : 1.2; // Progression adaptée
-    const newZoom = Math.min(MAX_ZOOM, zoom * zoomFactor);
-    
-    // *** CORRIGÉ: Logique de zoom centrée simplifiée ***
-    // Le zoom se fait autour du centre de l'écran
-    const centerScreenX = screenWidth / 2;
-    const centerScreenY = (screenHeight - 200) / 2;
-    
-    // Calculer le nouveau pan pour maintenir le centre visuel
-    const zoomRatio = newZoom / zoom;
-    
-    // Ajuster le pan proportionnellement au changement de zoom
-    const newPanX = panXRef.current * zoomRatio + centerScreenX * (1 - zoomRatio);
-    const newPanY = panYRef.current * zoomRatio + centerScreenY * (1 - zoomRatio);
-    
-    // *** NOUVEAU: Contraindre le pan dans les limites de la carte ***
-    const constrained = constrainPan(newPanX, newPanY, newZoom);
-    
-    // Appliquer les changements
-    setZoom(newZoom);
-    panXRef.current = constrained.x;
-    panYRef.current = constrained.y;
-    setPanX(constrained.x);
-    setPanY(constrained.y);
-    
-    console.log(`🔍 [TILED-MAP] Zoom in: ${zoom.toFixed(3)}x → ${newZoom.toFixed(3)}x, pan: (${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}) → (${constrained.x.toFixed(1)}, ${constrained.y.toFixed(1)})`);
-  }, [zoom, constrainPan]);
-
-  const zoomOut = useCallback(() => {
-    const zoomFactor = zoom > 5 ? 1.2 : zoom > 1 ? 1.3 : 1.5; // Progression adaptée
-    const newZoom = Math.max(MIN_ZOOM, zoom / zoomFactor);
-    
-    // *** CORRIGÉ: Logique de zoom centrée simplifiée ***
-    // Le zoom se fait autour du centre de l'écran
-    const centerScreenX = screenWidth / 2;
-    const centerScreenY = (screenHeight - 200) / 2;
-    
-    // Calculer le nouveau pan pour maintenir le centre visuel
-    const zoomRatio = newZoom / zoom;
-    
-    // Ajuster le pan proportionnellement au changement de zoom
-    const newPanX = panXRef.current * zoomRatio + centerScreenX * (1 - zoomRatio);
-    const newPanY = panYRef.current * zoomRatio + centerScreenY * (1 - zoomRatio);
-    
-    // *** NOUVEAU: Contraindre le pan dans les limites de la carte ***
-    const constrained = constrainPan(newPanX, newPanY, newZoom);
-    
-    // Appliquer les changements
-    setZoom(newZoom);
-    panXRef.current = constrained.x;
-    panYRef.current = constrained.y;
-    setPanX(constrained.x);
-    setPanY(constrained.y);
-    
-    console.log(`🔍 [TILED-MAP] Zoom out: ${zoom.toFixed(3)}x → ${newZoom.toFixed(3)}x, pan: (${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}) → (${constrained.x.toFixed(1)}, ${constrained.y.toFixed(1)})`);
-  }, [zoom, constrainPan]);
-
-  /**
    * Centrer sur l'utilisateur avec zoom fixe 4.03x
    */
   const centerOnUser = useCallback(() => {
@@ -751,7 +684,7 @@ export default function TiledMapView({
     
     // Calculer le pan nécessaire pour centrer l'utilisateur avec le zoom 4.03x
     const targetPanX = (screenWidth / 2 - svgPos.x) * targetZoom;
-    const targetPanY = ((screenHeight - 200) / 2 - svgPos.y) * targetZoom;
+    const targetPanY = (screenHeight / 2 - svgPos.y) * targetZoom;
     
     // *** NOUVEAU: Mettre à jour le zoom ET le pan ***
     setZoom(targetZoom);
@@ -769,7 +702,7 @@ export default function TiledMapView({
   const centerOnPoint = useCallback((point) => {
     // Calculer le pan nécessaire pour centrer le point
     const targetPanX = (screenWidth / 2 - point.x) * zoom;
-    const targetPanY = ((screenHeight - 200) / 2 - point.y) * zoom;
+    const targetPanY = (screenHeight / 2 - point.y) * zoom;
     
     // *** CORRIGÉ: Mettre à jour les refs ET les états ***
     panXRef.current = targetPanX;
@@ -786,7 +719,7 @@ export default function TiledMapView({
   const viewFullMap = useCallback(() => {
     // Calculer le zoom pour voir toute la carte
     const zoomX = screenWidth / MAP_TOTAL_WIDTH;
-    const zoomY = (screenHeight - 200) / MAP_TOTAL_HEIGHT;
+    const zoomY = screenHeight / MAP_TOTAL_HEIGHT;
     const fullMapZoom = Math.min(zoomX, zoomY) * 0.9; // 90% pour avoir des marges
     
     // *** CORRIGÉ: Éviter les appels répétés si déjà au bon zoom ***
@@ -830,54 +763,6 @@ export default function TiledMapView({
 
   return (
     <View style={{ flex: 1 }}>
-      {/* Contrôles de zoom */}
-      <View style={{
-        position: 'absolute',
-        top: 10,
-        right: 10,
-        zIndex: 1000,
-        flexDirection: 'column',
-        gap: 5
-      }}>
-        <TouchableOpacity
-          onPress={zoomIn}
-          style={{
-            backgroundColor: 'rgba(0, 255, 136, 0.8)',
-            padding: 12,
-            borderRadius: 8,
-            minWidth: 40,
-            alignItems: 'center'
-          }}
-        >
-          <Text style={{ color: '#000', fontWeight: 'bold', fontSize: 18 }}>+</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity
-          onPress={zoomOut}
-          style={{
-            backgroundColor: 'rgba(0, 255, 136, 0.8)',
-            padding: 12,
-            borderRadius: 8,
-            minWidth: 40,
-            alignItems: 'center'
-          }}
-        >
-          <Text style={{ color: '#000', fontWeight: 'bold', fontSize: 18 }}>−</Text>
-        </TouchableOpacity>
-        
-        {/* Indicateur de zoom */}
-        <View style={{
-          backgroundColor: 'rgba(0, 0, 0, 0.7)',
-          padding: 6,
-          borderRadius: 4,
-          alignItems: 'center'
-        }}>
-          <Text style={{ color: '#00ff88', fontSize: 10, fontFamily: 'monospace' }}>
-            {zoom.toFixed(2)}x
-          </Text>
-        </View>
-      </View>
-
       {/* Instructions de navigation */}
       <View style={{
         position: 'absolute',
@@ -889,9 +774,6 @@ export default function TiledMapView({
         borderRadius: 6,
         maxWidth: 200
       }}>
-        <Text style={{ color: '#00ff88', fontSize: 11, fontFamily: 'monospace' }}>
-          🖐️ Glissez pour naviguer
-        </Text>
       </View>
 
       {/* Carte SVG avec navigation tactile */}
@@ -904,15 +786,15 @@ export default function TiledMapView({
       >
         <Svg
           width={screenWidth}
-          height={screenHeight - 200}
-          viewBox={`${-panX / zoom} ${-panY / zoom} ${screenWidth / zoom} ${(screenHeight - 200) / zoom}`}
+          height={screenHeight}
+          viewBox={`${-panX / zoom} ${-panY / zoom} ${screenWidth / zoom} ${screenHeight / zoom}`}
         >
           {/* Fond noir */}
           <Rect
             x={-panX / zoom - 1000}
             y={-panY / zoom - 1000}
             width={screenWidth / zoom + 2000}
-            height={(screenHeight - 200) / zoom + 2000}
+            height={screenHeight / zoom + 2000}
             fill={colors.background}
           />
           

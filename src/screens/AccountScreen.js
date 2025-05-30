@@ -310,33 +310,9 @@ export default function AccountScreen() {
   // Rendu de la vue principale (connecté)
   const renderMainView = () => (
     <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        {/* Photo de profil */}
-        <TouchableOpacity 
-          style={styles.profileImageContainer}
-          onPress={() => setImagePickerModal(true)}
-        >
-          {profileData.profileImage ? (
-            <Image source={{ uri: profileData.profileImage }} style={styles.profileImage} />
-          ) : (
-            <View style={styles.defaultProfileImage}>
-              <Ionicons name="person" size={48} color="#00ff88" />
-            </View>
-          )}
-          <View style={styles.editImageBadge}>
-            <Ionicons name="camera" size={16} color="#ffffff" />
-          </View>
-        </TouchableOpacity>
-
-        <Text style={styles.welcomeText}>Bonjour, {state.user.username} !</Text>
-        <Text style={styles.memberSince}>
-          Membre depuis le {new Date(state.user.createdAt).toLocaleDateString()}
-        </Text>
-      </View>
-
       {/* Section Profil */}
       <View style={styles.profileSection}>
-        <Text style={styles.sectionTitle}>Mon Profil</Text>
+        <Text style={styles.sectionTitle}>Profil de {state.user.username}</Text>
         
         {/* Taille */}
         <View style={styles.profileItem}>
@@ -459,13 +435,9 @@ export default function AccountScreen() {
   // Rendu de la vue de connexion
   const renderLoginView = () => (
     <ScrollView style={styles.container}>
-      <View style={styles.authHeader}>
-        <Ionicons name="log-in" size={48} color="#00ff88" />
-        <Text style={styles.authTitle}>Connexion</Text>
-        <Text style={styles.authSubtitle}>Connectez-vous à votre compte</Text>
-      </View>
-
       <View style={styles.formContainer}>
+        <Text style={styles.sectionTitle}>Connexion</Text>
+
         <View style={styles.inputContainer}>
           <Ionicons name="person" size={20} color="#666666" style={styles.inputIcon} />
           <TextInput
@@ -538,13 +510,9 @@ export default function AccountScreen() {
   // Rendu de la vue d'inscription
   const renderRegisterView = () => (
     <ScrollView style={styles.container}>
-      <View style={styles.authHeader}>
-        <Ionicons name="person-add" size={48} color="#00ff88" />
-        <Text style={styles.authTitle}>Inscription</Text>
-        <Text style={styles.authSubtitle}>Créez votre compte</Text>
-      </View>
-
       <View style={styles.formContainer}>
+        <Text style={styles.sectionTitle}>Inscription</Text>
+
         <View style={styles.inputContainer}>
           <Ionicons name="person" size={20} color="#666666" style={styles.inputIcon} />
           <TextInput
@@ -703,15 +671,12 @@ export default function AccountScreen() {
   // Rendu de la vue non connecté
   const renderGuestView = () => (
     <ScrollView style={styles.container}>
-      <View style={styles.guestHeader}>
-        <Ionicons name="person-circle-outline" size={80} color="#666666" />
-        <Text style={styles.guestTitle}>Mon Compte</Text>
+      <View style={styles.guestActions}>
+        <Text style={styles.sectionTitle}>Mon Compte</Text>
         <Text style={styles.guestSubtitle}>
           Connectez-vous pour sauvegarder vos trajets et accéder à vos données.
         </Text>
-      </View>
-
-      <View style={styles.guestActions}>
+        
         <TouchableOpacity
           style={styles.primaryButton}
           onPress={() => setCurrentView('login')}
@@ -726,36 +691,12 @@ export default function AccountScreen() {
           <Text style={styles.secondaryButtonText}>Créer un compte</Text>
         </TouchableOpacity>
       </View>
-
-      <View style={styles.featuresContainer}>
-        <Text style={styles.featuresTitle}>Avec un compte, vous pouvez :</Text>
-        
-        <View style={styles.featureItem}>
-          <Ionicons name="save" size={20} color="#00ff88" />
-          <Text style={styles.featureText}>Sauvegarder vos trajets</Text>
-        </View>
-        
-        <View style={styles.featureItem}>
-          <Ionicons name="download" size={20} color="#00ff88" />
-          <Text style={styles.featureText}>Exporter en format SVG</Text>
-        </View>
-        
-        <View style={styles.featureItem}>
-          <Ionicons name="analytics" size={20} color="#00ff88" />
-          <Text style={styles.featureText}>Consulter vos statistiques</Text>
-        </View>
-        
-        <View style={styles.featureItem}>
-          <Ionicons name="cloud" size={20} color="#00ff88" />
-          <Text style={styles.featureText}>Synchroniser entre appareils</Text>
-        </View>
-      </View>
     </ScrollView>
   );
 
   // Rendu principal
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <View style={styles.safeArea}>
       {state.isAuthenticated ? (
         currentView === 'main' ? renderMainView() :
         currentView === 'trajectories' ? renderTrajectoriesView() :
@@ -765,7 +706,7 @@ export default function AccountScreen() {
         currentView === 'register' ? renderRegisterView() :
         renderGuestView()
       )}
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -773,10 +714,14 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#000000',
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   container: {
     flex: 1,
     backgroundColor: '#000000',
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   
   // Styles pour la vue principale (connecté)

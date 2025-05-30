@@ -250,7 +250,7 @@ export default function MapScreen() {
     referenceMaters: 100,     // 100 mètres
     referencePixels: 372,     // = 372 pixels (échelle correcte)
     screenWidth: screenWidth,
-    screenHeight: screenHeight - 200
+    screenHeight: screenHeight // Toute la hauteur de l'écran
   }));
   
   // État de la carte
@@ -322,9 +322,9 @@ export default function MapScreen() {
   const rotationAnimation = useRef(new Animated.Value(0)).current;
   
   // *** CORRECTION: Dimensions SVG adaptées à l'écran avec zoom intelligent ***
-  // Dimensions de l'affichage SVG - RETOUR À LA TAILLE ÉCRAN
+  // Dimensions de l'affichage SVG - CARTE PLEINE HAUTEUR
   const svgWidth = screenWidth;
-  const svgHeight = screenHeight - 200; // Espace pour les contrôles et métriques
+  const svgHeight = screenHeight; // Toute la hauteur de l'écran
 
   // *** NOUVEAU: Calculer le zoom initial pour afficher 530x1000 pixels ***
   const calculateInitialZoom = () => {
@@ -333,7 +333,7 @@ export default function MapScreen() {
     
     // Zoom nécessaire pour afficher cette zone
     const zoomX = screenWidth / targetViewportWidth;
-    const zoomY = (screenHeight - 200) / targetViewportHeight;
+    const zoomY = screenHeight / targetViewportHeight; // Utilise toute la hauteur maintenant
     const initialZoom = Math.min(zoomX, zoomY);
     
     console.log(`🎯 [MAP-SCREEN] Zoom initial calculé pour ${targetViewportWidth}x${targetViewportHeight}px: ${initialZoom.toFixed(3)}x`);
@@ -1511,10 +1511,7 @@ export default function MapScreen() {
     
     // Convertir en radians
     const headingRadians = (normalizedHeading * Math.PI) / 180;
-    
-    // *** DEBUG: Log pour vérifier l'orientation mise à jour ***
-    console.log(`🧭 [COMPASS-UPDATE] Orientation: ${normalizedHeading.toFixed(1)}° → ${headingRadians.toFixed(3)} rad, précision: ${accuracy}`);
-    
+       
     // Mettre à jour les états d'orientation
     setContinuousOrientation(headingRadians);
     continuousOrientationRef.current = headingRadians;
@@ -1946,17 +1943,17 @@ export default function MapScreen() {
 
   if (!isMapLoaded) {
     return (
-      <SafeAreaView style={styles.container}>
+      <View style={styles.container}>
         <View style={styles.loadingContainer}>
           <Ionicons name="map" size={64} color="#00ff88" />
           <Text style={styles.loadingText}>Initialisation de la carte...</Text>
         </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
       {/* *** NOUVEAU: Carte avec système de tuiles pour afficher la carte entière *** */}
       <TiledMapView
         persistentMapService={persistentMapService}
@@ -2110,41 +2107,6 @@ export default function MapScreen() {
             </Animated.View>
           )}
           
-          {/* *** BOUTON POSITION *** */}
-          <Animated.View style={[
-            styles.floatingSecondaryButton, 
-            styles.floatingButton3,
-            {
-              transform: [
-                { 
-                  translateX: menuAnimation.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [0, trackingMode === 'stopped' ? 35 : 85] // Adjust based on stop button presence
-                  })
-                },
-                { 
-                  translateY: menuAnimation.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [0, trackingMode === 'stopped' ? -90 : -45] // Adjust based on stop button presence
-                  })
-                },
-                { 
-                  scale: menuAnimation.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [0, 1]
-                  })
-                }
-              ],
-              opacity: menuAnimation
-            }
-          ]}>
-            <TouchableOpacity 
-              style={styles.floatingButtonInner}
-              onPress={centerOnUserWithZoom}
-            >
-              <Ionicons name="locate" size={20} color="#ffffff" />
-            </TouchableOpacity>
-          </Animated.View>
           
           {/* *** BOUTON AJOUT D'ÉLÉMENTS *** */}
           <Animated.View style={[
@@ -2539,7 +2501,17 @@ export default function MapScreen() {
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+
+      {/* *** NOUVEAU: Bouton de position fixe (sorti du menu flottant) *** */}
+      <View style={styles.positionButtonContainer}>
+        <TouchableOpacity 
+          style={styles.positionButton}
+          onPress={centerOnUserWithZoom}
+        >
+          <Ionicons name="locate" size={24} color="#ffffff" />
+        </TouchableOpacity>
+      </View>
+    </View>
   );
 }
 
@@ -2547,6 +2519,8 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
+    paddingTop: 0, // Supprime tout padding en haut
+    paddingBottom: 0, // Supprime tout padding en bas
   },
   loadingContainer: {
     flex: 1,
@@ -3150,7 +3124,7 @@ const styles = StyleSheet.create({
   },
   floatingMenuContainer: {
     position: 'absolute',
-    bottom: 30,
+    bottom: 10, // Petit espace en bas
     left: '50%',
     transform: [{ translateX: -30 }], // -30 pour centrer un bouton de 60px
     alignItems: 'center',
@@ -3214,5 +3188,26 @@ const styles = StyleSheet.create({
   },
   floatingButtonStop: {
     backgroundColor: '#ff4444', // Rouge pour stop
+  },
+  positionButtonContainer: {
+    position: 'absolute',
+    top: 40, // Descendu de 30px (était 10, maintenant 40)
+    right: 10, // Petit espace à droite
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderRadius: 25,
+    padding: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  positionButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#00ff88',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 }); 

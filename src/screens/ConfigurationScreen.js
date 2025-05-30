@@ -292,17 +292,8 @@ export default function ConfigurationScreen() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
       <ScrollView showsVerticalScrollIndicator={false}>
-        {/* En-tête */}
-        <View style={styles.header}>
-          <Ionicons name="settings" size={32} color="#00ff88" />
-          <Text style={styles.headerTitle}>Configuration</Text>
-          <Text style={styles.headerSubtitle}>
-            Paramètres et outils de navigation
-          </Text>
-        </View>
-
         {/* Section Configuration des Outils */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Configuration des Outils</Text>
@@ -713,7 +704,7 @@ export default function ConfigurationScreen() {
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -721,6 +712,8 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0a0a0a',
+    paddingTop: 0,
+    paddingBottom: 0,
   },
   loadingContainer: {
     flex: 1,

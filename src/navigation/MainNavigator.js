@@ -17,7 +17,6 @@ const tabsConfig = [
   {
     name: 'Carte',
     component: MapScreen,
-    headerTitle: 'Localisation Intérieure',
     iconFocused: 'map',
     iconUnfocused: 'map-outline',
   },
@@ -94,6 +93,7 @@ export default function MainNavigator() {
           component={tab.component}
           options={{
             headerTitle: tab.headerTitle,
+            headerShown: !['Carte', 'Configuration', 'Mon Compte'].includes(tab.name),
           }}
         />
       ))}
