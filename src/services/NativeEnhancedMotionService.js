@@ -33,13 +33,41 @@ export default class NativeEnhancedMotionService {
     this.sessionStartTime = null;
     this.stepCount = 0;
     
-    // *** SIMPLIFIÉ: Système d'orientation unifié avec lissage robuste ***
+    // *** AMÉLIORATION: Système d'orientation renforcé contre les sauts erratiques ***
     this.orientationHistory = []; // Historique des orientations pour lissage
-    this.orientationHistoryMaxSize = 20; // 20 échantillons pour lissage (2 secondes à 10Hz)
+    this.orientationHistoryMaxSize = 40; // *** AUGMENTÉ: 40 échantillons pour meilleur lissage (4 secondes à 10Hz) ***
     this.currentSmoothedOrientation = null; // Orientation lissée actuelle
     this.orientationVarianceThreshold = 30; // Seuil de variance pour détecter stabilité
     this.lastOrientationUpdate = 0;
     this.orientationUpdateInterval = 100; // Mise à jour toutes les 100ms
+    
+    // *** NOUVEAU: Variables pour filtrage avancé ***
+    this.minAccuracyThreshold = 15; // *** NOUVEAU: Rejeter les mesures avec accuracy > 15° ***
+    this.maxAngleJumpThreshold = 45; // *** NOUVEAU: Rejeter les sauts > 45° instantanés ***
+    this.consecutiveBadReadings = 0; // *** NOUVEAU: Compteur de lectures consécutives de mauvaise qualité ***
+    this.maxConsecutiveBadReadings = 5; // *** NOUVEAU: Reset après 5 mauvaises lectures consécutives ***
+    this.lastGoodOrientation = null; // *** NOUVEAU: Dernière orientation fiable ***
+    this.medianWindowSize = 7; // *** NOUVEAU: Fenêtre médiane plus grande ***
+    
+    // *** NOUVEAU: Système de filtrage des pas pour éviter le surcomptage ***
+    this.stepFiltering = {
+      minStepDistance: 0.4,          // Distance minimum par pas (40cm)
+      maxStepDistance: 1.8,          // Distance maximum par pas (1.8m)
+      minStepInterval: 300,          // Intervalle minimum entre pas (300ms)
+      maxStepInterval: 3000,         // Intervalle maximum entre pas (3s)
+      minConfidenceThreshold: 0.3,   // Confiance minimum (30%)
+      zuptThreshold: 0.1,            // Seuil Zero-Velocity Update (10cm)
+      consecutiveStepsForZupt: 3,    // Nombre de pas consécutifs pour ZUPT
+      lastValidStepTime: 0,          // Timestamp du dernier pas valide
+      lastValidPosition: { x: 0, y: 0 }, // Position du dernier pas valide
+      rejectedStepsCount: 0,         // Compteur de pas rejetés
+      falsePositiveRate: 0,          // Taux estimé de faux positifs
+      adaptiveThreshold: true        // Seuils adaptatifs basés sur l'historique
+    };
+    
+    // *** NOUVEAU: Historique des pas valides pour analyse statistique ***
+    this.validStepsHistory = [];
+    this.validStepsHistoryMaxSize = 50; // Garder les 50 derniers pas valides
     
     // *** SUPPRIMÉ: Variables de conflit (système hybride, filtres multiples) ***
     // Plus de orientationBuffer, filteredYaw, système hybride conflictuel
@@ -331,7 +359,7 @@ export default class NativeEnhancedMotionService {
   }
 
   /**
-   * *** NOUVEAU: Traitement des événements de pas natifs avec système hybride ***
+   * *** NOUVEAU: Traitement des événements de pas natifs avec système hybride et filtrage ***
    */
   _handleNativeStepEvent(stepData) {
     try {
@@ -353,8 +381,16 @@ export default class NativeEnhancedMotionService {
         isFallback
       } = stepData;
       
-      // *** SYSTÈME HYBRIDE: Répartir les pas avec orientations interpolées ***
-      console.log(`🎯 [HYBRID-SYSTEM] Traitement hybride de ${stepCount} pas avec orientations interpolées`);
+      // *** AMÉLIORATION: Filtrage préliminaire pour éviter le surcomptage ***
+      console.log(`🔍 [NATIVE-FILTER] === FILTRAGE NATIF ===`);
+      console.log(`🔍 [NATIVE-FILTER] Nombre de pas reçus: ${stepCount}`);
+      console.log(`🔍 [NATIVE-FILTER] Source: ${source}, isFallback: ${isFallback}`);
+      
+      // Si c'est un mode fallback avec une confiance faible, appliquer un filtrage plus strict
+      const baseConfidence = isFallback ? Math.max(0.6, confidence) : confidence;
+      
+      // *** SYSTÈME HYBRIDE: Répartir les pas avec orientations interpolées ET filtrage ***
+      console.log(`🎯 [HYBRID-SYSTEM] Traitement hybride de ${stepCount} pas avec filtrage et orientations interpolées`);
       
       // Timestamps estimés pour la répartition des pas
       const startTime = (timestamp - timeDelta) / 1000; // Début du batch en secondes
@@ -363,7 +399,10 @@ export default class NativeEnhancedMotionService {
       
       console.log(`⏱️ [HYBRID-SYSTEM] Période: ${startTime.toFixed(3)}s → ${endTime.toFixed(3)}s (${timePerStep.toFixed(3)}s/pas)`);
       
-      // Traiter chaque pas individuellement avec son orientation interpolée
+      let validStepsCount = 0;
+      let rejectedStepsCount = 0;
+      
+      // Traiter chaque pas individuellement avec validation
       for (let i = 0; i < stepCount; i++) {
         // Timestamp estimé pour ce pas spécifique
         const stepTimestamp = startTime + (timePerStep * (i + 0.5)); // Centre du pas
@@ -376,12 +415,30 @@ export default class NativeEnhancedMotionService {
         const stepDx = stepLength * Math.sin(yawRadians);
         const stepDy = stepLength * Math.cos(yawRadians);
         
-        // Incrémenter les compteurs
+        // *** NOUVEAU: Validation du pas avant traitement ***
+        const stepToValidate = {
+          stepLength,
+          dx: stepDx,
+          dy: stepDy,
+          timestamp: stepTimestamp * 1000,
+          confidence: baseConfidence,
+          source
+        };
+        
+        if (!this._validateStep(stepToValidate)) {
+          rejectedStepsCount++;
+          console.log(`❌ [HYBRID-FILTER] Pas ${i + 1}/${stepCount} rejeté par le filtre`);
+          continue; // Ignorer ce pas
+        }
+        
+        validStepsCount++;
+        
+        // Incrémenter les compteurs SEULEMENT pour les pas valides
         this.stepCount++;
         this.metrics.totalSteps = this.stepCount;
         this.metrics.totalDistance += stepLength;
         
-        // *** ÉMISSION IMMÉDIATE: Chaque pas avec son orientation propre ***
+        // *** ÉMISSION IMMÉDIATE: Chaque pas validé avec son orientation propre ***
         if (this.onStep && typeof this.onStep === 'function') {
           this.onStep({
             stepCount: 1, // UN seul pas à la fois
@@ -390,7 +447,7 @@ export default class NativeEnhancedMotionService {
             dy: stepDy,  // Déplacement calculé avec orientation interpolée
             timestamp: stepTimestamp * 1000, // Retour en millisecondes
             totalSteps: this.stepCount,
-            confidence: confidence,
+            confidence: baseConfidence,
             source: source,
             nativeStepLength: nativeStepLength,
             averageStepLength: averageStepLength,
@@ -398,21 +455,31 @@ export default class NativeEnhancedMotionService {
             timeDelta: timePerStep * 1000, // Durée individuelle en ms
             isFallback: isFallback,
             interpolatedYaw: interpolatedYaw, // *** NOUVEAU: Orientation interpolée ***
-            hybridSystem: true // *** NOUVEAU: Marqueur système hybride ***
+            hybridSystem: true, // *** NOUVEAU: Marqueur système hybride ***
+            filtered: true, // *** NOUVEAU: Marqueur de pas filtré ***
+            validationPass: true // *** NOUVEAU: Marqueur de validation réussie ***
           });
         }
         
-        // Log détaillé pour le premier et dernier pas
-        if (i === 0 || i === stepCount - 1) {
-          console.log(`🎯 [HYBRID-STEP] Pas ${i + 1}/${stepCount}: t=${stepTimestamp.toFixed(3)}s, yaw=${interpolatedYaw.toFixed(1)}°, dx=${stepDx.toFixed(3)}, dy=${stepDy.toFixed(3)}`);
+        // Log détaillé pour les pas valides
+        if (i === 0 || i === stepCount - 1 || validStepsCount <= 3) {
+          console.log(`✅ [HYBRID-STEP] Pas valide ${validStepsCount}: t=${stepTimestamp.toFixed(3)}s, yaw=${interpolatedYaw.toFixed(1)}°, dx=${stepDx.toFixed(3)}, dy=${stepDy.toFixed(3)}`);
         }
       }
       
-      // Mettre à jour les métriques finales
+      // *** Mettre à jour les métriques finales ***
       this.metrics.lastUpdate = timestamp;
       this.metrics.averageStepLength = nativeStepLength || stepLength;
       
-      console.log(`✅ [HYBRID-SYSTEM] ${stepCount} pas traités avec orientations interpolées (total: ${this.stepCount})`);
+      // *** Statistiques de filtrage ***
+      console.log(`📊 [HYBRID-FILTER] Résultats du filtrage:`);
+      console.log(`  ✅ Pas validés: ${validStepsCount}/${stepCount} (${((validStepsCount/stepCount)*100).toFixed(1)}%)`);
+      console.log(`  ❌ Pas rejetés: ${rejectedStepsCount}/${stepCount} (${((rejectedStepsCount/stepCount)*100).toFixed(1)}%)`);
+      console.log(`  📈 Total session: ${this.stepCount} pas valides`);
+      console.log(`  🚫 Total rejetés: ${this.stepFiltering.rejectedStepsCount} pas`);
+      console.log(`  📉 Taux de faux positifs: ${(this.stepFiltering.falsePositiveRate * 100).toFixed(1)}%`);
+      
+      console.log(`✅ [HYBRID-SYSTEM] ${validStepsCount}/${stepCount} pas traités avec filtrage et orientations interpolées (total: ${this.stepCount})`);
       
     } catch (error) {
       console.error('❌ [HYBRID-SYSTEM] Erreur traitement événement hybride:', error);
@@ -475,7 +542,7 @@ export default class NativeEnhancedMotionService {
   }
 
   /**
-   * Gestion adaptative des pas avec calcul intelligent de longueur
+   * Gestion adaptative des pas avec calcul intelligent de longueur et filtrage
    */
   _handleAdaptiveStep(timestamp) {
     // Vérification de sécurité - ne pas traiter si en mode fallback constant
@@ -500,6 +567,28 @@ export default class NativeEnhancedMotionService {
     
     console.log(`🔧 [STEP-LENGTH-TRACE] Longueur calculée: ${adaptiveStepLength.toFixed(3)}m (cadence: ${cadence.toFixed(2)} pas/s)`);
     
+    // Calcul de la position avec orientation STABLE
+    const yawRadians = this.currentSmoothedOrientation ? (this.currentSmoothedOrientation * Math.PI / 180) : 0;
+    const dx = adaptiveStepLength * Math.sin(yawRadians);
+    const dy = adaptiveStepLength * Math.cos(yawRadians);
+    
+    // *** NOUVEAU: Validation du pas adaptatif avant traitement ***
+    const stepToValidate = {
+      stepLength: adaptiveStepLength,
+      dx,
+      dy,
+      timestamp,
+      confidence: this._calculateConfidence(cadence, this.stepHistory.length),
+      source: 'adaptive_expo'
+    };
+    
+    if (!this._validateStep(stepToValidate)) {
+      console.log(`❌ [ADAPTIVE-FILTER] Pas adaptatif rejeté par le filtre`);
+      return; // Ignorer ce pas
+    }
+    
+    console.log(`✅ [ADAPTIVE-FILTER] Pas adaptatif validé`);
+    
     // Mise à jour de l'historique
     this.stepHistory.push({
       timestamp,
@@ -520,19 +609,11 @@ export default class NativeEnhancedMotionService {
     this.metrics.adaptiveStepLength = avgStepLength;
     this.metrics.averageStepLength = avgStepLength;
     
-    console.log(`📱 [ADAPTIVE-STEP] Pas adaptatif:`);
+    console.log(`📱 [ADAPTIVE-STEP] Pas adaptatif validé:`);
     console.log(`  - Longueur: ${adaptiveStepLength.toFixed(3)}m`);
     console.log(`  - Cadence: ${cadence.toFixed(2)} pas/s`);
     console.log(`  - Moyenne récente: ${avgStepLength.toFixed(3)}m`);
     console.log(`🔧 [STEP-LENGTH-TRACE] Longueur moyenne mise à jour: ${this.metrics.averageStepLength.toFixed(3)}m`);
-    
-    // Incrémenter le compteur de pas du segment
-    this.segmentStepCount += 1;
-    
-    // Calcul de la position avec orientation STABLE
-    const yawRadians = this.currentSmoothedOrientation ? (this.currentSmoothedOrientation * Math.PI / 180) : 0;
-    const dx = adaptiveStepLength * Math.sin(yawRadians);
-    const dy = adaptiveStepLength * Math.cos(yawRadians);
     
     console.log(`🧭 [ADAPTIVE-STEP] Orientation filtrée: ${this.currentSmoothedOrientation ? (this.currentSmoothedOrientation.toFixed(1) + "°") : "N/A"}`);
     
@@ -545,7 +626,7 @@ export default class NativeEnhancedMotionService {
     // Callback avec données adaptatives
     if (this.onStep && typeof this.onStep === 'function') {
       this.onStep({
-        stepCount: this.stepCount,
+        stepCount: 1, // *** CORRIGÉ: Un seul pas au lieu de this.stepCount ***
         stepLength: adaptiveStepLength,
         dx, 
         dy,
@@ -556,7 +637,9 @@ export default class NativeEnhancedMotionService {
         source: 'adaptive_expo',
         cadence,
         averageStepLength: avgStepLength,
-        timeDelta
+        timeDelta,
+        filtered: true, // *** NOUVEAU: Marqueur de pas filtré ***
+        validationPass: true // *** NOUVEAU: Marqueur de validation réussie ***
       });
     }
   }
@@ -656,46 +739,93 @@ export default class NativeEnhancedMotionService {
    * Gestion de l'orientation avec filtrage amélioré
    */
   _handleHeading({ trueHeading, accuracy, timestamp }) {
+    // *** AMÉLIORATION 1: Filtrage préliminaire basé sur la précision ***
+    // Rejeter immédiatement les lectures de très mauvaise qualité
+    if (accuracy > this.minAccuracyThreshold) {
+      this.consecutiveBadReadings++;
+      console.log(`🧭 [FILTER] Lecture rejetée - accuracy trop faible: ${accuracy}° > ${this.minAccuracyThreshold}° (${this.consecutiveBadReadings}/${this.maxConsecutiveBadReadings})`);
+      
+      // Si trop de mauvaises lectures consécutives, reset partiel
+      if (this.consecutiveBadReadings >= this.maxConsecutiveBadReadings) {
+        console.log(`🧭 [FILTER] Reset partiel après ${this.maxConsecutiveBadReadings} mauvaises lectures consécutives`);
+        this.consecutiveBadReadings = 0;
+        // Garder l'orientation actuelle mais vider partiellement l'historique
+        this.orientationHistory = this.orientationHistory.slice(-10);
+      }
+      return; // *** IMPORTANT: Rejeter cette lecture ***
+    }
+    
+    // Réinitialiser le compteur de mauvaises lectures
+    this.consecutiveBadReadings = 0;
+
     // Normalisation de l'angle
     let normalizedHeading = trueHeading;
     while (normalizedHeading >= 360) normalizedHeading -= 360;
     while (normalizedHeading < 0) normalizedHeading += 360;
     
-    // *** AMÉLIORATION 1: Rolling median pour stabilité ***
+    // *** AMÉLIORATION 2: Détection des sauts erratiques ***
+    if (this.lastGoodOrientation !== null) {
+      let angleDiff = normalizedHeading - this.lastGoodOrientation;
+      if (angleDiff > 180) angleDiff -= 360;
+      else if (angleDiff < -180) angleDiff += 360;
+      
+      // Rejeter les sauts trop importants d'un coup
+      if (Math.abs(angleDiff) > this.maxAngleJumpThreshold) {
+        console.log(`🧭 [FILTER] Saut erratique détecté et rejeté: ${angleDiff.toFixed(1)}° > ${this.maxAngleJumpThreshold}°`);
+        return; // *** IMPORTANT: Rejeter cette lecture ***
+      }
+    }
+
+    // *** AMÉLIORATION 3: Rolling median renforcé pour stabilité ***
     this.orientationHistory.push(normalizedHeading);
     if (this.orientationHistory.length > this.orientationHistoryMaxSize) {
       this.orientationHistory.shift();
     }
     
-    // Calculer le médian des orientations récentes
+    // Calculer le médian des orientations récentes avec fenêtre adaptée
     let medianYaw = normalizedHeading;
-    if (this.orientationHistory.length >= 3) {
-      const sortedHistory = [...this.orientationHistory].sort((a, b) => a - b);
+    if (this.orientationHistory.length >= this.medianWindowSize) {
+      const recentHistory = this.orientationHistory.slice(-this.medianWindowSize);
+      const sortedHistory = [...recentHistory].sort((a, b) => a - b);
       const middleIndex = Math.floor(sortedHistory.length / 2);
       medianYaw = sortedHistory[middleIndex];
     }
     
-    // *** AMÉLIORATION 2: Filtrage plus agressif ***
-    const adaptiveAlpha = accuracy < 10 ? 0.02 : 
-                         accuracy > 30 ? 0.08 : 0.05;
+    // *** AMÉLIORATION 4: Filtrage adaptatif basé sur la précision ***
+    // Plus la précision est mauvaise, plus le lissage est fort
+    const adaptiveAlpha = accuracy < 5 ? 0.08 :   // Très bonne précision: lissage léger
+                         accuracy < 10 ? 0.05 :   // Bonne précision: lissage modéré
+                         accuracy < 15 ? 0.02 :   // Précision acceptable: lissage fort
+                         0.01;                     // Précision limite: lissage très fort
     
     if (this.currentSmoothedOrientation == null) {
       this.currentSmoothedOrientation = medianYaw;
+      this.lastGoodOrientation = normalizedHeading;
     } else {
       // Gestion du passage 0°/360°
       let angleDiff = medianYaw - this.currentSmoothedOrientation;
       if (angleDiff > 180) angleDiff -= 360;
       else if (angleDiff < -180) angleDiff += 360;
       
-      // *** AMÉLIORATION 3: Ignorer les petites variations pendant un segment ***
-      const minChangeThreshold = 3; // Ignorer les variations < 3°
+      // *** AMÉLIORATION 5: Seuil minimal de variation adaptatif ***
+      // Seuil plus élevé pour les mesures moins précises
+      const minChangeThreshold = accuracy < 10 ? 2 : accuracy < 15 ? 4 : 6;
+      
       if (Math.abs(angleDiff) > minChangeThreshold) {
         this.currentSmoothedOrientation += adaptiveAlpha * angleDiff;
+        
+        // Normalisation du résultat
+        while (this.currentSmoothedOrientation >= 360) this.currentSmoothedOrientation -= 360;
+        while (this.currentSmoothedOrientation < 0) this.currentSmoothedOrientation += 360;
+        
+        // Mettre à jour la dernière bonne orientation
+        this.lastGoodOrientation = normalizedHeading;
       }
-      
-      // Normalisation du résultat
-      while (this.currentSmoothedOrientation >= 360) this.currentSmoothedOrientation -= 360;
-      while (this.currentSmoothedOrientation < 0) this.currentSmoothedOrientation += 360;
+    }
+
+    // *** AMÉLIORATION 6: Logs de debug détaillés ***
+    if (Math.random() < 0.1) { // Log 10% des mesures pour debug
+      console.log(`🧭 [FILTER] Raw: ${normalizedHeading.toFixed(1)}° | Median: ${medianYaw.toFixed(1)}° | Lissé: ${this.currentSmoothedOrientation.toFixed(1)}° | Accuracy: ${accuracy.toFixed(1)}° | Alpha: ${adaptiveAlpha.toFixed(3)}`);
     }
 
     // Vérification que le callback existe avant de l'appeler
@@ -710,7 +840,12 @@ export default class NativeEnhancedMotionService {
         adaptiveAlpha,
         source: 'compass',
         activeOrientationSource: 'compass',
-        hybridConflict: false
+        hybridConflict: false,
+        filterQuality: {
+          accuracyGood: accuracy <= this.minAccuracyThreshold,
+          historySize: this.orientationHistory.length,
+          consecutiveBadReadings: this.consecutiveBadReadings
+        }
       });
     }
   }
@@ -1058,5 +1193,318 @@ export default class NativeEnhancedMotionService {
     } catch (error) {
       console.error('❌ [SENSORS] Erreur arrêt capteurs:', error);
     }
+  }
+
+  /**
+   * *** NOUVEAU: Configuration des paramètres de filtrage de la boussole ***
+   */
+  configureCompassFiltering(options = {}) {
+    if (options.historySize !== undefined) {
+      this.orientationHistoryMaxSize = Math.max(10, Math.min(100, options.historySize));
+      console.log(`🧭 [CONFIG] Taille historique mise à jour: ${this.orientationHistoryMaxSize}`);
+    }
+    
+    if (options.accuracyThreshold !== undefined) {
+      this.minAccuracyThreshold = Math.max(5, Math.min(30, options.accuracyThreshold));
+      console.log(`🧭 [CONFIG] Seuil accuracy mis à jour: ${this.minAccuracyThreshold}°`);
+    }
+    
+    if (options.jumpThreshold !== undefined) {
+      this.maxAngleJumpThreshold = Math.max(15, Math.min(90, options.jumpThreshold));
+      console.log(`🧭 [CONFIG] Seuil saut mis à jour: ${this.maxAngleJumpThreshold}°`);
+    }
+    
+    if (options.medianWindow !== undefined) {
+      this.medianWindowSize = Math.max(3, Math.min(15, options.medianWindow));
+      console.log(`🧭 [CONFIG] Fenêtre médiane mise à jour: ${this.medianWindowSize}`);
+    }
+    
+    if (options.maxConsecutiveBad !== undefined) {
+      this.maxConsecutiveBadReadings = Math.max(3, Math.min(10, options.maxConsecutiveBad));
+      console.log(`🧭 [CONFIG] Max lectures consécutives mauvaises: ${this.maxConsecutiveBadReadings}`);
+    }
+    
+    console.log(`🧭 [CONFIG] Configuration filtrage appliquée:`, {
+      historySize: this.orientationHistoryMaxSize,
+      accuracyThreshold: this.minAccuracyThreshold,
+      jumpThreshold: this.maxAngleJumpThreshold,
+      medianWindow: this.medianWindowSize,
+      maxConsecutiveBad: this.maxConsecutiveBadReadings
+    });
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir les statistiques de filtrage ***
+   */
+  getCompassFilteringStats() {
+    return {
+      currentOrientation: this.currentSmoothedOrientation,
+      historySize: this.orientationHistory.length,
+      maxHistorySize: this.orientationHistoryMaxSize,
+      consecutiveBadReadings: this.consecutiveBadReadings,
+      lastGoodOrientation: this.lastGoodOrientation,
+      filteringConfig: {
+        accuracyThreshold: this.minAccuracyThreshold,
+        jumpThreshold: this.maxAngleJumpThreshold,
+        medianWindow: this.medianWindowSize,
+        maxConsecutiveBad: this.maxConsecutiveBadReadings
+      }
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Validation robuste des pas pour éviter le surcomptage ***
+   */
+  _validateStep(stepData) {
+    const { stepLength, dx, dy, timestamp, confidence, source } = stepData;
+    const now = timestamp || Date.now();
+    
+    console.log(`🔍 [STEP-FILTER] === VALIDATION DU PAS ===`);
+    console.log(`🔍 [STEP-FILTER] Source: ${source}, Longueur: ${stepLength.toFixed(3)}m, Confiance: ${(confidence * 100).toFixed(1)}%`);
+    console.log(`🔍 [STEP-FILTER] Déplacement: dx=${dx.toFixed(3)}, dy=${dy.toFixed(3)}`);
+    
+    // *** FILTRE 1: Validation de la confiance ***
+    if (confidence < this.stepFiltering.minConfidenceThreshold) {
+      console.log(`❌ [STEP-FILTER] Rejeté - confiance trop faible: ${(confidence * 100).toFixed(1)}% < ${(this.stepFiltering.minConfidenceThreshold * 100).toFixed(1)}%`);
+      this.stepFiltering.rejectedStepsCount++;
+      return false;
+    }
+    
+    // *** FILTRE 2: Validation de la distance ***
+    const stepDistance = Math.hypot(dx, dy);
+    if (stepDistance < this.stepFiltering.minStepDistance) {
+      console.log(`❌ [STEP-FILTER] Rejeté - distance trop petite: ${stepDistance.toFixed(3)}m < ${this.stepFiltering.minStepDistance}m (micro-mouvement)`);
+      this.stepFiltering.rejectedStepsCount++;
+      return false;
+    }
+    
+    if (stepDistance > this.stepFiltering.maxStepDistance) {
+      console.log(`❌ [STEP-FILTER] Rejeté - distance trop grande: ${stepDistance.toFixed(3)}m > ${this.stepFiltering.maxStepDistance}m (saut irréaliste)`);
+      this.stepFiltering.rejectedStepsCount++;
+      return false;
+    }
+    
+    // *** FILTRE 3: Validation de l'intervalle temporel ***
+    if (this.stepFiltering.lastValidStepTime > 0) {
+      const timeDelta = now - this.stepFiltering.lastValidStepTime;
+      
+      if (timeDelta < this.stepFiltering.minStepInterval) {
+        console.log(`❌ [STEP-FILTER] Rejeté - intervalle trop court: ${timeDelta}ms < ${this.stepFiltering.minStepInterval}ms (double détection)`);
+        this.stepFiltering.rejectedStepsCount++;
+        return false;
+      }
+      
+      if (timeDelta > this.stepFiltering.maxStepInterval) {
+        console.log(`⚠️ [STEP-FILTER] Attention - intervalle très long: ${timeDelta}ms > ${this.stepFiltering.maxStepInterval}ms (pause détectée)`);
+        // Ne pas rejeter, mais noter que c'est inhabituel
+      }
+    }
+    
+    // *** FILTRE 4: Détection ZUPT (Zero-Velocity Update) ***
+    if (this.validStepsHistory.length >= this.stepFiltering.consecutiveStepsForZupt) {
+      const recentSteps = this.validStepsHistory.slice(-this.stepFiltering.consecutiveStepsForZupt);
+      const avgDistance = recentSteps.reduce((sum, step) => sum + step.distance, 0) / recentSteps.length;
+      
+      if (avgDistance < this.stepFiltering.zuptThreshold) {
+        console.log(`❌ [STEP-FILTER] ZUPT détecté - distance moyenne récente: ${avgDistance.toFixed(3)}m < ${this.stepFiltering.zuptThreshold}m (immobilité apparente)`);
+        this.stepFiltering.rejectedStepsCount++;
+        return false;
+      }
+    }
+    
+    // *** FILTRE 5: Validation de la cohérence avec les pas précédents ***
+    if (this.validStepsHistory.length > 0) {
+      const lastValidStep = this.validStepsHistory[this.validStepsHistory.length - 1];
+      const distanceFromLastValid = Math.hypot(
+        (this.stepFiltering.lastValidPosition.x + dx) - lastValidStep.position.x,
+        (this.stepFiltering.lastValidPosition.y + dy) - lastValidStep.position.y
+      );
+      
+      // Vérifier que le nouveau pas n'est pas anormalement éloigné du précédent
+      const maxDistanceBetweenSteps = this.stepFiltering.maxStepDistance * 1.5; // 150% de la distance max
+      if (distanceFromLastValid > maxDistanceBetweenSteps) {
+        console.log(`❌ [STEP-FILTER] Rejeté - trop éloigné du pas précédent: ${distanceFromLastValid.toFixed(3)}m > ${maxDistanceBetweenSteps.toFixed(3)}m`);
+        this.stepFiltering.rejectedStepsCount++;
+        return false;
+      }
+    }
+    
+    console.log(`✅ [STEP-FILTER] Pas validé - distance: ${stepDistance.toFixed(3)}m, confiance: ${(confidence * 100).toFixed(1)}%`);
+    
+    // *** Mettre à jour les statistiques de filtrage ***
+    this._updateStepFilteringStats(stepData, stepDistance, now);
+    
+    return true;
+  }
+  
+  /**
+   * *** NOUVEAU: Mise à jour des statistiques de filtrage ***
+   */
+  _updateStepFilteringStats(stepData, stepDistance, timestamp) {
+    const { dx, dy, confidence, source } = stepData;
+    
+    // Ajouter à l'historique des pas valides
+    this.validStepsHistory.push({
+      timestamp,
+      distance: stepDistance,
+      displacement: { dx, dy },
+      confidence,
+      source,
+      position: {
+        x: this.stepFiltering.lastValidPosition.x + dx,
+        y: this.stepFiltering.lastValidPosition.y + dy
+      }
+    });
+    
+    // Limiter la taille de l'historique
+    if (this.validStepsHistory.length > this.validStepsHistoryMaxSize) {
+      this.validStepsHistory.shift();
+    }
+    
+    // Mettre à jour la position et le temps du dernier pas valide
+    this.stepFiltering.lastValidStepTime = timestamp;
+    this.stepFiltering.lastValidPosition.x += dx;
+    this.stepFiltering.lastValidPosition.y += dy;
+    
+    // *** Calcul du taux de faux positifs ***
+    const totalAttempts = this.stepCount + this.stepFiltering.rejectedStepsCount;
+    this.stepFiltering.falsePositiveRate = totalAttempts > 0 ? 
+      this.stepFiltering.rejectedStepsCount / totalAttempts : 0;
+    
+    // *** Adaptation automatique des seuils ***
+    if (this.stepFiltering.adaptiveThreshold && this.validStepsHistory.length > 10) {
+      this._adaptFilteringThresholds();
+    }
+  }
+  
+  /**
+   * *** NOUVEAU: Adaptation automatique des seuils de filtrage ***
+   */
+  _adaptFilteringThresholds() {
+    const recentSteps = this.validStepsHistory.slice(-20); // 20 derniers pas
+    if (recentSteps.length < 10) return;
+    
+    // Calculer les statistiques des pas récents
+    const distances = recentSteps.map(step => step.distance);
+    const intervals = [];
+    
+    for (let i = 1; i < recentSteps.length; i++) {
+      intervals.push(recentSteps[i].timestamp - recentSteps[i-1].timestamp);
+    }
+    
+    // Statistiques des distances
+    const avgDistance = distances.reduce((sum, d) => sum + d, 0) / distances.length;
+    const minDistance = Math.min(...distances);
+    const maxDistance = Math.max(...distances);
+    
+    // Statistiques des intervalles
+    const avgInterval = intervals.reduce((sum, i) => sum + i, 0) / intervals.length;
+    const minInterval = Math.min(...intervals);
+    
+    // Adapter les seuils si les données sont cohérentes
+    if (distances.length > 15) {
+      // Adapter la distance minimum (mais pas en dessous de 30cm)
+      const newMinDistance = Math.max(0.3, minDistance * 0.8);
+      if (newMinDistance !== this.stepFiltering.minStepDistance) {
+        console.log(`🎛️ [STEP-FILTER] Adaptation seuil distance min: ${this.stepFiltering.minStepDistance.toFixed(2)}m → ${newMinDistance.toFixed(2)}m`);
+        this.stepFiltering.minStepDistance = newMinDistance;
+      }
+      
+      // Adapter l'intervalle minimum (mais pas en dessous de 200ms)
+      const newMinInterval = Math.max(200, minInterval * 0.9);
+      if (Math.abs(newMinInterval - this.stepFiltering.minStepInterval) > 50) {
+        console.log(`🎛️ [STEP-FILTER] Adaptation seuil intervalle min: ${this.stepFiltering.minStepInterval}ms → ${newMinInterval}ms`);
+        this.stepFiltering.minStepInterval = newMinInterval;
+      }
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir les statistiques de filtrage des pas ***
+   */
+  getStepFilteringStats() {
+    const totalAttempts = this.stepCount + this.stepFiltering.rejectedStepsCount;
+    const validStepsRate = totalAttempts > 0 ? this.stepCount / totalAttempts : 0;
+    
+    return {
+      validSteps: this.stepCount,
+      rejectedSteps: this.stepFiltering.rejectedStepsCount,
+      totalAttempts: totalAttempts,
+      validStepsRate: validStepsRate,
+      falsePositiveRate: this.stepFiltering.falsePositiveRate,
+      validStepsHistory: this.validStepsHistory.slice(-10), // 10 derniers pas valides
+      filteringConfig: {
+        minStepDistance: this.stepFiltering.minStepDistance,
+        maxStepDistance: this.stepFiltering.maxStepDistance,
+        minStepInterval: this.stepFiltering.minStepInterval,
+        maxStepInterval: this.stepFiltering.maxStepInterval,
+        minConfidenceThreshold: this.stepFiltering.minConfidenceThreshold,
+        zuptThreshold: this.stepFiltering.zuptThreshold,
+        adaptiveThreshold: this.stepFiltering.adaptiveThreshold
+      },
+      averageStepStats: this.validStepsHistory.length > 0 ? {
+        averageDistance: this.validStepsHistory.reduce((sum, step) => sum + step.distance, 0) / this.validStepsHistory.length,
+        averageInterval: this.validStepsHistory.length > 1 ? 
+          (this.validStepsHistory[this.validStepsHistory.length - 1].timestamp - this.validStepsHistory[0].timestamp) / (this.validStepsHistory.length - 1) : 0,
+        averageConfidence: this.validStepsHistory.reduce((sum, step) => sum + step.confidence, 0) / this.validStepsHistory.length
+      } : null
+    };
+  }
+  
+  /**
+   * *** NOUVEAU: Configuration des paramètres de filtrage des pas ***
+   */
+  configureStepFiltering(options = {}) {
+    if (options.minStepDistance !== undefined) {
+      this.stepFiltering.minStepDistance = Math.max(0.1, Math.min(1.0, options.minStepDistance));
+      console.log(`🔧 [STEP-CONFIG] Distance minimum mise à jour: ${this.stepFiltering.minStepDistance}m`);
+    }
+    
+    if (options.maxStepDistance !== undefined) {
+      this.stepFiltering.maxStepDistance = Math.max(1.0, Math.min(3.0, options.maxStepDistance));
+      console.log(`🔧 [STEP-CONFIG] Distance maximum mise à jour: ${this.stepFiltering.maxStepDistance}m`);
+    }
+    
+    if (options.minStepInterval !== undefined) {
+      this.stepFiltering.minStepInterval = Math.max(100, Math.min(1000, options.minStepInterval));
+      console.log(`🔧 [STEP-CONFIG] Intervalle minimum mis à jour: ${this.stepFiltering.minStepInterval}ms`);
+    }
+    
+    if (options.minConfidenceThreshold !== undefined) {
+      this.stepFiltering.minConfidenceThreshold = Math.max(0.1, Math.min(0.9, options.minConfidenceThreshold));
+      console.log(`🔧 [STEP-CONFIG] Seuil de confiance mis à jour: ${(this.stepFiltering.minConfidenceThreshold * 100).toFixed(1)}%`);
+    }
+    
+    if (options.zuptThreshold !== undefined) {
+      this.stepFiltering.zuptThreshold = Math.max(0.05, Math.min(0.5, options.zuptThreshold));
+      console.log(`🔧 [STEP-CONFIG] Seuil ZUPT mis à jour: ${this.stepFiltering.zuptThreshold}m`);
+    }
+    
+    if (options.adaptiveThreshold !== undefined) {
+      this.stepFiltering.adaptiveThreshold = Boolean(options.adaptiveThreshold);
+      console.log(`🔧 [STEP-CONFIG] Seuils adaptatifs: ${this.stepFiltering.adaptiveThreshold ? 'activés' : 'désactivés'}`);
+    }
+    
+    console.log(`🔧 [STEP-CONFIG] Configuration filtrage des pas appliquée:`, {
+      minStepDistance: this.stepFiltering.minStepDistance,
+      maxStepDistance: this.stepFiltering.maxStepDistance,
+      minStepInterval: this.stepFiltering.minStepInterval,
+      minConfidenceThreshold: this.stepFiltering.minConfidenceThreshold,
+      zuptThreshold: this.stepFiltering.zuptThreshold,
+      adaptiveThreshold: this.stepFiltering.adaptiveThreshold
+    });
+  }
+  
+  /**
+   * *** NOUVEAU: Réinitialiser les statistiques de filtrage ***
+   */
+  resetStepFilteringStats() {
+    this.stepFiltering.rejectedStepsCount = 0;
+    this.stepFiltering.falsePositiveRate = 0;
+    this.stepFiltering.lastValidStepTime = 0;
+    this.stepFiltering.lastValidPosition = { x: 0, y: 0 };
+    this.validStepsHistory = [];
+    
+    console.log('🔄 [STEP-CONFIG] Statistiques de filtrage des pas réinitialisées');
   }
 } 

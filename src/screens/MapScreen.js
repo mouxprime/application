@@ -146,7 +146,106 @@ export default function MapScreen() {
   // *** FIX: CALLBACKS DÉFINIS AVANT L'INITIALISATION DU SERVICE ***
   const lastTotalStepsRef = useRef(0); // *** NOUVEAU: Pour détecter les doublons ***
   
-  const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, totalSteps, confidence, source, nativeStepLength, averageStepLength, cadence, timeDelta, isFallback }) => {
+  // *** NOUVEAU: Configuration du lissage de trajectoire ***
+  const trajectorySmoothing = {
+    enabled: true,
+    minPointDistance: 0.15,       // Distance minimum entre points (15cm)
+    outlierThreshold: 1.5,        // Seuil pour détecter les points aberrants (1.5m)
+    maxConsecutiveOutliers: 2,    // Maximum de points aberrants consécutifs
+    smoothingFactor: 0.3          // Facteur de lissage (0.3 = 30% de lissage)
+  };
+  const consecutiveOutliersRef = useRef(0);
+  
+  // *** NOUVEAU: Fonction de filtrage et lissage des points de trajectoire ***
+  const filterAndSmoothTrajectoryPoint = useCallback((newPoint, currentTrajectory) => {
+    if (!trajectorySmoothing.enabled || !currentTrajectory || currentTrajectory.length === 0) {
+      return newPoint;
+    }
+    
+    // *** FILTRE 1: Distance minimum entre points ***
+    if (currentTrajectory.length > 0) {
+      const lastPoint = currentTrajectory[currentTrajectory.length - 1];
+      const distance = Math.hypot(newPoint.x - lastPoint.x, newPoint.y - lastPoint.y);
+      
+      if (distance < trajectorySmoothing.minPointDistance) {
+        console.log(`🎯 [TRAJECTORY-FILTER] Point trop proche ignoré: ${distance.toFixed(3)}m < ${trajectorySmoothing.minPointDistance}m`);
+        return null; // Ignorer ce point
+      }
+    }
+    
+    // *** FILTRE 2: Détection et correction d'outliers ***
+    if (currentTrajectory.length >= 2) {
+      const lastPoint = currentTrajectory[currentTrajectory.length - 1];
+      const secondLastPoint = currentTrajectory[currentTrajectory.length - 2];
+      
+      // Calculer la direction attendue basée sur les derniers points
+      const expectedDirection = Math.atan2(lastPoint.y - secondLastPoint.y, lastPoint.x - secondLastPoint.x);
+      const lastDistance = Math.hypot(lastPoint.x - secondLastPoint.x, lastPoint.y - secondLastPoint.y);
+      
+      const actualDistance = Math.hypot(newPoint.x - lastPoint.x, newPoint.y - lastPoint.y);
+      
+      // Vérifier si c'est un outlier
+      if (actualDistance > trajectorySmoothing.outlierThreshold) {
+        consecutiveOutliersRef.current++;
+        
+        console.log(`⚠️ [TRAJECTORY-FILTER] Point aberrant détecté: distance=${actualDistance.toFixed(3)}m > seuil=${trajectorySmoothing.outlierThreshold}m (outlier #${consecutiveOutliersRef.current})`);
+        
+        // Si trop d'outliers consécutifs, on les rejette
+        if (consecutiveOutliersRef.current > trajectorySmoothing.maxConsecutiveOutliers) {
+          console.log(`❌ [TRAJECTORY-FILTER] Trop d'outliers consécutifs (${consecutiveOutliersRef.current}), point rejeté`);
+          return null;
+        }
+        
+        // Sinon, corriger le point en limitant la distance
+        const correctedDistance = Math.min(actualDistance, trajectorySmoothing.outlierThreshold * 0.8);
+        const direction = Math.atan2(newPoint.y - lastPoint.y, newPoint.x - lastPoint.x);
+        
+        const correctedPoint = {
+          ...newPoint,
+          x: lastPoint.x + correctedDistance * Math.cos(direction),
+          y: lastPoint.y + correctedDistance * Math.sin(direction)
+        };
+        
+        console.log(`🎯 [TRAJECTORY-FILTER] Point corrigé: (${newPoint.x.toFixed(2)}, ${newPoint.y.toFixed(2)}) → (${correctedPoint.x.toFixed(2)}, ${correctedPoint.y.toFixed(2)})`);
+        return correctedPoint;
+      } else {
+        // Point normal, réinitialiser le compteur d'outliers
+        consecutiveOutliersRef.current = 0;
+      }
+    }
+    
+    // *** FILTRE 3: Lissage basé sur la confiance ***
+    if (currentTrajectory.length >= 2) {
+      const lastPoint = currentTrajectory[currentTrajectory.length - 1];
+      
+      // Facteur de lissage adaptatif basé sur la confiance
+      const confidenceWeight = Math.max(0.1, Math.min(0.9, newPoint.confidence || 0.5));
+      const adaptiveSmoothingFactor = trajectorySmoothing.smoothingFactor * (1 - confidenceWeight);
+      
+      const smoothedPoint = {
+        ...newPoint,
+        x: newPoint.x * (1 - adaptiveSmoothingFactor) + lastPoint.x * adaptiveSmoothingFactor,
+        y: newPoint.y * (1 - adaptiveSmoothingFactor) + lastPoint.y * adaptiveSmoothingFactor
+      };
+      
+      if (adaptiveSmoothingFactor > 0.1) {
+        console.log(`🎯 [TRAJECTORY-SMOOTH] Point lissé: confiance=${(confidenceWeight*100).toFixed(1)}%, lissage=${(adaptiveSmoothingFactor*100).toFixed(1)}%`);
+        console.log(`  Original: (${newPoint.x.toFixed(2)}, ${newPoint.y.toFixed(2)}) → Lissé: (${smoothedPoint.x.toFixed(2)}, ${smoothedPoint.y.toFixed(2)})`);
+      }
+      
+      return smoothedPoint;
+    }
+    
+    return newPoint;
+  }, []);
+
+  const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, totalSteps, confidence, source, nativeStepLength, averageStepLength, cadence, timeDelta, isFallback, filtered, validationPass }) => {
+    // *** AMÉLIORATION: Vérifier si le pas a été filtré par le service ***
+    if (validationPass === false) {
+      console.log(`⚠️ [STEP-CALLBACK] Pas marqué comme non-validé par le service - ignoré`);
+      return;
+    }
+    
     // *** NOUVEAU: Détection de doublon de pas ***
     console.log(`🔧 [STEP-CALLBACK-DEBUG] === VÉRIFICATION DOUBLON ===`);
     console.log(`🔧 [STEP-CALLBACK-DEBUG] totalSteps actuel: ${totalSteps}`);
@@ -199,27 +298,54 @@ export default function MapScreen() {
     const newX = currentState.pose.x + dx;
     const newY = currentState.pose.y + dy;
     
-    // *** FIX: ORDRE CORRIGÉ - Ajouter le point à la trajectoire AVANT de mettre à jour la pose ***
-    // 1) D'abord ajouter le nouveau point à la trajectoire
-    currentActions.addTrajectoryPoint({
+    // *** NOUVEAU: Créer le nouveau point avec filtrage et lissage ***
+    const rawTrajectoryPoint = {
       x: newX,
       y: newY,
       timestamp,
       confidence: stepConfidenceToUse
-    });
+    };
     
-    // 2) Ensuite mettre à jour la pose (qui déclenchera le re-rendu avec la trajectoire déjà mise à jour)
+    // Appliquer le filtrage et lissage
+    const filteredPoint = filterAndSmoothTrajectoryPoint(rawTrajectoryPoint, currentState.trajectory);
+    
+    if (!filteredPoint) {
+      console.log(`❌ [TRAJECTORY-FILTER] Point rejeté par le filtre de trajectoire - pas d'ajout à la trajectoire`);
+      // Ne pas ajouter ce point à la trajectoire mais continuer avec les autres mises à jour
+      
+      // Juste mettre à jour les métriques sans ajouter de point
+      const totalDistance = (currentState.distance || 0) + Math.hypot(dx, dy);
+      const stepsToUse = totalSteps || stepCount || 0;
+      
+      currentActions.updatePDRMetrics({
+        stepCount: stepsToUse,
+        distance: totalDistance,
+        currentMode: isNative ? 'NATIF' : 'FALLBACK',
+        energyLevel: 1.0,
+        isZUPT: false
+      });
+      
+      console.log(`📊 [TRAJECTORY-FILTER] Métriques mises à jour sans nouveau point de trajectoire`);
+      return;
+    }
+    
+    // *** FIX: ORDRE CORRIGÉ - Ajouter le point filtré à la trajectoire AVANT de mettre à jour la pose ***
+    // 1) D'abord ajouter le nouveau point filtré à la trajectoire
+    currentActions.addTrajectoryPoint(filteredPoint);
+    
+    // 2) Ensuite mettre à jour la pose (utiliser la position filtrée)
     currentActions.updatePose({
-      x: newX,
-      y: newY,
+      x: filteredPoint.x,
+      y: filteredPoint.y,
       // *** NE PAS METTRE À JOUR THETA *** - l'orientation est gérée séparément par la boussole
       confidence: stepConfidenceToUse
     });
     
-    console.log(`📍 [STEP-CALLBACK] Nouvelle position: (${newX.toFixed(2)}, ${newY.toFixed(2)}), orientation CONSERVÉE`);
+    console.log(`📍 [STEP-CALLBACK] Nouvelle position filtrée: (${filteredPoint.x.toFixed(2)}, ${filteredPoint.y.toFixed(2)}), orientation CONSERVÉE`);
     
-    // *** FIX: Calculer la distance totale correctement ***
-    const totalDistance = (currentState.distance || 0) + Math.hypot(dx, dy);
+    // *** FIX: Calculer la distance totale correctement avec la position filtrée ***
+    const actualMovement = Math.hypot(filteredPoint.x - currentState.pose.x, filteredPoint.y - currentState.pose.y);
+    const totalDistance = (currentState.distance || 0) + actualMovement;
     
     // *** FIX MAJEUR: Utiliser totalSteps au lieu de stepCount pour les métriques ***
     const stepsToUse = totalSteps || stepCount || 0; // Fallback au cas où
@@ -243,14 +369,43 @@ export default function MapScreen() {
     console.log(`🎯 [STEP-CALLBACK] Trajectoire: ${(currentState.trajectory?.length || 0) + 1} points`);
   }, []);
 
-  const handleHeading = useCallback(({ yaw, accuracy, timestamp, source, filteredHeading, rawHeading }) => {
+  const handleHeading = useCallback(({ yaw, accuracy, timestamp, source, filteredHeading, rawHeading, filterQuality }) => {
     // *** FIX: Utiliser les refs pour accéder aux valeurs actuelles ***
     const currentState = stateRef.current;
     const currentActions = actionsRef.current;
     
-    // *** FIX: Mettre à jour les états locaux d'orientation AVANT de les utiliser ***
-    setContinuousOrientation(yaw); // yaw est déjà en radians
-    continuousOrientationRef.current = yaw; // Mettre à jour la ref aussi
+    // *** AMÉLIORATION: Filtrage supplémentaire côté UI ***
+    const currentOrientation = continuousOrientationRef.current;
+    
+    // Si c'est la première orientation, l'accepter directement
+    if (currentOrientation === null || currentOrientation === undefined) {
+      setContinuousOrientation(yaw);
+      continuousOrientationRef.current = yaw;
+    } else {
+      // Calculer la différence d'angle en gérant le passage 0°/2π
+      let angleDiff = yaw - currentOrientation;
+      if (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+      else if (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+      
+      // *** NOUVEAU: Rejet des sauts trop importants côté UI ***
+      const maxUIJumpThreshold = Math.PI / 6; // 30° maximum d'un coup côté UI
+      
+      if (Math.abs(angleDiff) > maxUIJumpThreshold) {
+        console.log(`🎯 [UI-FILTER] Saut UI rejeté: ${(angleDiff * 180 / Math.PI).toFixed(1)}° > ${(maxUIJumpThreshold * 180 / Math.PI).toFixed(1)}°`);
+        return; // Rejeter cette mise à jour UI
+      }
+      
+      // *** NOUVEAU: Lissage UI adaptatif basé sur la qualité du filtrage ***
+      const uiSmoothingAlpha = filterQuality?.accuracyGood ? 0.3 : 0.1; // Plus réactif si bonne qualité
+      
+      // Appliquer le lissage UI
+      const newOrientation = currentOrientation + uiSmoothingAlpha * angleDiff;
+      
+      setContinuousOrientation(newOrientation);
+      continuousOrientationRef.current = newOrientation;
+    }
+    
+    // *** FIX: Mettre à jour les autres états d'orientation ***
     setOrientationConfidence(accuracy ? Math.max(0, Math.min(1, (100 - accuracy) / 100)) : 0.8);
     setOrientationSource('native_compass');
     setIsOrientationActive(true); // S'assurer que l'orientation est active
@@ -258,7 +413,7 @@ export default function MapScreen() {
     currentActions.updatePose({
       x: currentState.pose.x,
       y: currentState.pose.y,
-      theta: yaw, // Garder en radians pour les calculs
+      theta: continuousOrientationRef.current, // Utiliser l'orientation lissée UI
       confidence: currentState.pose.confidence
     });
   }, []);
@@ -280,6 +435,9 @@ export default function MapScreen() {
     handleHeading,
     handleSensors
   ));
+  
+  // *** NOUVEAU: Utilitaire de test pour le filtrage de la boussole ***
+  const [compassFilteringTest] = useState(() => new CompassFilteringTest(hybridMotionService));
   
   // Convertisseur d'échelle avec l'échelle de référence CORRIGÉE
   const [scaleConverter] = useState(() => new ScaleConverter({
@@ -391,6 +549,13 @@ export default function MapScreen() {
     
     // *** NOUVEAU: Démarrer la boussole native indépendante ***
     startNativeCompass();
+    
+    // *** NOUVEAU: Exposer l'utilitaire de test globalement ***
+    if (typeof window !== 'undefined') {
+      window.compassTest = compassFilteringTest;
+      console.log(`🧭 [COMPASS-TEST] Utilitaire de test disponible globalement: window.compassTest`);
+      console.log(`🧭 [COMPASS-TEST] Tapez "window.compassTest.help()" dans la console pour voir l'aide`);
+    }
     
     return () => {
       if (hybridMotionService) {
@@ -1592,10 +1757,46 @@ export default function MapScreen() {
     
     // Convertir en radians
     const headingRadians = (normalizedHeading * Math.PI) / 180;
-       
-    // Mettre à jour les états d'orientation
-    setContinuousOrientation(headingRadians);
-    continuousOrientationRef.current = headingRadians;
+    
+    // *** AMÉLIORATION: Filtrage côté UI similaire à handleHeading ***
+    const currentOrientation = continuousOrientationRef.current;
+    
+    // Filtrage préliminaire basé sur la précision (similaire au service)
+    const minAccuracyThreshold = 15;
+    if (accuracy > minAccuracyThreshold) {
+      console.log(`🧭 [UI-NATIVE] Lecture rejetée - accuracy trop faible: ${accuracy}° > ${minAccuracyThreshold}°`);
+      return; // Rejeter cette lecture
+    }
+    
+    if (currentOrientation === null || currentOrientation === undefined) {
+      // Première orientation, l'accepter directement
+      setContinuousOrientation(headingRadians);
+      continuousOrientationRef.current = headingRadians;
+    } else {
+      // Calculer la différence d'angle en gérant le passage 0°/2π
+      let angleDiff = headingRadians - currentOrientation;
+      if (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+      else if (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+      
+      // Rejet des sauts trop importants côté UI
+      const maxUIJumpThreshold = Math.PI / 6; // 30° maximum d'un coup
+      
+      if (Math.abs(angleDiff) > maxUIJumpThreshold) {
+        console.log(`🎯 [UI-NATIVE] Saut UI rejeté: ${(angleDiff * 180 / Math.PI).toFixed(1)}° > ${(maxUIJumpThreshold * 180 / Math.PI).toFixed(1)}°`);
+        return; // Rejeter cette mise à jour UI
+      }
+      
+      // Lissage UI adaptatif basé sur la précision
+      const uiSmoothingAlpha = accuracy < 10 ? 0.3 : 0.1; // Plus réactif si bonne précision
+      
+      // Appliquer le lissage UI
+      const newOrientation = currentOrientation + uiSmoothingAlpha * angleDiff;
+      
+      setContinuousOrientation(newOrientation);
+      continuousOrientationRef.current = newOrientation;
+    }
+    
+    // Mettre à jour les autres états d'orientation
     setOrientationConfidence(accuracy ? Math.max(0, Math.min(1, (100 - accuracy) / 100)) : 0.8);
     setOrientationSource('native_compass');
     setIsOrientationActive(true);
@@ -1607,7 +1808,7 @@ export default function MapScreen() {
     currentActions.updatePose({
       x: currentState.pose.x,
       y: currentState.pose.y,
-      theta: headingRadians,
+      theta: continuousOrientationRef.current, // Utiliser l'orientation lissée UI
       confidence: currentState.pose.confidence
     });
   };
