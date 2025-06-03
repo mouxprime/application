@@ -475,12 +475,22 @@ export default function MapScreen() {
       console.log('🚀 [INIT-SYSTEM] initialPose préparé:', initialPose);
       console.log('🚀 [INIT-SYSTEM] state.pose AVANT resetPose:', state.pose);
       
+      // *** CORRIGÉ: Forcer la mise à jour de la pose ***
       actions.resetPose(initialPose);
-      console.log('🚀 [INIT-SYSTEM] resetPose appelé avec initialPose');
       
-      // *** NOUVEAU: Vérifier immédiatement si la pose a été mise à jour ***
+      // *** NOUVEAU: Vérifier immédiatement la mise à jour ***
       setTimeout(() => {
-        console.log('🚀 [INIT-SYSTEM] state.pose APRÈS resetPose (délai 100ms):', state.pose);
+        console.log('🚀 [INIT-SYSTEM] state.pose APRÈS resetPose (100ms):', state.pose);
+        
+        // *** SÉCURITÉ: Forcer la pose si elle n'a pas été mise à jour ***
+        if (state.pose.x === 0 && state.pose.y === 0) {
+          console.warn('⚠️ [INIT-SYSTEM] Position non mise à jour, forçage...');
+          actions.updatePose(initialPose);
+          
+          setTimeout(() => {
+            console.log('🚀 [INIT-SYSTEM] state.pose APRÈS updatePose forcé (200ms):', state.pose);
+          }, 100);
+        }
       }, 100);
       
       actions.resetTrajectory();
@@ -489,7 +499,7 @@ export default function MapScreen() {
       setIsMapLoaded(true);
       console.log('🚀 [INIT-SYSTEM] isMapLoaded défini à true');
       
-      console.log(`✅ [INIT-SYSTEM] Système initialisé avec succès - Position par défaut: ${defaultPoint.name} (${defaultPoint.worldX.toFixed(2)}, ${defaultPoint.worldY.toFixed(2)})`);
+      console.log(`✅ [INIT-SYSTEM] Système initialisé - Position ciblée: ${defaultPoint.name} (${defaultPoint.worldX.toFixed(2)}, ${defaultPoint.worldY.toFixed(2)})`);
       console.log('🚀 [INIT-SYSTEM] === FIN INITIALISATION ===');
     } catch (error) {
       console.error('❌ [INIT-SYSTEM] Erreur initialisation système:', error);
@@ -1633,7 +1643,7 @@ export default function MapScreen() {
   // *** NOUVEAU: Initialisation de l'apparence ***
   const initializeAppearance = async () => {
     try {
-      console.log('🎨 [MAP-SCREEN] Initialisation de l\'apparence...');
+      //console.log('🎨 [MAP-SCREEN] Initialisation de l\'apparence...');
       
       await appearanceService.initialize();
       const config = appearanceService.getConfiguration();
@@ -1641,7 +1651,7 @@ export default function MapScreen() {
       
       // Écouter les changements de configuration
       const unsubscribe = appearanceService.addListener((newConfig) => {
-        console.log('🎨 [MAP-SCREEN] Configuration couleurs mise à jour:', newConfig);
+        //console.log('🎨 [MAP-SCREEN] Configuration couleurs mise à jour:', newConfig);
         setAppearanceConfig(newConfig);
       });
       
@@ -1844,43 +1854,16 @@ export default function MapScreen() {
    * *** NOUVEAU: Centrer sur l'utilisateur avec zoom x4.7 ***
    */
   const centerOnUserWithZoom = useCallback(() => {
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] === DÉBUT DIAGNOSTIC COMPLET ===`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.pose:`, state.pose);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.isTracking: ${state.isTracking}`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] trackingMode: ${trackingMode}`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.stepCount: ${state.stepCount}`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.distance: ${state.distance}`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] lastTotalStepsRef.current: ${lastTotalStepsRef.current}`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] Trajectory points: ${state.trajectory?.length || 0}`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] === DIAGNOSTIC SERVICE NATIF ===`);
-    
-    if (hybridMotionService) {
-      const serviceStats = hybridMotionService.getStats();
-      console.log(`🔍 [CENTER-USER-MAPSCREEN] Service stats:`, serviceStats);
-    } else {
-      console.log(`🔍 [CENTER-USER-MAPSCREEN] ❌ hybridMotionService est null !`);
-    }
-    
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] mapControls.centerOnUser disponible: ${!!mapControls.centerOnUser}`);
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] mapControls.setCustomZoom disponible: ${!!mapControls.setCustomZoom}`);
-    
     if (mapControls.centerOnUser && mapControls.setCustomZoom) {
-      // Définir le zoom à exactement 4.7x
+      // ÉTAPE 1: Définir le zoom à exactement 4.7x
       mapControls.setCustomZoom(4.7);
       
-      // Centrer sur l'utilisateur
+      // ÉTAPE 2: Centrer sur l'utilisateur après le zoom
       setTimeout(() => {
-        console.log(`🔍 [CENTER-USER-MAPSCREEN] Appel centerOnUser() avec state.pose:`, state.pose);
         mapControls.centerOnUser();
-      }, 100); // Petit délai pour laisser le zoom s'appliquer
-      
-      console.log(`🎯 [CENTER-USER] Recentrage sur utilisateur avec zoom 4.7x`);
-    } else {
-      console.warn('⚠️ [CENTER-USER] Contrôles de carte non disponibles');
+      }, 150);
     }
-    
-    console.log(`🔍 [CENTER-USER-MAPSCREEN] === FIN DIAGNOSTIC COMPLET ===`);
-  }, [mapControls.centerOnUser, mapControls.setCustomZoom, state.pose, state.isTracking, trackingMode, state.stepCount, state.distance, state.trajectory]);
+  }, [mapControls.centerOnUser, mapControls.setCustomZoom, state.pose]);
 
   /**
    * *** NOUVEAU: Ouvrir/fermer la liste d'ajout d'éléments ***
@@ -2048,15 +2031,6 @@ export default function MapScreen() {
 
   return (
     <View style={styles.container}>
-      {/* *** DIAGNOSTIC: Logs avant transmission à TiledMapView *** */}
-      {console.log(`🔧 [MAPSCREEN-RENDER] === DIAGNOSTIC TRANSMISSION ===`)}
-      {console.log(`🔧 [MAPSCREEN-RENDER] state.pose au moment du rendu:`, state.pose)}
-      {console.log(`🔧 [MAPSCREEN-RENDER] state.pose.x: ${state.pose?.x}`)}
-      {console.log(`🔧 [MAPSCREEN-RENDER] state.pose.y: ${state.pose?.y}`)}
-      {console.log(`🔧 [MAPSCREEN-RENDER] isMapLoaded: ${isMapLoaded}`)}
-      {console.log(`🔧 [MAPSCREEN-RENDER] defaultPoint:`, defaultPoint)}
-      {console.log(`🔧 [MAPSCREEN-RENDER] === FIN DIAGNOSTIC ===`)}
-      
       {/* *** NOUVEAU: Carte avec système de tuiles pour afficher la carte entière *** */}
       <TiledMapView
         persistentMapService={persistentMapService}

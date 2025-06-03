@@ -87,6 +87,20 @@ export default function TiledMapView({
   const panStartRef = useRef({ x: 0, y: 0 });
   const isDraggingRef = useRef(false);
   
+  // *** NOUVEAU: Refs pour le double tap ***
+  const lastTapTimeRef = useRef(0);
+  const tapTimeoutRef = useRef(null);
+  const DOUBLE_TAP_DELAY = 300; // 300ms entre deux taps
+  
+  // *** NOUVEAU: Fonction pour le double tap zoom x1.5 ***
+  const handleDoubleTapZoom = useCallback((tapX, tapY) => {
+    const currentZoom = zoomRef.current;
+    const newZoom = currentZoom * 1.5;
+    
+    // Utiliser le point de tap comme focal point
+    updateZoomAndPan(newZoom, tapX, tapY);
+  }, [updateZoomAndPan]);
+  
   // *** NOUVEAU: Refs pour le zoom par pincement - CORRIGÉ ***
   const isPinchingRef = useRef(false);
   const initialPinchDistanceRef = useRef(0);
@@ -144,7 +158,7 @@ export default function TiledMapView({
   const setCustomZoom = useCallback((newZoom) => {
     const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
     setZoom(clampedZoom);
-    console.log(`🔍 [TILED-MAP] Zoom défini: ${clampedZoom.toFixed(3)}x`);
+    zoomRef.current = clampedZoom;
   }, []);
 
   // *** NOUVEAU: Fonction pour contraindre le pan dans les limites de la carte ***
@@ -196,7 +210,7 @@ export default function TiledMapView({
     
     // *** DEBUG: Log les contraintes quand elles sont actives ***
     if (newPanX !== constrainedPanX || newPanY !== constrainedPanY) {
-      console.log(`🚧 [TILED-MAP] Contrainte pan: (${newPanX.toFixed(1)}, ${newPanY.toFixed(1)}) → (${constrainedPanX.toFixed(1)}, ${constrainedPanY.toFixed(1)}), zoom=${currentZoom.toFixed(3)}, marges=[${minPanX.toFixed(1)}, ${maxPanX.toFixed(1)}]`);
+      // Contrainte appliquée mais sans logs pour les performances
     }
     
     return { x: constrainedPanX, y: constrainedPanY };
@@ -231,21 +245,47 @@ export default function TiledMapView({
           baseZoomRef.current = zoomRef.current;
           basePanRef.current = { x: panXRef.current, y: panYRef.current };
           pinchCenterRef.current = getCenter(touches);
-          
-          console.log(`🤏 [PINCH] Début pinch-to-zoom: distance=${initialPinchDistanceRef.current.toFixed(1)}, zoom=${baseZoomRef.current.toFixed(3)}, centre=(${pinchCenterRef.current.x.toFixed(1)}, ${pinchCenterRef.current.y.toFixed(1)})`);
         } else {
-          // *** DÉBUT DU PAN CLASSIQUE ***
-          panStartRef.current = { x: panXRef.current, y: panYRef.current };
-          isDraggingRef.current = true;
-          isPinchingRef.current = false;
+          // *** DÉTECTION TAP / DOUBLE TAP ***
+          const currentTime = Date.now();
+          const timeSinceLastTap = currentTime - lastTapTimeRef.current;
           
-          console.log(`🖐️ [PAN] Début navigation: panStart=(${panStartRef.current.x.toFixed(1)}, ${panStartRef.current.y.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}`);
+          if (timeSinceLastTap < DOUBLE_TAP_DELAY) {
+            // *** DOUBLE TAP DÉTECTÉ ***
+            if (tapTimeoutRef.current) {
+              clearTimeout(tapTimeoutRef.current);
+              tapTimeoutRef.current = null;
+            }
+            
+            const tapX = touches[0].pageX;
+            const tapY = touches[0].pageY;
+            handleDoubleTapZoom(tapX, tapY);
+            
+            lastTapTimeRef.current = 0; // Reset pour éviter triple tap
+          } else {
+            // *** PREMIER TAP: Attendre pour voir si double tap ***
+            lastTapTimeRef.current = currentTime;
+            
+            // Démarrer le timer pour détecter si c'est un simple tap
+            tapTimeoutRef.current = setTimeout(() => {
+              // *** SIMPLE TAP: Démarrer le pan normal ***
+              panStartRef.current = { x: panXRef.current, y: panYRef.current };
+              isDraggingRef.current = true;
+              isPinchingRef.current = false;
+              tapTimeoutRef.current = null;
+            }, DOUBLE_TAP_DELAY);
+          }
         }
       },
       
       // Mouvement du geste
       onPanResponderMove: (evt, gestureState) => {
         const touches = evt.nativeEvent.touches;
+        
+        // *** IGNORER LE MOUVEMENT SI EN ATTENTE DE DOUBLE TAP ***
+        if (tapTimeoutRef.current) {
+          return;
+        }
         
         if (touches.length === 2 && isPinchingRef.current) {
           // *** GESTION DU PINCH-TO-ZOOM CONTINU ***
@@ -271,10 +311,7 @@ export default function TiledMapView({
             // *** MISE À JOUR CONTINUE AVEC POINT FOCAL ***
             updateZoomAndPan(newZoom, focalX, focalY);
             
-            // Log pour debug (moins fréquent)
-            if (Math.abs(currentDistance - initialPinchDistanceRef.current) % 50 < 10) {
-              console.log(`🤏 [PINCH-CONTINU] Zoom: ${newZoom.toFixed(3)}x, scale: ${rawScale.toFixed(3)} → ${smoothedScale.toFixed(3)}, focal: (${focalX.toFixed(1)}, ${focalY.toFixed(1)})`);
-            }
+            // Pas de logs pour les performances
           }
         } else if (touches.length === 1 && isDraggingRef.current && !isPinchingRef.current) {
           // *** GESTION DU PAN CLASSIQUE ***
@@ -317,22 +354,22 @@ export default function TiledMapView({
           setPanX(clampedPanX);
           setPanY(clampedPanY);
           
-          // Log pour debug (moins fréquent)
-          if (Math.abs(gestureState.dx) % 20 < 5) {
-            console.log(`🖐️ [PAN] pan: (${clampedPanX.toFixed(1)}, ${clampedPanY.toFixed(1)}), sensibilité: ${sensitivity.toFixed(2)}, zoom: ${currentZoom.toFixed(3)}`);
-          }
+          // Pas de logs pour les performances
         }
       },
       
       // Fin du geste
       onPanResponderRelease: (evt, gestureState) => {
+        // *** NETTOYER LES TIMERS DE DOUBLE TAP ***
+        if (tapTimeoutRef.current) {
+          clearTimeout(tapTimeoutRef.current);
+          tapTimeoutRef.current = null;
+        }
+        
         if (isPinchingRef.current) {
           // *** FIN DU PINCH: Figer le zoom de base ***
           baseZoomRef.current = zoomRef.current;
           basePanRef.current = { x: panXRef.current, y: panYRef.current };
-          console.log(`🤏 [PINCH] Fin pinch-to-zoom: zoom figé=${zoomRef.current.toFixed(3)}x`);
-        } else if (isDraggingRef.current) {
-          console.log(`🖐️ [PAN] Fin navigation: pan final=(${panXRef.current.toFixed(1)}, ${panYRef.current.toFixed(1)}), zoom=${zoomRef.current.toFixed(3)}`);
         }
         
         // Réinitialiser les états
@@ -347,6 +384,12 @@ export default function TiledMapView({
       },
       
       onPanResponderTerminate: () => {
+        // *** NETTOYER LES TIMERS DE DOUBLE TAP ***
+        if (tapTimeoutRef.current) {
+          clearTimeout(tapTimeoutRef.current);
+          tapTimeoutRef.current = null;
+        }
+        
         // *** FIN FORCÉE: Figer l'état actuel ***
         if (isPinchingRef.current) {
           baseZoomRef.current = zoomRef.current;
@@ -356,7 +399,6 @@ export default function TiledMapView({
         isDraggingRef.current = false;
         isPinchingRef.current = false;
         initialPinchDistanceRef.current = 0;
-        console.log(`🖐️ [GESTURE] Geste interrompu`);
       },
     })
   ).current;
@@ -673,55 +715,36 @@ export default function TiledMapView({
   }, [userElements, zoom]);
 
   /**
-   * Centrer sur l'utilisateur avec zoom fixe 4.03x
+   * Centrer sur l'utilisateur avec le zoom courant
    */
   const centerOnUser = useCallback(() => {
-    console.log(`🔍 [CENTER-USER-DEBUG] === DÉBUT DIAGNOSTIC ===`);
-    console.log(`🔍 [CENTER-USER-DEBUG] userPosition reçu:`, userPosition);
-    console.log(`🔍 [CENTER-USER-DEBUG] typeof userPosition:`, typeof userPosition);
-    console.log(`🔍 [CENTER-USER-DEBUG] userPosition est null:`, userPosition === null);
-    console.log(`🔍 [CENTER-USER-DEBUG] userPosition est undefined:`, userPosition === undefined);
-    
     if (!userPosition) {
-      console.warn(`⚠️ [CENTER-USER-DEBUG] userPosition est null ou undefined - ARRÊT`);
       return;
     }
     
-    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.x: ${userPosition.x}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.y: ${userPosition.y}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.theta: ${userPosition.theta}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.confidence: ${userPosition.confidence}`);
+    // Zoom utilisé pour le centrage
+    const targetZoom = zoomRef.current;
     
-    // *** MODIFIÉ: Forcer le zoom à 4.03x ***
-    const targetZoom = 4.03;
+    // Conversion coordonnées monde -> pixels SVG
     const svgPos = worldToSVG(userPosition.x, userPosition.y);
     
-    console.log(`🔍 [CENTER-USER-DEBUG] Après worldToSVG:`);
-    console.log(`🔍 [CENTER-USER-DEBUG] svgPos.x: ${svgPos.x}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] svgPos.y: ${svgPos.y}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] SCALE utilisé: ${SCALE}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] MAP_TOTAL_WIDTH: ${MAP_TOTAL_WIDTH}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] MAP_TOTAL_HEIGHT: ${MAP_TOTAL_HEIGHT}`);
+    // Calculer le centre SVG actuel
+    const svgCenterX = (-panXRef.current / targetZoom) + (screenWidth / 2 / targetZoom);
+    const svgCenterY = (-panYRef.current / targetZoom) + (screenHeight / 2 / targetZoom);
     
-    // Calculer le pan nécessaire pour centrer l'utilisateur avec le zoom 4.03x
-    const targetPanX = (screenWidth / 2 - svgPos.x) * targetZoom;
-    const targetPanY = (screenHeight / 2 - svgPos.y) * targetZoom;
+    // Calcul de l'offset nécessaire pour centrer l'utilisateur
+    const offsetX = svgPos.x - svgCenterX;
+    const offsetY = svgPos.y - svgCenterY;
     
-    console.log(`🔍 [CENTER-USER-DEBUG] Pan calculé:`);
-    console.log(`🔍 [CENTER-USER-DEBUG] targetPanX: ${targetPanX}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] targetPanY: ${targetPanY}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] screenWidth: ${screenWidth}`);
-    console.log(`🔍 [CENTER-USER-DEBUG] screenHeight: ${screenHeight}`);
+    // Le nouveau pan = pan actuel - offset * zoom
+    const targetPanX = panXRef.current - (offsetX * targetZoom);
+    const targetPanY = panYRef.current - (offsetY * targetZoom);
     
-    // *** NOUVEAU: Mettre à jour le zoom ET le pan ***
-    setZoom(targetZoom);
+    // Appliquer le pan (sans modifier le zoom)
     panXRef.current = targetPanX;
     panYRef.current = targetPanY;
     setPanX(targetPanX);
     setPanY(targetPanY);
-    
-    console.log(`🎯 [TILED-MAP] Centré sur utilisateur: (${userPosition.x.toFixed(2)}, ${userPosition.y.toFixed(2)}), zoom fixe: ${targetZoom}x`);
-    console.log(`🔍 [CENTER-USER-DEBUG] === FIN DIAGNOSTIC ===`);
   }, [userPosition, worldToSVG]);
 
   /**
@@ -737,8 +760,6 @@ export default function TiledMapView({
     panYRef.current = targetPanY;
     setPanX(targetPanX);
     setPanY(targetPanY);
-    
-    console.log(`🎯 [TILED-MAP] Centré sur point: ${point.name} (${point.worldX.toFixed(2)}, ${point.worldY.toFixed(2)})`);
   }, [zoom]);
 
   /**
@@ -752,7 +773,6 @@ export default function TiledMapView({
     
     // *** CORRIGÉ: Éviter les appels répétés si déjà au bon zoom ***
     if (Math.abs(zoom - fullMapZoom) < 0.001 && Math.abs(panXRef.current) < 10 && Math.abs(panYRef.current) < 10) {
-      console.log(`🗺️ [TILED-MAP] Déjà en vue carte entière`);
       return;
     }
     
@@ -763,8 +783,6 @@ export default function TiledMapView({
     panYRef.current = 0;
     setPanX(0);
     setPanY(0);
-    
-    console.log(`🗺️ [TILED-MAP] Vue carte entière: zoom=${fullMapZoom.toFixed(3)}`);
   }, []);
 
   // Recalculer les tuiles visibles quand le viewport change
