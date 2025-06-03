@@ -149,10 +149,10 @@ export default function MapScreen() {
   // *** NOUVEAU: Configuration du lissage de trajectoire ***
   const trajectorySmoothing = {
     enabled: true,
-    minPointDistance: 0.15,       // Distance minimum entre points (15cm)
-    outlierThreshold: 1.5,        // Seuil pour détecter les points aberrants (1.5m)
-    maxConsecutiveOutliers: 2,    // Maximum de points aberrants consécutifs
-    smoothingFactor: 0.3          // Facteur de lissage (0.3 = 30% de lissage)
+    minPointDistance: 0.10,       // *** RÉDUIT: Distance minimum entre points (10cm au lieu de 15cm) ***
+    outlierThreshold: 2.0,        // *** AUGMENTÉ: Seuil pour détecter les points aberrants (2m au lieu de 1.5m) ***
+    maxConsecutiveOutliers: 3,    // *** AUGMENTÉ: Maximum de points aberrants consécutifs (3 au lieu de 2) ***
+    smoothingFactor: 0.2          // *** RÉDUIT: Facteur de lissage (0.2 = 20% au lieu de 30%) ***
   };
   const consecutiveOutliersRef = useRef(0);
   
@@ -436,9 +436,6 @@ export default function MapScreen() {
     handleSensors
   ));
   
-  // *** NOUVEAU: Utilitaire de test pour le filtrage de la boussole ***
-  const [compassFilteringTest] = useState(() => new CompassFilteringTest(hybridMotionService));
-  
   // Convertisseur d'échelle avec l'échelle de référence CORRIGÉE
   const [scaleConverter] = useState(() => new ScaleConverter({
     referenceMaters: 100,     // 100 mètres
@@ -552,9 +549,81 @@ export default function MapScreen() {
     
     // *** NOUVEAU: Exposer l'utilitaire de test globalement ***
     if (typeof window !== 'undefined') {
-      window.compassTest = compassFilteringTest;
-      console.log(`🧭 [COMPASS-TEST] Utilitaire de test disponible globalement: window.compassTest`);
-      console.log(`🧭 [COMPASS-TEST] Tapez "window.compassTest.help()" dans la console pour voir l'aide`);
+      // *** SUPPRIMÉ: Référence à compassFilteringTest qui n'existe plus ***
+      // window.compassTest = compassFilteringTest;
+      // console.log(`🧭 [COMPASS-TEST] Utilitaire de test disponible globalement: window.compassTest`);
+      // console.log(`🧭 [COMPASS-TEST] Tapez "window.compassTest.help()" dans la console pour voir l'aide`);
+      
+      // *** NOUVEAU: Exposer les outils de diagnostic ***
+      window.stepDiagnostics = {
+        // Obtenir les diagnostics complets
+        getDiagnostics: () => hybridMotionService.getDiagnostics(),
+        
+        // Afficher les diagnostics formatés
+        printDiagnostics: () => hybridMotionService.printDiagnostics(),
+        
+        // Obtenir les statistiques de filtrage des pas
+        getStepStats: () => hybridMotionService.getStepFilteringStats(),
+        
+        // Obtenir les statistiques de la boussole
+        getCompassStats: () => hybridMotionService.getCompassFilteringStats(),
+        
+        // Configurer le filtrage des pas
+        configureStepFiltering: (options) => hybridMotionService.configureStepFiltering(options),
+        
+        // Configurer le filtrage de la boussole
+        configureCompassFiltering: (options) => hybridMotionService.configureCompassFiltering(options),
+        
+        // Réinitialiser les statistiques
+        resetStats: () => hybridMotionService.resetStepFilteringStats(),
+        
+        // Aide
+        help: () => {
+          console.log(`
+🔍 === OUTILS DE DIAGNOSTIC DES PAS ===
+
+Commandes disponibles:
+• window.stepDiagnostics.printDiagnostics() - Afficher un diagnostic complet
+• window.stepDiagnostics.getStepStats() - Statistiques de filtrage des pas
+• window.stepDiagnostics.getCompassStats() - Statistiques de la boussole
+
+Configuration:
+• window.stepDiagnostics.configureStepFiltering({
+    minStepDistance: 0.2,      // Distance minimum (mètres)
+    minConfidenceThreshold: 0.15, // Confiance minimum (0-1)
+    minStepInterval: 150       // Intervalle minimum (ms)
+  })
+
+• window.stepDiagnostics.configureCompassFiltering({
+    accuracyThreshold: 10,     // Seuil de précision (degrés)
+    jumpThreshold: 40          // Seuil de saut (degrés)
+  })
+
+Exemples pour résoudre les problèmes courants:
+• Trop de pas rejetés (>30%): 
+  window.stepDiagnostics.configureStepFiltering({ minStepDistance: 0.2, minConfidenceThreshold: 0.15 })
+  
+• Pas trop courts (<40cm):
+  Vérifiez le profil utilisateur ou forcez une longueur:
+  window.stepDiagnostics.configureStepFiltering({ minStepDistance: 0.15 })
+  
+• Boussole instable:
+  window.stepDiagnostics.configureCompassFiltering({ accuracyThreshold: 20, jumpThreshold: 60 })
+          `);
+        }
+      };
+      
+      console.log(`🔍 [STEP-DIAGNOSTICS] Outils de diagnostic disponibles: window.stepDiagnostics`);
+      console.log(`🔍 [STEP-DIAGNOSTICS] Tapez "window.stepDiagnostics.help()" pour voir l'aide`);
+      console.log(`🔍 [STEP-DIAGNOSTICS] Diagnostic automatique dans 3 secondes...`);
+      
+      // *** Diagnostic automatique après 3 secondes ***
+      setTimeout(() => {
+        if (hybridMotionService.isRunning) {
+          console.log(`🔍 [AUTO-DIAGNOSTIC] Diagnostic automatique du système:`);
+          hybridMotionService.printDiagnostics();
+        }
+      }, 3000);
     }
     
     return () => {

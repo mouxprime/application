@@ -17,7 +17,7 @@ const DEFAULT_CONFIG = {
   pedometerMode: 'application',
   compassMode: 'native',
   // *** NOUVEAU: Configuration de la fréquence des capteurs ***
-  sensorsFrequency: 50, // Hz, entre 5 et 75
+  sensorsFrequency: 40, // Hz, valeur par défaut changée de 50 à 40
   sensorsEnabled: {
     accelerometer: true,
     gyroscope: true,
@@ -26,8 +26,8 @@ const DEFAULT_CONFIG = {
 };
 
 // *** NOUVEAU: Limites pour la fréquence des capteurs ***
-const SENSORS_FREQUENCY_MIN = 5;   // Hz minimum
-const SENSORS_FREQUENCY_MAX = 75;  // Hz maximum
+const SENSORS_FREQUENCY_MIN = 20;   // Hz minimum (changé de 5 à 20)
+const SENSORS_FREQUENCY_MAX = 100;  // Hz maximum (changé de 75 à 100)
 
 /**
  * Service de gestion de la configuration utilisateur
@@ -39,7 +39,7 @@ export class ConfigurationService {
       pedometerMode: 'application', // 'application' ou 'native'
       compassMode: 'native',        // Toujours 'native' maintenant
       // *** NOUVEAU: Configuration des capteurs ***
-      sensorsFrequency: 50,         // Hz, entre 5 et 75
+      sensorsFrequency: 40,         // Hz, entre 5 et 75
       sensorsEnabled: {
         accelerometer: true,
         gyroscope: true
@@ -327,7 +327,7 @@ export class ConfigurationService {
       pedometerMode: 'application',
       compassMode: 'native',
       // *** NOUVEAU: Réinitialisation configuration capteurs ***
-      sensorsFrequency: 50,
+      sensorsFrequency: 40,
       sensorsEnabled: {
         accelerometer: true,
         gyroscope: true

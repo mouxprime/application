@@ -7,7 +7,9 @@ import {
   TouchableOpacity,
   Alert,
   Platform,
-  Modal
+  Modal,
+  PanResponder,
+  Dimensions
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -34,11 +36,20 @@ export default function ConfigurationScreen() {
 
   // *** NOUVEAU: États pour la configuration des capteurs ***
   const [sensorsConfig, setSensorsConfig] = useState({
-    frequency: 50,
+    frequency: 40,
     enabled: {
       accelerometer: true,
       gyroscope: true
     }
+  });
+
+  // *** NOUVEAU: États pour les modals améliorés ***
+  const [showFrequencyModal, setShowFrequencyModal] = useState(false);
+  const [tempFrequency, setTempFrequency] = useState(40);
+  const [showAdvancedColorPicker, setShowAdvancedColorPicker] = useState({ 
+    visible: false, 
+    colorKey: '', 
+    currentColor: '#ffffff' 
   });
 
   useEffect(() => {
@@ -122,15 +133,15 @@ export default function ConfigurationScreen() {
 
   // *** NOUVEAU: Gestion des couleurs ***
   const handleColorSelection = (colorKey, colorValue) => {
-    setShowColorPicker({ visible: true, colorKey, currentColor: colorValue });
+    setShowAdvancedColorPicker({ visible: true, colorKey, currentColor: colorValue });
   };
 
   const applyColorChange = async (newColor) => {
     try {
-      await appearanceService.setColor(showColorPicker.colorKey, newColor);
+      await appearanceService.setColor(showAdvancedColorPicker.colorKey, newColor);
       const updatedConfig = appearanceService.getConfiguration();
       setAppearanceConfig(updatedConfig);
-      setShowColorPicker({ visible: false, colorKey: '', currentColor: '' });
+      setShowAdvancedColorPicker({ visible: false, colorKey: '', currentColor: '' });
     } catch (error) {
       console.error('❌ [APPEARANCE] Erreur application couleur:', error);
       Alert.alert('Erreur', 'Impossible d\'appliquer la couleur: ' + error.message);
@@ -227,17 +238,6 @@ export default function ConfigurationScreen() {
   };
 
   // *** NOUVEAU: Gestion des capteurs ***
-  const handleSensorsFrequencyChange = async (frequency) => {
-    try {
-      await configurationService.setSensorsFrequency(frequency);
-      const updatedConfig = configurationService.getSensorsConfiguration();
-      setSensorsConfig(updatedConfig);
-    } catch (error) {
-      console.error('❌ [CONFIGURATION] Erreur changement fréquence capteurs:', error);
-      Alert.alert('Erreur', 'Impossible de sauvegarder la fréquence des capteurs: ' + error.message);
-    }
-  };
-
   const handleSensorToggle = async (sensorName, enabled) => {
     try {
       await configurationService.setSensorEnabled(sensorName, enabled);
@@ -246,6 +246,121 @@ export default function ConfigurationScreen() {
     } catch (error) {
       console.error('❌ [CONFIGURATION] Erreur activation/désactivation capteur:', error);
       Alert.alert('Erreur', 'Impossible de sauvegarder la configuration des capteurs: ' + error.message);
+    }
+  };
+
+  // *** NOUVEAU: Gestion de la fréquence ***
+  const openFrequencyModal = () => {
+    setTempFrequency(sensorsConfig.frequency);
+    setShowFrequencyModal(true);
+  };
+
+  const applyFrequencyChange = async () => {
+    try {
+      await configurationService.setSensorsFrequency(tempFrequency);
+      const updatedConfig = configurationService.getSensorsConfiguration();
+      setSensorsConfig(updatedConfig);
+      setShowFrequencyModal(false);
+      Alert.alert('Succès', `Fréquence mise à jour: ${tempFrequency} Hz`);
+    } catch (error) {
+      console.error('❌ [CONFIGURATION] Erreur changement fréquence:', error);
+      Alert.alert('Erreur', 'Impossible de sauvegarder la fréquence: ' + error.message);
+    }
+  };
+
+  // *** NOUVEAU: Slider custom simple et fiable ***
+  const CustomSlider = ({ value, onValueChange, minimumValue, maximumValue, step }) => {
+    const sliderWidth = Dimensions.get('window').width * 0.6;
+    const thumbWidth = 20;
+    
+    const getThumbPosition = () => {
+      const range = maximumValue - minimumValue;
+      const percentage = (value - minimumValue) / range;
+      return percentage * (sliderWidth - thumbWidth);
+    };
+
+    const panResponder = PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (evt, gestureState) => {
+        const { locationX } = evt.nativeEvent;
+        const percentage = Math.max(0, Math.min(1, locationX / sliderWidth));
+        const range = maximumValue - minimumValue;
+        const newValue = minimumValue + (percentage * range);
+        const steppedValue = Math.round(newValue / step) * step;
+        onValueChange(Math.max(minimumValue, Math.min(maximumValue, steppedValue)));
+      },
+    });
+
+    return (
+      <View style={styles.customSliderContainer}>
+        <View style={styles.customSliderTrack} {...panResponder.panHandlers}>
+          <View style={[styles.customSliderProgress, { width: getThumbPosition() + thumbWidth / 2 }]} />
+          <View 
+            style={[
+              styles.customSliderThumb, 
+              { left: getThumbPosition() }
+            ]} 
+          />
+        </View>
+      </View>
+    );
+  };
+
+  const getFrequencyMessage = (freq) => {
+    if (freq <= 30) {
+      return {
+        title: "🟢 Mode Économie",
+        description: "Batterie optimisée, précision standard",
+        performance: "Économique"
+      };
+    } else if (freq <= 50) {
+      return {
+        title: "🟡 Mode Équilibré", 
+        description: "Bon compromis précision/batterie",
+        performance: "Recommandé"
+      };
+    } else if (freq <= 70) {
+      return {
+        title: "🟠 Mode Performance",
+        description: "Haute précision, consommation modérée",
+        performance: "Performant"
+      };
+    } else {
+      return {
+        title: "🔴 Mode Ultra Performance",
+        description: "Précision maximale, haute consommation",
+        performance: "Maximum"
+      };
+    }
+  };
+
+  // *** NOUVEAU: Grille de couleurs étendue ***
+  const getExtendedColors = (colorKey) => {
+    if (colorKey === 'backgroundColor') {
+      // Couleurs pour les fonds - tons sombres
+      return [
+        ['#000000', '#0a0a0a', '#111111'],
+        ['#1a1a1a', '#222222', '#2a2a2a'],
+        ['#333333', '#444444', '#555555'],
+        ['#0d1117', '#161b22', '#21262d'],
+        ['#0e1419', '#1c2128', '#262c36'],
+        ['#1a1a2e', '#16213e', '#0f3460']
+      ];
+    } else {
+      // Couleurs pour les éléments - palette complète
+      return [
+        ['#ffffff', '#f8f9fa', '#e9ecef'],
+        ['#00ff88', '#00cc6a', '#00994d'],
+        ['#ff4444', '#ff6b6b', '#ff8e53'],
+        ['#0088ff', '#339af0', '#74c0fc'],
+        ['#ffaa00', '#ffd43b', '#ffe066'],
+        ['#8b5cf6', '#9775fa', '#b197fc'],
+        ['#ff6b35', '#ff922b', '#ffa94d'],
+        ['#20c997', '#51cf66', '#69db7c'],
+        ['#fd7e14', '#ff8cc8', '#fcc2d7'],
+        ['#000000', '#495057', '#6c757d']
+      ];
     }
   };
 
@@ -576,6 +691,37 @@ export default function ConfigurationScreen() {
           )}
         </View>
 
+        {/* *** NOUVEAU: Section Configuration Algorithme *** */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Configuration de l'Algorithme</Text>
+          
+          <View style={styles.algorithmContainer}>
+            {/* Fréquence d'échantillonnage - Version simplifiée avec bouton */}
+            <TouchableOpacity style={styles.frequencyCard} onPress={openFrequencyModal}>
+              <View style={styles.frequencyHeader}>
+                <Ionicons name="pulse" size={24} color="#00ff88" />
+                <View style={styles.frequencyInfo}>
+                  <Text style={styles.frequencyTitle}>Fréquence d'Échantillonnage</Text>
+                  <Text style={styles.frequencyValue}>{sensorsConfig.frequency} Hz</Text>
+                  <Text style={styles.frequencyDescription}>
+                    {getFrequencyMessage(sensorsConfig.frequency).performance}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color="#888888" />
+              </View>
+            </TouchableOpacity>
+            
+            {/* Info technique */}
+            <View style={styles.infoBox}>
+              <Ionicons name="information-circle" size={20} color="#00ff88" />
+              <Text style={styles.infoText}>
+                Touchez pour ajuster la fréquence de lecture des capteurs. 
+                Une fréquence plus élevée améliore la précision mais consomme plus de batterie.
+              </Text>
+            </View>
+          </View>
+        </View>
+
         {/* Section Diagnostic */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Diagnostic</Text>
@@ -641,65 +787,148 @@ export default function ConfigurationScreen() {
         onClose={() => setShowProfileSetup(false)}
       />
 
-      {/* *** NOUVEAU: Modal de sélection de couleurs *** */}
+      {/* *** NOUVEAU: Modal de configuration de fréquence *** */}
       <Modal
-        visible={showColorPicker.visible}
+        visible={showFrequencyModal}
         transparent={true}
         animationType="slide"
       >
-        <View style={styles.colorPickerOverlay}>
-          <View style={styles.colorPickerContent}>
-            <View style={styles.colorPickerHeader}>
-              <Ionicons name="color-palette" size={32} color="#00ff88" />
-              <Text style={styles.colorPickerTitle}>Choisir une couleur</Text>
+        <View style={styles.modalOverlay}>
+          <View style={styles.frequencyModalContent}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="pulse" size={32} color="#00ff88" />
+              <Text style={styles.modalTitle}>Fréquence d'Échantillonnage</Text>
               <TouchableOpacity 
-                onPress={() => setShowColorPicker({ visible: false, colorKey: '', currentColor: '' })}
-                style={styles.colorPickerClose}
+                onPress={() => setShowFrequencyModal(false)}
+                style={styles.modalClose}
+              >
+                <Ionicons name="close" size={24} color="#888888" />
+              </TouchableOpacity>
+            </View>
+            
+            {/* Affichage dynamique basé sur la fréquence */}
+            <View style={styles.frequencyDisplayCard}>
+              <Text style={styles.frequencyModeTitle}>
+                {getFrequencyMessage(tempFrequency).title}
+              </Text>
+              <Text style={styles.frequencyModeValue}>{tempFrequency} Hz</Text>
+              <Text style={styles.frequencyModeDescription}>
+                {getFrequencyMessage(tempFrequency).description}
+              </Text>
+            </View>
+            
+            {/* Slider avec labels */}
+            <View style={styles.sliderSection}>
+              <View style={styles.sliderLabels}>
+                <Text style={styles.sliderLabel}>20Hz</Text>
+                <Text style={styles.sliderLabel}>40Hz</Text>
+                <Text style={styles.sliderLabel}>60Hz</Text>
+                <Text style={styles.sliderLabel}>80Hz</Text>
+                <Text style={styles.sliderLabel}>100Hz</Text>
+              </View>
+              
+              <CustomSlider
+                value={tempFrequency}
+                onValueChange={setTempFrequency}
+                minimumValue={20}
+                maximumValue={100}
+                step={5}
+              />
+              
+              <View style={styles.frequencyPresets}>
+                <TouchableOpacity 
+                  style={styles.presetButton}
+                  onPress={() => setTempFrequency(25)}
+                >
+                  <Text style={styles.presetText}>Économie</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={styles.presetButton}
+                  onPress={() => setTempFrequency(40)}
+                >
+                  <Text style={styles.presetText}>Standard</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={styles.presetButton}
+                  onPress={() => setTempFrequency(60)}
+                >
+                  <Text style={styles.presetText}>Performance</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={styles.presetButton}
+                  onPress={() => setTempFrequency(80)}
+                >
+                  <Text style={styles.presetText}>Ultra</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+            
+            {/* Boutons d'action */}
+            <View style={styles.modalActions}>
+              <TouchableOpacity 
+                style={styles.cancelButton}
+                onPress={() => setShowFrequencyModal(false)}
+              >
+                <Text style={styles.cancelButtonText}>Annuler</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.applyButton}
+                onPress={applyFrequencyChange}
+              >
+                <Text style={styles.applyButtonText}>Appliquer</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* *** NOUVEAU: Modal de color picker avancé *** */}
+      <Modal
+        visible={showAdvancedColorPicker.visible}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.colorPickerModalContent}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="color-palette" size={32} color="#00ff88" />
+              <Text style={styles.modalTitle}>Choisir une couleur</Text>
+              <TouchableOpacity 
+                onPress={() => setShowAdvancedColorPicker({ visible: false, colorKey: '', currentColor: '' })}
+                style={styles.modalClose}
               >
                 <Ionicons name="close" size={24} color="#888888" />
               </TouchableOpacity>
             </View>
             
             <Text style={styles.colorPickerSubtitle}>
-              {showColorPicker.colorKey === 'backgroundColor' ? 'Fond de carte' :
-               showColorPicker.colorKey === 'trajectoryColor' ? 'Tracé de trajectoire' :
-               showColorPicker.colorKey === 'gridColor' ? 'Grille de référence' :
-               showColorPicker.colorKey === 'userColor' ? 'Position utilisateur' :
-               showColorPicker.colorKey === 'orientationColor' ? 'Direction/Orientation' : ''}
+              {showAdvancedColorPicker.colorKey === 'backgroundColor' ? 'Fond de carte' :
+               showAdvancedColorPicker.colorKey === 'trajectoryColor' ? 'Tracé de trajectoire' :
+               showAdvancedColorPicker.colorKey === 'gridColor' ? 'Grille de référence' :
+               showAdvancedColorPicker.colorKey === 'userColor' ? 'Position utilisateur' :
+               showAdvancedColorPicker.colorKey === 'orientationColor' ? 'Direction/Orientation' : ''}
             </Text>
             
-            {/* Couleur actuelle */}
-            <View style={styles.currentColorSection}>
-              <Text style={styles.currentColorLabel}>Couleur actuelle :</Text>
-              <View style={[styles.currentColorPreview, { backgroundColor: showColorPicker.currentColor }]}>
-                <Text style={[styles.currentColorText, { 
-                  color: showColorPicker.currentColor === '#000000' ? '#ffffff' : '#000000' 
-                }]}>
-                  {showColorPicker.currentColor}
-                </Text>
+            {/* Color Picker */}
+            <View style={styles.colorPickerContainer}>
+              {/* Color picker custom simple avec grille étendue */}
+              <View style={styles.extendedColorGrid}>
+                {getExtendedColors(showAdvancedColorPicker.colorKey).map((colorRow, rowIndex) => (
+                  <View key={rowIndex} style={styles.colorRow}>
+                    {colorRow.map((color, colIndex) => (
+                      <TouchableOpacity
+                        key={colIndex}
+                        style={[styles.extendedColorItem, { backgroundColor: color }]}
+                        onPress={() => applyColorChange(color)}
+                      >
+                        {color === showAdvancedColorPicker.currentColor && (
+                          <Ionicons name="checkmark" size={16} color={color === '#000000' || color === '#1a1a1a' ? '#ffffff' : '#000000'} />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                ))}
               </View>
-            </View>
-            
-            {/* Couleurs prédéfinies */}
-            <Text style={styles.presetColorsTitle}>Couleurs prédéfinies :</Text>
-            <View style={styles.presetColorsGrid}>
-              {(showColorPicker.colorKey === 'backgroundColor' ? 
-                appearanceService.getPresetColors().backgrounds : 
-                appearanceService.getPresetColors().trajectories
-              ).map((preset, index) => (
-                <TouchableOpacity
-                  key={index}
-                  style={[styles.presetColorItem, { backgroundColor: preset.value }]}
-                  onPress={() => applyColorChange(preset.value)}
-                >
-                  <Text style={[styles.presetColorName, { 
-                    color: preset.value === '#000000' ? '#ffffff' : '#000000',
-                    opacity: preset.value === '#000000' || preset.value === '#ffffff' ? 1 : 0
-                  }]}>
-                    {preset.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
             </View>
           </View>
         </View>
@@ -1120,5 +1349,230 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 14,
     fontWeight: 'bold',
+  },
+  algorithmContainer: {
+    backgroundColor: '#2a2a2a',
+    borderRadius: 12,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#333333',
+  },
+  frequencyCard: {
+    padding: 15,
+    backgroundColor: '#2a2a2a',
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#333333',
+  },
+  frequencyHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  frequencyInfo: {
+    flex: 1,
+  },
+  frequencyTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  frequencyValue: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  frequencyDescription: {
+    color: '#888888',
+    fontSize: 14,
+    marginBottom: 10,
+    lineHeight: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  frequencyModalContent: {
+    backgroundColor: '#1a1a1a',
+    padding: 20,
+    borderRadius: 12,
+    width: '80%',
+    maxHeight: '80%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  modalTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: 'bold',
+    flex: 1,
+  },
+  modalClose: {
+    padding: 5,
+  },
+  frequencyDisplayCard: {
+    marginBottom: 20,
+  },
+  frequencyModeTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  frequencyModeValue: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  frequencyModeDescription: {
+    color: '#888888',
+    fontSize: 14,
+    marginBottom: 10,
+    lineHeight: 20,
+  },
+  sliderSection: {
+    marginBottom: 20,
+  },
+  sliderLabels: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  sliderThumb: {
+    width: 20,
+    height: 20,
+  },
+  frequencyPresets: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  presetButton: {
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#333333',
+  },
+  presetText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 20,
+  },
+  cancelButton: {
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#333333',
+  },
+  cancelButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  applyButton: {
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#00ff88',
+  },
+  applyButtonText: {
+    color: '#000000',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  colorPickerModalContent: {
+    backgroundColor: '#1a1a1a',
+    padding: 20,
+    borderRadius: 12,
+    width: '80%',
+    maxHeight: '80%',
+  },
+  colorPickerContainer: {
+    marginBottom: 20,
+  },
+  colorPicker: {
+    width: '100%',
+    height: 200,
+  },
+  quickColorsTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  quickColorsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  quickColorItem: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#333333',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sliderLabel: {
+    color: '#888888',
+    fontSize: 12,
+  },
+  customSliderContainer: {
+    width: '100%',
+    height: 40,
+    justifyContent: 'center',
+    marginVertical: 10,
+  },
+  customSliderTrack: {
+    width: '100%',
+    height: 6,
+    backgroundColor: '#333333',
+    borderRadius: 3,
+  },
+  customSliderProgress: {
+    height: '100%',
+    backgroundColor: '#00ff88',
+    borderRadius: 3,
+    position: 'absolute',
+  },
+  customSliderThumb: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    position: 'absolute',
+    top: -7,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  extendedColorGrid: {
+    flexDirection: 'column',
+    gap: 10,
+  },
+  colorRow: {
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+  },
+  extendedColorItem: {
+    width: 50,
+    height: 50,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#333333',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 }); 

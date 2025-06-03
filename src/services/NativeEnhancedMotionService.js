@@ -51,13 +51,13 @@ export default class NativeEnhancedMotionService {
     
     // *** NOUVEAU: Système de filtrage des pas pour éviter le surcomptage ***
     this.stepFiltering = {
-      minStepDistance: 0.4,          // Distance minimum par pas (40cm)
-      maxStepDistance: 1.8,          // Distance maximum par pas (1.8m)
-      minStepInterval: 300,          // Intervalle minimum entre pas (300ms)
-      maxStepInterval: 3000,         // Intervalle maximum entre pas (3s)
-      minConfidenceThreshold: 0.3,   // Confiance minimum (30%)
-      zuptThreshold: 0.1,            // Seuil Zero-Velocity Update (10cm)
-      consecutiveStepsForZupt: 3,    // Nombre de pas consécutifs pour ZUPT
+      minStepDistance: 0.25,         // *** RÉDUIT: Distance minimum par pas (25cm au lieu de 40cm) ***
+      maxStepDistance: 2.0,          // Distance maximum par pas (2m)
+      minStepInterval: 200,          // *** RÉDUIT: Intervalle minimum entre pas (200ms au lieu de 300ms) ***
+      maxStepInterval: 4000,         // Intervalle maximum entre pas (4s)
+      minConfidenceThreshold: 0.1,   // *** RÉDUIT: Confiance minimum (20% au lieu de 30%) ***
+      zuptThreshold: 0.08,           // *** RÉDUIT: Seuil Zero-Velocity Update (8cm au lieu de 10cm) ***
+      consecutiveStepsForZupt: 5,    // *** AUGMENTÉ: Nombre de pas consécutifs pour ZUPT (5 au lieu de 3) ***
       lastValidStepTime: 0,          // Timestamp du dernier pas valide
       lastValidPosition: { x: 0, y: 0 }, // Position du dernier pas valide
       rejectedStepsCount: 0,         // Compteur de pas rejetés
@@ -80,11 +80,11 @@ export default class NativeEnhancedMotionService {
     // *** NOUVEAU: Subscriptions pour les capteurs (optimisé sans magnétomètre) ***
     this.accelerometerSub = null;
     this.gyroscopeSub = null;
-    this.sensorsUpdateRate = 50; // 50Hz par défaut, sera mis à jour depuis la configuration
+    this.sensorsUpdateRate = 40; // 40Hz par défaut, sera mis à jour depuis la configuration
     
     // *** NOUVEAU: Variables pour la configuration des capteurs ***
     this.sensorsConfig = {
-      frequency: 50,
+      frequency: 40,
       enabled: {
         accelerometer: true,
         gyroscope: true
@@ -128,7 +128,7 @@ export default class NativeEnhancedMotionService {
       }
       
       // Obtenir la longueur de pas calculée
-      const stepLength = userProfileService.getStepLengthForPedometer();
+      const stepLength = userProfileService.getStepLength();
       
       // Mettre à jour toutes les valeurs
       this.userStepLength = stepLength;
@@ -381,6 +381,27 @@ export default class NativeEnhancedMotionService {
         isFallback
       } = stepData;
       
+      // *** NOUVEAU: Vérification de la longueur de pas ***
+      console.log(`🔍 [STEP-LENGTH-DEBUG] === VÉRIFICATION LONGUEUR DE PAS ===`);
+      console.log(`🔍 [STEP-LENGTH-DEBUG] stepLength reçu: ${stepLength}m`);
+      console.log(`🔍 [STEP-LENGTH-DEBUG] nativeStepLength: ${nativeStepLength || 'N/A'}m`);
+      console.log(`🔍 [STEP-LENGTH-DEBUG] averageStepLength: ${averageStepLength || 'N/A'}m`);
+      console.log(`🔍 [STEP-LENGTH-DEBUG] userStepLength (profil): ${this.userStepLength}m`);
+      console.log(`🔍 [STEP-LENGTH-DEBUG] metrics.averageStepLength: ${this.metrics.averageStepLength}m`);
+      
+      // *** VÉRIFICATION: Si la longueur semble anormalement courte, alerter ***
+      if (stepLength < 0.4) {
+        console.warn(`⚠️ [STEP-LENGTH-DEBUG] ATTENTION: Longueur de pas très courte détectée: ${stepLength}m`);
+        console.warn(`⚠️ [STEP-LENGTH-DEBUG] Cela peut expliquer la distance totale faible`);
+        console.warn(`⚠️ [STEP-LENGTH-DEBUG] Vérifiez la configuration du profil utilisateur`);
+      } else if (stepLength > 1.0) {
+        console.warn(`⚠️ [STEP-LENGTH-DEBUG] ATTENTION: Longueur de pas très longue détectée: ${stepLength}m`);
+        console.warn(`⚠️ [STEP-LENGTH-DEBUG] Cela peut indiquer un problème de calibration`);
+      } else {
+        console.log(`✅ [STEP-LENGTH-DEBUG] Longueur de pas normale: ${stepLength}m`);
+      }
+      console.log(`🔍 [STEP-LENGTH-DEBUG] === FIN VÉRIFICATION ===`);
+      
       // *** AMÉLIORATION: Filtrage préliminaire pour éviter le surcomptage ***
       console.log(`🔍 [NATIVE-FILTER] === FILTRAGE NATIF ===`);
       console.log(`🔍 [NATIVE-FILTER] Nombre de pas reçus: ${stepCount}`);
@@ -483,6 +504,19 @@ export default class NativeEnhancedMotionService {
       
     } catch (error) {
       console.error('❌ [HYBRID-SYSTEM] Erreur traitement événement hybride:', error);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Démarrage Expo Pedometer avec gestion d'erreur ***
+   */
+  async _startExpoPedometer() {
+    try {
+      console.log('📱 [EXPO-PEDOMETER] Démarrage du podomètre Expo...');
+      return await this._startPedometer();
+    } catch (error) {
+      console.error('❌ [EXPO-PEDOMETER] Erreur démarrage Expo Pedometer:', error);
+      throw error;
     }
   }
 
@@ -1254,8 +1288,15 @@ export default class NativeEnhancedMotionService {
 
   /**
    * *** NOUVEAU: Validation robuste des pas pour éviter le surcomptage ***
+   * *** DÉSACTIVÉ: Filtre supprimé pour une précision maximale ***
    */
   _validateStep(stepData) {
+    // *** FILTRE DÉSACTIVÉ: Retour immédiat true pour une précision maximale ***
+    // Le système natif iOS CMPedometer est déjà très précis, pas besoin de filtrage supplémentaire
+    console.log(`✅ [STEP-FILTER] Pas accepté sans filtrage (précision maximale)`);
+    return true;
+    
+    /* ANCIEN CODE DE FILTRAGE DÉSACTIVÉ
     const { stepLength, dx, dy, timestamp, confidence, source } = stepData;
     const now = timestamp || Date.now();
     
@@ -1284,57 +1325,8 @@ export default class NativeEnhancedMotionService {
       return false;
     }
     
-    // *** FILTRE 3: Validation de l'intervalle temporel ***
-    if (this.stepFiltering.lastValidStepTime > 0) {
-      const timeDelta = now - this.stepFiltering.lastValidStepTime;
-      
-      if (timeDelta < this.stepFiltering.minStepInterval) {
-        console.log(`❌ [STEP-FILTER] Rejeté - intervalle trop court: ${timeDelta}ms < ${this.stepFiltering.minStepInterval}ms (double détection)`);
-        this.stepFiltering.rejectedStepsCount++;
-        return false;
-      }
-      
-      if (timeDelta > this.stepFiltering.maxStepInterval) {
-        console.log(`⚠️ [STEP-FILTER] Attention - intervalle très long: ${timeDelta}ms > ${this.stepFiltering.maxStepInterval}ms (pause détectée)`);
-        // Ne pas rejeter, mais noter que c'est inhabituel
-      }
-    }
-    
-    // *** FILTRE 4: Détection ZUPT (Zero-Velocity Update) ***
-    if (this.validStepsHistory.length >= this.stepFiltering.consecutiveStepsForZupt) {
-      const recentSteps = this.validStepsHistory.slice(-this.stepFiltering.consecutiveStepsForZupt);
-      const avgDistance = recentSteps.reduce((sum, step) => sum + step.distance, 0) / recentSteps.length;
-      
-      if (avgDistance < this.stepFiltering.zuptThreshold) {
-        console.log(`❌ [STEP-FILTER] ZUPT détecté - distance moyenne récente: ${avgDistance.toFixed(3)}m < ${this.stepFiltering.zuptThreshold}m (immobilité apparente)`);
-        this.stepFiltering.rejectedStepsCount++;
-        return false;
-      }
-    }
-    
-    // *** FILTRE 5: Validation de la cohérence avec les pas précédents ***
-    if (this.validStepsHistory.length > 0) {
-      const lastValidStep = this.validStepsHistory[this.validStepsHistory.length - 1];
-      const distanceFromLastValid = Math.hypot(
-        (this.stepFiltering.lastValidPosition.x + dx) - lastValidStep.position.x,
-        (this.stepFiltering.lastValidPosition.y + dy) - lastValidStep.position.y
-      );
-      
-      // Vérifier que le nouveau pas n'est pas anormalement éloigné du précédent
-      const maxDistanceBetweenSteps = this.stepFiltering.maxStepDistance * 1.5; // 150% de la distance max
-      if (distanceFromLastValid > maxDistanceBetweenSteps) {
-        console.log(`❌ [STEP-FILTER] Rejeté - trop éloigné du pas précédent: ${distanceFromLastValid.toFixed(3)}m > ${maxDistanceBetweenSteps.toFixed(3)}m`);
-        this.stepFiltering.rejectedStepsCount++;
-        return false;
-      }
-    }
-    
-    console.log(`✅ [STEP-FILTER] Pas validé - distance: ${stepDistance.toFixed(3)}m, confiance: ${(confidence * 100).toFixed(1)}%`);
-    
-    // *** Mettre à jour les statistiques de filtrage ***
-    this._updateStepFilteringStats(stepData, stepDistance, now);
-    
-    return true;
+    // Autres filtres...
+    */
   }
   
   /**
@@ -1506,5 +1498,137 @@ export default class NativeEnhancedMotionService {
     this.validStepsHistory = [];
     
     console.log('🔄 [STEP-CONFIG] Statistiques de filtrage des pas réinitialisées');
+  }
+
+  /**
+   * *** NOUVEAU: Diagnostic complet du système de filtrage et de détection de pas ***
+   */
+  getDiagnostics() {
+    const stepStats = this.getStepFilteringStats();
+    const compassStats = this.getCompassFilteringStats();
+    
+    return {
+      // Statistiques générales
+      session: {
+        isRunning: this.isRunning,
+        sessionDuration: this.sessionStartTime ? (Date.now() - this.sessionStartTime.getTime()) / 1000 : 0,
+        totalValidSteps: this.stepCount,
+        totalDistance: this.metrics.totalDistance,
+        averageStepLength: this.metrics.averageStepLength
+      },
+      
+      // Profil utilisateur
+      userProfile: {
+        stepLength: this.userStepLength,
+        fallbackStepLength: this.FALLBACK_STEP_LENGTH,
+        usingNativeStepLength: this.metrics.usingNativeStepLength,
+        useFallbackOnly: this.USE_FALLBACK_ONLY
+      },
+      
+      // Filtrage des pas
+      stepFiltering: stepStats,
+      
+      // Filtrage de la boussole
+      compassFiltering: compassStats,
+      
+      // Recommandations
+      recommendations: this._generateRecommendations(stepStats, compassStats)
+    };
+  }
+  
+  /**
+   * *** NOUVEAU: Génération de recommandations basées sur les statistiques ***
+   */
+  _generateRecommendations(stepStats, compassStats) {
+    const recommendations = [];
+    
+    // Recommandations sur le filtrage des pas
+    if (stepStats.falsePositiveRate > 0.3) {
+      recommendations.push({
+        type: 'warning',
+        category: 'step_filtering',
+        message: `Taux de rejet élevé (${(stepStats.falsePositiveRate * 100).toFixed(1)}%). Considérez d'assouplir les seuils de filtrage.`,
+        action: 'configureStepFiltering({ minStepDistance: 0.2, minConfidenceThreshold: 0.15 })'
+      });
+    }
+    
+    if (stepStats.averageStepStats && stepStats.averageStepStats.averageDistance < 0.4) {
+      recommendations.push({
+        type: 'info',
+        category: 'step_length',
+        message: `Longueur de pas très courte (${stepStats.averageStepStats.averageDistance.toFixed(2)}m). Vérifiez le profil utilisateur.`,
+        action: 'Ajustez la taille de l\'utilisateur dans le profil'
+      });
+    }
+    
+    // Recommandations sur la boussole
+    if (compassStats.consecutiveBadReadings > 3) {
+      recommendations.push({
+        type: 'warning',
+        category: 'compass',
+        message: 'Plusieurs lectures de boussole de mauvaise qualité. Recalibrez la boussole.',
+        action: 'Effectuez un mouvement en forme de 8 avec l\'appareil'
+      });
+    }
+    
+    // Recommandations générales
+    if (stepStats.validSteps < 10) {
+      recommendations.push({
+        type: 'info',
+        category: 'general',
+        message: 'Peu de pas détectés. Assurez-vous de marcher normalement.',
+        action: 'Marchez à un rythme régulier avec l\'appareil'
+      });
+    }
+    
+    return recommendations;
+  }
+  
+  /**
+   * *** NOUVEAU: Affichage formaté des diagnostics ***
+   */
+  printDiagnostics() {
+    const diagnostics = this.getDiagnostics();
+    
+    console.log('\n🔍 === DIAGNOSTICS COMPLETS ===');
+    
+    // Session
+    console.log('\n📊 SESSION:');
+    console.log(`  Durée: ${diagnostics.session.sessionDuration.toFixed(1)}s`);
+    console.log(`  Pas validés: ${diagnostics.session.totalValidSteps}`);
+    console.log(`  Distance totale: ${diagnostics.session.totalDistance.toFixed(2)}m`);
+    console.log(`  Longueur de pas moyenne: ${diagnostics.session.averageStepLength.toFixed(3)}m`);
+    
+    // Profil utilisateur
+    console.log('\n👤 PROFIL UTILISATEUR:');
+    console.log(`  Longueur configurée: ${diagnostics.userProfile.stepLength.toFixed(3)}m`);
+    console.log(`  Mode natif: ${diagnostics.userProfile.usingNativeStepLength ? 'OUI' : 'NON'}`);
+    console.log(`  Mode fallback seul: ${diagnostics.userProfile.useFallbackOnly ? 'OUI' : 'NON'}`);
+    
+    // Filtrage des pas
+    console.log('\n🔍 FILTRAGE DES PAS:');
+    console.log(`  Taux de validation: ${(diagnostics.stepFiltering.validStepsRate * 100).toFixed(1)}%`);
+    console.log(`  Pas rejetés: ${diagnostics.stepFiltering.rejectedSteps}/${diagnostics.stepFiltering.totalAttempts}`);
+    console.log(`  Taux de faux positifs: ${(diagnostics.stepFiltering.falsePositiveRate * 100).toFixed(1)}%`);
+    
+    if (diagnostics.stepFiltering.averageStepStats) {
+      console.log(`  Distance moyenne: ${diagnostics.stepFiltering.averageStepStats.averageDistance.toFixed(3)}m`);
+      console.log(`  Intervalle moyen: ${diagnostics.stepFiltering.averageStepStats.averageInterval.toFixed(0)}ms`);
+      console.log(`  Confiance moyenne: ${(diagnostics.stepFiltering.averageStepStats.averageConfidence * 100).toFixed(1)}%`);
+    }
+    
+    // Recommandations
+    if (diagnostics.recommendations.length > 0) {
+      console.log('\n💡 RECOMMANDATIONS:');
+      diagnostics.recommendations.forEach((rec, index) => {
+        const icon = rec.type === 'warning' ? '⚠️' : rec.type === 'error' ? '❌' : 'ℹ️';
+        console.log(`  ${icon} [${rec.category.toUpperCase()}] ${rec.message}`);
+        console.log(`     Action: ${rec.action}`);
+      });
+    }
+    
+    console.log('\n🔍 === FIN DIAGNOSTICS ===\n');
+    
+    return diagnostics;
   }
 } 
