@@ -676,15 +676,42 @@ export default function TiledMapView({
    * Centrer sur l'utilisateur avec zoom fixe 4.03x
    */
   const centerOnUser = useCallback(() => {
-    if (!userPosition) return;
+    console.log(`🔍 [CENTER-USER-DEBUG] === DÉBUT DIAGNOSTIC ===`);
+    console.log(`🔍 [CENTER-USER-DEBUG] userPosition reçu:`, userPosition);
+    console.log(`🔍 [CENTER-USER-DEBUG] typeof userPosition:`, typeof userPosition);
+    console.log(`🔍 [CENTER-USER-DEBUG] userPosition est null:`, userPosition === null);
+    console.log(`🔍 [CENTER-USER-DEBUG] userPosition est undefined:`, userPosition === undefined);
+    
+    if (!userPosition) {
+      console.warn(`⚠️ [CENTER-USER-DEBUG] userPosition est null ou undefined - ARRÊT`);
+      return;
+    }
+    
+    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.x: ${userPosition.x}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.y: ${userPosition.y}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.theta: ${userPosition.theta}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] userPosition.confidence: ${userPosition.confidence}`);
     
     // *** MODIFIÉ: Forcer le zoom à 4.03x ***
     const targetZoom = 4.03;
     const svgPos = worldToSVG(userPosition.x, userPosition.y);
     
+    console.log(`🔍 [CENTER-USER-DEBUG] Après worldToSVG:`);
+    console.log(`🔍 [CENTER-USER-DEBUG] svgPos.x: ${svgPos.x}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] svgPos.y: ${svgPos.y}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] SCALE utilisé: ${SCALE}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] MAP_TOTAL_WIDTH: ${MAP_TOTAL_WIDTH}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] MAP_TOTAL_HEIGHT: ${MAP_TOTAL_HEIGHT}`);
+    
     // Calculer le pan nécessaire pour centrer l'utilisateur avec le zoom 4.03x
     const targetPanX = (screenWidth / 2 - svgPos.x) * targetZoom;
     const targetPanY = (screenHeight / 2 - svgPos.y) * targetZoom;
+    
+    console.log(`🔍 [CENTER-USER-DEBUG] Pan calculé:`);
+    console.log(`🔍 [CENTER-USER-DEBUG] targetPanX: ${targetPanX}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] targetPanY: ${targetPanY}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] screenWidth: ${screenWidth}`);
+    console.log(`🔍 [CENTER-USER-DEBUG] screenHeight: ${screenHeight}`);
     
     // *** NOUVEAU: Mettre à jour le zoom ET le pan ***
     setZoom(targetZoom);
@@ -694,6 +721,7 @@ export default function TiledMapView({
     setPanY(targetPanY);
     
     console.log(`🎯 [TILED-MAP] Centré sur utilisateur: (${userPosition.x.toFixed(2)}, ${userPosition.y.toFixed(2)}), zoom fixe: ${targetZoom}x`);
+    console.log(`🔍 [CENTER-USER-DEBUG] === FIN DIAGNOSTIC ===`);
   }, [userPosition, worldToSVG]);
 
   /**

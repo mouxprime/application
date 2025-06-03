@@ -15,6 +15,8 @@ class NativeIOSPedometerService {
     this.lastStepCount = 0;
     this.sessionStartTime = null;
     this.sessionStartSteps = 0;
+    this.sessionStepCount = 0;
+    this.firstCallbackReceived = false;
   }
 
   /**
@@ -83,30 +85,22 @@ class NativeIOSPedometerService {
       
       this.stepCallback = stepCallback;
       this.sessionStartTime = new Date();
-      this.lastStepCount = 0;
       this.sessionStartSteps = 0;
+      this.lastStepCount = 0;
+      this.sessionStepCount = 0;
+      this.firstCallbackReceived = false;
+
+      console.log('🔄 [IOS-PEDOMETER] Réinitialisation des compteurs de session');
+      console.log(`🔄 [IOS-PEDOMETER] lastStepCount: ${this.lastStepCount}`);
+      console.log(`🔄 [IOS-PEDOMETER] sessionStepCount: ${this.sessionStepCount}`);
 
       // Démarrer le suivi en temps réel
       this.subscription = Pedometer.watchStepCount((result) => {
         this.handleStepUpdate(result);
       });
 
-      // Obtenir les données historiques pour initialiser le compteur
-      const end = new Date();
-      const start = new Date(end.getTime() - 24 * 60 * 60 * 1000); // 24h en arrière
-      
-      try {
-        const pastStepCountResult = await Pedometer.getStepCountAsync(start, end);
-        if (pastStepCountResult.steps) {
-          this.sessionStartSteps = pastStepCountResult.steps;
-          console.log(`🍎 [IOS-PEDOMETER] Pas historiques (24h): ${pastStepCountResult.steps}`);
-        }
-      } catch (error) {
-        console.warn('⚠️ [IOS-PEDOMETER] Impossible d\'obtenir les données historiques:', error);
-      }
-
       this.isActive = true;
-      console.log('✅ [IOS-PEDOMETER] Service démarré avec succès');
+      console.log('✅ [IOS-PEDOMETER] Service démarré avec succès - Compteurs réinitialisés');
       return true;
 
     } catch (error) {
@@ -130,11 +124,29 @@ class NativeIOSPedometerService {
       this.lastStepCount = 0;
       this.sessionStartTime = null;
       this.sessionStartSteps = 0;
+      this.sessionStepCount = 0;
+      this.firstCallbackReceived = false;
 
-      console.log('🛑 [IOS-PEDOMETER] Service arrêté');
+      console.log('🛑 [IOS-PEDOMETER] Service arrêté - Compteurs réinitialisés');
     } catch (error) {
       console.error('❌ [IOS-PEDOMETER] Erreur arrêt:', error);
     }
+  }
+
+  /**
+   * Réinitialiser les compteurs de session
+   */
+  reset() {
+    console.log('🔄 [IOS-PEDOMETER] === RÉINITIALISATION COMPTEURS ===');
+    console.log(`🔄 [IOS-PEDOMETER] Avant reset - sessionStepCount: ${this.sessionStepCount}, lastStepCount: ${this.lastStepCount}`);
+    
+    this.sessionStartSteps = 0;
+    this.lastStepCount = 0;
+    this.sessionStepCount = 0;
+    this.firstCallbackReceived = false;
+    
+    console.log(`🔄 [IOS-PEDOMETER] Après reset - sessionStepCount: ${this.sessionStepCount}, lastStepCount: ${this.lastStepCount}`);
+    console.log('🔄 [IOS-PEDOMETER] === FIN RÉINITIALISATION ===');
   }
 
   /**
@@ -146,40 +158,62 @@ class NativeIOSPedometerService {
         return;
       }
 
-      const currentSteps = result.steps || 0;
-      const newSteps = currentSteps - this.lastStepCount;
+      const currentTotalSteps = result.steps || 0;
+      
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] === CALLBACK REÇU ===`);
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] currentTotalSteps (système): ${currentTotalSteps}`);
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] sessionStartSteps: ${this.sessionStartSteps}`);
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] lastStepCount: ${this.lastStepCount}`);
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] sessionStepCount: ${this.sessionStepCount}`);
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] firstCallbackReceived: ${this.firstCallbackReceived}`);
 
-      if (newSteps > 0) {
-        console.log(`🍎 [IOS-PEDOMETER] Nouveaux pas détectés: ${newSteps} (total: ${currentSteps})`);
+      if (!this.firstCallbackReceived) {
+        this.sessionStartSteps = currentTotalSteps;
+        this.lastStepCount = currentTotalSteps;
+        this.firstCallbackReceived = true;
+        console.log(`🍎 [IOS-PEDOMETER-DEBUG] PREMIER CALLBACK - sessionStartSteps initialisé à: ${this.sessionStartSteps}`);
+        return;
+      }
 
-        // Calculer la longueur de pas (CMPedometer ne fournit pas cette info directement)
-        // On utilise une estimation basée sur les données utilisateur ou une valeur par défaut
+      const newStepsSinceLastCallback = currentTotalSteps - this.lastStepCount;
+      
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] newStepsSinceLastCallback: ${newStepsSinceLastCallback}`);
+
+      if (newStepsSinceLastCallback > 0) {
+        this.sessionStepCount += newStepsSinceLastCallback;
+        
+        console.log(`🍎 [IOS-PEDOMETER] Nouveaux pas détectés: ${newStepsSinceLastCallback}`);
+        console.log(`🍎 [IOS-PEDOMETER] Total session: ${this.sessionStepCount} pas`);
+        console.log(`🍎 [IOS-PEDOMETER] Total système: ${currentTotalSteps} pas`);
+
         const stepLength = this.getEstimatedStepLength();
         
-        // Calculer le déplacement (estimation simple)
-        const distance = newSteps * stepLength;
-        const dx = distance; // Simplification : mouvement vers l'avant
+        const distance = newStepsSinceLastCallback * stepLength;
+        const dx = distance;
         const dy = 0;
 
-        // Appeler le callback avec les données
         this.stepCallback({
-          stepCount: newSteps,  // Nombre de nouveaux pas dans cet événement
+          stepCount: newStepsSinceLastCallback,
           stepLength: stepLength,
           dx: dx,
           dy: dy,
           timestamp: Date.now(),
-          totalSteps: currentSteps,  // Total cumulé
-          confidence: 0.95, // CMPedometer est très fiable
+          totalSteps: this.sessionStepCount,
+          confidence: 0.95,
           source: 'ios_cmpedometer',
           nativeStepLength: stepLength,
           averageStepLength: stepLength,
-          cadence: this.calculateCadence(newSteps),
-          timeDelta: 1000, // Estimation
+          cadence: this.calculateCadence(newStepsSinceLastCallback),
+          timeDelta: 1000,
           isFallback: false
         });
 
-        this.lastStepCount = currentSteps;
+        this.lastStepCount = currentTotalSteps;
+        
+        console.log(`🍎 [IOS-PEDOMETER-DEBUG] lastStepCount mis à jour: ${this.lastStepCount}`);
       }
+      
+      console.log(`🍎 [IOS-PEDOMETER-DEBUG] === FIN CALLBACK ===`);
 
     } catch (error) {
       console.error('❌ [IOS-PEDOMETER] Erreur traitement pas:', error);

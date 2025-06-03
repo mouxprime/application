@@ -144,12 +144,39 @@ export default function MapScreen() {
   };
   
   // *** FIX: CALLBACKS DÉFINIS AVANT L'INITIALISATION DU SERVICE ***
+  const lastTotalStepsRef = useRef(0); // *** NOUVEAU: Pour détecter les doublons ***
+  
   const handleStepDetected = useCallback(({ stepCount, stepLength, dx, dy, timestamp, totalSteps, confidence, source, nativeStepLength, averageStepLength, cadence, timeDelta, isFallback }) => {
+    // *** NOUVEAU: Détection de doublon de pas ***
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] === VÉRIFICATION DOUBLON ===`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] totalSteps actuel: ${totalSteps}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] lastTotalSteps: ${lastTotalStepsRef.current}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] Différence: ${totalSteps - lastTotalStepsRef.current}`);
+    
+    // *** PROTECTION CONTRE LE DOUBLE COMPTAGE ***
+    if (totalSteps <= lastTotalStepsRef.current) {
+      console.log(`⚠️ [STEP-CALLBACK-PROTECTION] DOUBLON DÉTECTÉ ! totalSteps=${totalSteps} <= lastTotalSteps=${lastTotalStepsRef.current} - IGNORÉ`);
+      return; // Ignorer ce callback
+    }
+    
+    // Calculer le nombre de nouveaux pas réels
+    const newStepsCount = totalSteps - lastTotalStepsRef.current;
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] Nouveaux pas réels: ${newStepsCount}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] === FIN VÉRIFICATION ===`);
+    
+    // Mettre à jour la référence
+    lastTotalStepsRef.current = totalSteps;
+    
     console.log(`🔧 [STEP-CALLBACK-DEBUG] === DÉBUT ANALYSE CONFIANCE ===`);
     console.log(`🔧 [STEP-CALLBACK-DEBUG] Confiance reçue du service: ${confidence} (${(confidence * 100).toFixed(1)}%)`);
     console.log(`🔧 [STEP-CALLBACK-DEBUG] nativeStepLength: ${nativeStepLength}`);
     console.log(`🔧 [STEP-CALLBACK-DEBUG] source: ${source}`);
     console.log(`🔧 [STEP-CALLBACK-DEBUG] isFallback: ${isFallback}`);
+    
+    // *** NOUVEAU: Logs détaillés pour débugger le problème des pas ***
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] stepCount reçu: ${stepCount}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] totalSteps reçu: ${totalSteps}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] Quelle valeur utiliser pour les métriques ? totalSteps = ${totalSteps}`);
     
     console.log(`📏 [STEP-CALLBACK] Longueur de pas: ${stepLength.toFixed(3)}m ${nativeStepLength ? '(NATIVE)' : '(FALLBACK)'}`);
     console.log(`📍 [STEP-CALLBACK] Déplacement: dx=${dx.toFixed(3)}, dy=${dy.toFixed(3)}`);
@@ -158,7 +185,7 @@ export default function MapScreen() {
     const currentState = stateRef.current;
     const currentActions = actionsRef.current;
     
-    console.log(`📊 [STEP-CALLBACK] État actuel: position=(${currentState.pose.x.toFixed(2)}, ${currentState.pose.y.toFixed(2)}), pas=${currentState.stepCount || 0}`);
+    console.log(`📊 [STEP-CALLBACK] État actuel: position=(${currentState.pose.x.toFixed(2)}, ${currentState.pose.y.toFixed(2)}), pas AVANT update=${currentState.stepCount || 0}`);
     
     // *** NOUVEAU: Distinction claire des sources pour la confiance ***
     const isNative = source === 'ios_cmpedometer';
@@ -194,16 +221,25 @@ export default function MapScreen() {
     // *** FIX: Calculer la distance totale correctement ***
     const totalDistance = (currentState.distance || 0) + Math.hypot(dx, dy);
     
-    // *** FIX: Mettre à jour les métriques PDR avec le bon stepCount ***
+    // *** FIX MAJEUR: Utiliser totalSteps au lieu de stepCount pour les métriques ***
+    const stepsToUse = totalSteps || stepCount || 0; // Fallback au cas où
+    
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] === CORRECTION DES PAS ===`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] stepCount: ${stepCount}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] totalSteps: ${totalSteps}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] stepsToUse: ${stepsToUse}`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] totalDistance: ${totalDistance.toFixed(3)}m`);
+    console.log(`🔧 [STEP-CALLBACK-DEBUG] === FIN CORRECTION ===`);
+    
     currentActions.updatePDRMetrics({
-      stepCount,
+      stepCount: stepsToUse, // *** CORRIGÉ: Utiliser totalSteps au lieu de stepCount ***
       distance: totalDistance,
       currentMode: isNative ? 'NATIF' : 'FALLBACK',
       energyLevel: 1.0,
       isZUPT: false
     });
     
-    console.log(`📊 [STEP-CALLBACK] Métriques mises à jour: ${stepCount} pas, distance: ${totalDistance.toFixed(2)}m, confiance: ${(stepConfidenceToUse * 100).toFixed(0)}%`);
+    console.log(`📊 [STEP-CALLBACK] Métriques mises à jour: ${stepsToUse} pas (était ${stepCount}), distance: ${totalDistance.toFixed(2)}m, confiance: ${(stepConfidenceToUse * 100).toFixed(0)}%`);
     console.log(`🎯 [STEP-CALLBACK] Trajectoire: ${(currentState.trajectory?.length || 0) + 1} points`);
   }, []);
 
@@ -420,13 +456,15 @@ export default function MapScreen() {
    */
   const initializeSystem = async () => {
     try {
-      console.log('Initialisation du système de localisation...');
+      console.log('🚀 [INIT-SYSTEM] === DÉBUT INITIALISATION ===');
       
       // *** MODIFICATION: Pas d'initialisation spéciale pour HybridMotionService ***
       // Il s'initialise automatiquement lors du start()
       
       // *** NOUVEAU: Position initiale par défaut à "Entrée Fifi" ***
       const defaultPoint = getDefaultStartingPoint();
+      console.log('🚀 [INIT-SYSTEM] defaultPoint calculé:', defaultPoint);
+      
       const initialPose = { 
         x: defaultPoint.worldX, 
         y: defaultPoint.worldY, 
@@ -434,14 +472,27 @@ export default function MapScreen() {
         confidence: 0.8
       };
       
+      console.log('🚀 [INIT-SYSTEM] initialPose préparé:', initialPose);
+      console.log('🚀 [INIT-SYSTEM] state.pose AVANT resetPose:', state.pose);
+      
       actions.resetPose(initialPose);
+      console.log('🚀 [INIT-SYSTEM] resetPose appelé avec initialPose');
+      
+      // *** NOUVEAU: Vérifier immédiatement si la pose a été mise à jour ***
+      setTimeout(() => {
+        console.log('🚀 [INIT-SYSTEM] state.pose APRÈS resetPose (délai 100ms):', state.pose);
+      }, 100);
+      
       actions.resetTrajectory();
+      console.log('🚀 [INIT-SYSTEM] resetTrajectory appelé');
       
       setIsMapLoaded(true);
+      console.log('🚀 [INIT-SYSTEM] isMapLoaded défini à true');
       
-      console.log(`✅ Système initialisé avec succès - Position par défaut: ${defaultPoint.name} (${defaultPoint.worldX.toFixed(2)}, ${defaultPoint.worldY.toFixed(2)})`);
+      console.log(`✅ [INIT-SYSTEM] Système initialisé avec succès - Position par défaut: ${defaultPoint.name} (${defaultPoint.worldX.toFixed(2)}, ${defaultPoint.worldY.toFixed(2)})`);
+      console.log('🚀 [INIT-SYSTEM] === FIN INITIALISATION ===');
     } catch (error) {
-      console.error('❌ Erreur initialisation système:', error);
+      console.error('❌ [INIT-SYSTEM] Erreur initialisation système:', error);
       Alert.alert('Erreur', 'Impossible d\'initialiser le système de localisation');
     }
   };
@@ -473,12 +524,28 @@ export default function MapScreen() {
    */
   const startTracking = async () => {
     try {
+      console.log('🚀 [START-TRACKING] === DÉMARRAGE DU TRACKING ===');
+      
+      // *** NOUVEAU: Réinitialiser le compteur de pas au démarrage ***
+      lastTotalStepsRef.current = 0;
+      console.log('🔄 [START-TRACKING] Compteur de pas réinitialisé à 0');
+      
+      // Réinitialiser les métriques dans le contexte
+      actions.updatePDRMetrics({
+        stepCount: 0,
+        distance: 0,
+        currentMode: 'NATIF',
+        energyLevel: 1.0,
+        isZUPT: false
+      });
+      
       setTrackingMode('running');
       actions.setTracking(true);
       await startMotionTracking();
-      console.log('✅ [TRACKING] Tracking démarré');
+      
+      console.log('✅ [START-TRACKING] Tracking démarré avec compteurs réinitialisés');
     } catch (error) {
-      console.error('❌ [TRACKING] Erreur démarrage:', error);
+      console.error('❌ [START-TRACKING] Erreur démarrage:', error);
       setTrackingMode('stopped');
       Alert.alert('Erreur', 'Impossible de démarrer le tracking');
     }
@@ -1406,6 +1473,10 @@ export default function MapScreen() {
       
       console.log('✅ [MOTION-TRACKING] Service trouvé, démarrage...');
       
+      // *** NOUVEAU: Réinitialiser le service avant de démarrer ***
+      console.log('🔄 [MOTION-TRACKING] Réinitialisation du service...');
+      await hybridMotionService.reset();
+      
       await hybridMotionService.start();
       
       console.log('✅ [MOTION-TRACKING] Service démarré avec succès');
@@ -1773,12 +1844,33 @@ export default function MapScreen() {
    * *** NOUVEAU: Centrer sur l'utilisateur avec zoom x4.7 ***
    */
   const centerOnUserWithZoom = useCallback(() => {
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] === DÉBUT DIAGNOSTIC COMPLET ===`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.pose:`, state.pose);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.isTracking: ${state.isTracking}`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] trackingMode: ${trackingMode}`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.stepCount: ${state.stepCount}`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] state.distance: ${state.distance}`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] lastTotalStepsRef.current: ${lastTotalStepsRef.current}`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] Trajectory points: ${state.trajectory?.length || 0}`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] === DIAGNOSTIC SERVICE NATIF ===`);
+    
+    if (hybridMotionService) {
+      const serviceStats = hybridMotionService.getStats();
+      console.log(`🔍 [CENTER-USER-MAPSCREEN] Service stats:`, serviceStats);
+    } else {
+      console.log(`🔍 [CENTER-USER-MAPSCREEN] ❌ hybridMotionService est null !`);
+    }
+    
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] mapControls.centerOnUser disponible: ${!!mapControls.centerOnUser}`);
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] mapControls.setCustomZoom disponible: ${!!mapControls.setCustomZoom}`);
+    
     if (mapControls.centerOnUser && mapControls.setCustomZoom) {
       // Définir le zoom à exactement 4.7x
       mapControls.setCustomZoom(4.7);
       
       // Centrer sur l'utilisateur
       setTimeout(() => {
+        console.log(`🔍 [CENTER-USER-MAPSCREEN] Appel centerOnUser() avec state.pose:`, state.pose);
         mapControls.centerOnUser();
       }, 100); // Petit délai pour laisser le zoom s'appliquer
       
@@ -1786,7 +1878,9 @@ export default function MapScreen() {
     } else {
       console.warn('⚠️ [CENTER-USER] Contrôles de carte non disponibles');
     }
-  }, [mapControls.centerOnUser, mapControls.setCustomZoom]);
+    
+    console.log(`🔍 [CENTER-USER-MAPSCREEN] === FIN DIAGNOSTIC COMPLET ===`);
+  }, [mapControls.centerOnUser, mapControls.setCustomZoom, state.pose, state.isTracking, trackingMode, state.stepCount, state.distance, state.trajectory]);
 
   /**
    * *** NOUVEAU: Ouvrir/fermer la liste d'ajout d'éléments ***
@@ -1954,6 +2048,15 @@ export default function MapScreen() {
 
   return (
     <View style={styles.container}>
+      {/* *** DIAGNOSTIC: Logs avant transmission à TiledMapView *** */}
+      {console.log(`🔧 [MAPSCREEN-RENDER] === DIAGNOSTIC TRANSMISSION ===`)}
+      {console.log(`🔧 [MAPSCREEN-RENDER] state.pose au moment du rendu:`, state.pose)}
+      {console.log(`🔧 [MAPSCREEN-RENDER] state.pose.x: ${state.pose?.x}`)}
+      {console.log(`🔧 [MAPSCREEN-RENDER] state.pose.y: ${state.pose?.y}`)}
+      {console.log(`🔧 [MAPSCREEN-RENDER] isMapLoaded: ${isMapLoaded}`)}
+      {console.log(`🔧 [MAPSCREEN-RENDER] defaultPoint:`, defaultPoint)}
+      {console.log(`🔧 [MAPSCREEN-RENDER] === FIN DIAGNOSTIC ===`)}
+      
       {/* *** NOUVEAU: Carte avec système de tuiles pour afficher la carte entière *** */}
       <TiledMapView
         persistentMapService={persistentMapService}
