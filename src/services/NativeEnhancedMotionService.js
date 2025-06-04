@@ -33,6 +33,17 @@ export default class NativeEnhancedMotionService {
     this.sessionStartTime = null;
     this.stepCount = 0;
     
+    // *** NOUVEAU: Gestion de pause/reprise avec sauvegarde de position ***
+    this.isPaused = false;
+    this.pausedAt = null;
+    this.savedState = {
+      position: { x: 0, y: 0 },
+      totalDistance: 0,
+      stepCount: 0,
+      lastOrientation: null,
+      sessionTime: 0
+    };
+    
     // *** AMÉLIORATION: Système d'orientation renforcé contre les sauts erratiques ***
     this.orientationHistory = []; // Historique des orientations pour lissage
     this.orientationHistoryMaxSize = 40; // *** AUGMENTÉ: 40 échantillons pour meilleur lissage (4 secondes à 10Hz) ***
@@ -69,6 +80,24 @@ export default class NativeEnhancedMotionService {
     this.validStepsHistory = [];
     this.validStepsHistoryMaxSize = 50; // Garder les 50 derniers pas valides
     
+    // *** NOUVEAU: GESTION MÉMOIRE OPTIMISÉE ***
+    this.memoryOptimization = {
+      lastCleanup: Date.now(),
+      cleanupInterval: 30000, // Nettoyage toutes les 30 secondes
+      maxOrientationHistory: 30, // Réduction de 40 à 30 pour économiser la mémoire
+      maxStepHistory: 30, // Réduction de 50 à 30
+      objectPool: {
+        orientationObjects: [],
+        stepObjects: [],
+        dataObjects: []
+      },
+      logThrottling: {
+        lastLogTime: 0,
+        minLogInterval: 1000, // Maximum 1 log par seconde pour les messages répétitifs
+        throttledLogs: new Map()
+      }
+    };
+    
     // *** SUPPRIMÉ: Variables de conflit (système hybride, filtres multiples) ***
     // Plus de orientationBuffer, filteredYaw, système hybride conflictuel
     
@@ -94,7 +123,7 @@ export default class NativeEnhancedMotionService {
     // Données de pas pour calculs adaptatifs
     this.lastStepTime = null;
     this.stepHistory = [];
-    this.maxHistorySize = 50;
+    this.maxHistorySize = 30; // *** RÉDUIT: 30 au lieu de 50 pour économiser la mémoire ***
     
     // *** NOUVEAU: Variables pour le throttling des capteurs ***
     this.lastSensorUpdate = null;
@@ -108,8 +137,18 @@ export default class NativeEnhancedMotionService {
       nativeAvailable: false,
       usingNativeStepLength: false,
       adaptiveStepLength: 0.75,     // Sera mis à jour avec le profil utilisateur
-      userProfileStepLength: 0.75   // *** NOUVEAU: Longueur de pas du profil utilisateur ***
+      userProfileStepLength: 0.75,   // *** NOUVEAU: Longueur de pas du profil utilisateur ***
+      memoryStats: {
+        orientationHistorySize: 0,
+        stepHistorySize: 0,
+        validStepsHistorySize: 0,
+        lastMemoryCleanup: Date.now(),
+        totalCleanupsPerformed: 0
+      }
     };
+    
+    // *** NOUVEAU: Timer de nettoyage automatique de la mémoire ***
+    this.memoryCleanupTimer = null;
     
     // *** NOUVEAU: Initialiser avec le profil utilisateur ***
     this._initializeUserProfile();
@@ -149,9 +188,130 @@ export default class NativeEnhancedMotionService {
       // *** NOUVEAU: Initialiser la configuration des capteurs ***
       await this._initializeSensorsConfiguration();
       
+      // *** NOUVEAU: Démarrer le nettoyage automatique de la mémoire ***
+      this._startMemoryCleanup();
+      
     } catch (error) {
       console.error('❌ [NATIVE-ENHANCED] Erreur initialisation profil utilisateur:', error);
       console.log('⚠️ [NATIVE-ENHANCED] Utilisation des valeurs par défaut');
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Démarrer le nettoyage automatique de la mémoire ***
+   */
+  _startMemoryCleanup() {
+    // Nettoyage immédiat puis régulier
+    this._performMemoryCleanup();
+    
+    this.memoryCleanupTimer = setInterval(() => {
+      this._performMemoryCleanup();
+    }, this.memoryOptimization.cleanupInterval);
+    
+    console.log('🧹 [MEMORY] Nettoyage automatique démarré (toutes les 30s)');
+  }
+
+  /**
+   * *** NOUVEAU: Effectuer un nettoyage de la mémoire ***
+   */
+  _performMemoryCleanup() {
+    const before = {
+      orientationHistory: this.orientationHistory.length,
+      stepHistory: this.stepHistory.length,
+      validStepsHistory: this.validStepsHistory.length
+    };
+    
+    // 1. Nettoyer l'historique d'orientation
+    if (this.orientationHistory.length > this.memoryOptimization.maxOrientationHistory) {
+      const excess = this.orientationHistory.length - this.memoryOptimization.maxOrientationHistory;
+      this.orientationHistory.splice(0, excess);
+    }
+    
+    // 2. Nettoyer l'historique des pas
+    if (this.stepHistory.length > this.memoryOptimization.maxStepHistory) {
+      const excess = this.stepHistory.length - this.memoryOptimization.maxStepHistory;
+      this.stepHistory.splice(0, excess);
+    }
+    
+    // 3. Nettoyer l'historique des pas valides
+    if (this.validStepsHistory.length > this.memoryOptimization.maxStepHistory) {
+      const excess = this.validStepsHistory.length - this.memoryOptimization.maxStepHistory;
+      this.validStepsHistory.splice(0, excess);
+    }
+    
+    // 4. Nettoyer la map des logs throttlés
+    const now = Date.now();
+    this.memoryOptimization.logThrottling.throttledLogs.forEach((value, key) => {
+      if (now - value > 60000) { // Supprimer après 1 minute
+        this.memoryOptimization.logThrottling.throttledLogs.delete(key);
+      }
+    });
+    
+    // 5. Mise à jour des métriques
+    this.metrics.memoryStats = {
+      orientationHistorySize: this.orientationHistory.length,
+      stepHistorySize: this.stepHistory.length,
+      validStepsHistorySize: this.validStepsHistory.length,
+      lastMemoryCleanup: now,
+      totalCleanupsPerformed: this.metrics.memoryStats.totalCleanupsPerformed + 1
+    };
+    
+    const after = {
+      orientationHistory: this.orientationHistory.length,
+      stepHistory: this.stepHistory.length,
+      validStepsHistory: this.validStepsHistory.length
+    };
+    
+    // Log du nettoyage si des éléments ont été supprimés
+    const totalCleaned = (before.orientationHistory - after.orientationHistory) + 
+                        (before.stepHistory - after.stepHistory) + 
+                        (before.validStepsHistory - after.validStepsHistory);
+    
+    if (totalCleaned > 0) {
+      this._throttledLog('memory-cleanup', 
+        `🧹 [MEMORY] Nettoyage effectué: ${totalCleaned} éléments supprimés`, 
+        `  - Orientation: ${before.orientationHistory} → ${after.orientationHistory}`,
+        `  - Steps: ${before.stepHistory} → ${after.stepHistory}`,
+        `  - Valid Steps: ${before.validStepsHistory} → ${after.validStepsHistory}`
+      );
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Log avec limitation de fréquence ***
+   */
+  _throttledLog(key, ...messages) {
+    const now = Date.now();
+    const lastLog = this.memoryOptimization.logThrottling.throttledLogs.get(key) || 0;
+    
+    if (now - lastLog >= this.memoryOptimization.logThrottling.minLogInterval) {
+      console.log(...messages);
+      this.memoryOptimization.logThrottling.throttledLogs.set(key, now);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir un objet réutilisable du pool ou en créer un nouveau ***
+   */
+  _getPooledObject(type, defaultValue = {}) {
+    const pool = this.memoryOptimization.objectPool[type];
+    if (pool && pool.length > 0) {
+      const obj = pool.pop();
+      // Réinitialiser l'objet
+      Object.keys(obj).forEach(key => delete obj[key]);
+      Object.assign(obj, defaultValue);
+      return obj;
+    }
+    return { ...defaultValue };
+  }
+
+  /**
+   * *** NOUVEAU: Retourner un objet au pool pour réutilisation ***
+   */
+  _returnToPool(type, obj) {
+    const pool = this.memoryOptimization.objectPool[type];
+    if (pool && pool.length < 10) { // Limiter la taille du pool
+      pool.push(obj);
     }
   }
 
@@ -307,6 +467,9 @@ export default class NativeEnhancedMotionService {
       console.log(`🔧 [STEP-LENGTH-TRACE] Mode fallback actif: ${this.USE_FALLBACK_ONLY}`);
       console.log('🚀 [NATIVE-ENHANCED] ========================================');
       
+      // *** NOUVEAU: Exposer le service globalement pour ConfigurationScreen ***
+      this._exposeGlobally();
+      
     } catch (error) {
       console.error('❌ [NATIVE-ENHANCED] Erreur démarrage service:', error);
       // En dernier recours, activer le mode fallback
@@ -317,7 +480,112 @@ export default class NativeEnhancedMotionService {
       this.metrics.adaptiveStepLength = this.userStepLength;
       await this._startFallbackMode();
       this.isRunning = true;
+      this._exposeGlobally(); // *** NOUVEAU: Même en mode fallback ***
     }
+  }
+
+  /**
+   * *** NOUVEAU: Exposer le service globalement pour accès depuis ConfigurationScreen ***
+   */
+  _exposeGlobally() {
+    try {
+      // Exposer via window et global pour compatibilité maximale
+      if (typeof window !== 'undefined') {
+        window.nativeEnhancedMotionService = this;
+        console.log('🌐 [GLOBAL] Service exposé via window.nativeEnhancedMotionService');
+      }
+      if (typeof global !== 'undefined') {
+        global.nativeEnhancedMotionService = this;
+        console.log('🌐 [GLOBAL] Service exposé via global.nativeEnhancedMotionService');
+      }
+    } catch (error) {
+      console.warn('⚠️ [GLOBAL] Impossible d\'exposer le service globalement:', error.message);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Mettre en pause le service tout en conservant l'état ***
+   */
+  pause() {
+    if (!this.isRunning || this.isPaused) {
+      console.log('⚠️ [PAUSE] Service déjà en pause ou arrêté');
+      return false;
+    }
+    
+    console.log('⏸️ [PAUSE] Mise en pause du service...');
+    
+    // Sauvegarder l'état actuel
+    this.pausedAt = Date.now();
+    this.savedState = {
+      position: { ...this.stepFiltering.lastValidPosition },
+      totalDistance: this.metrics.totalDistance,
+      stepCount: this.stepCount,
+      lastOrientation: this.currentSmoothedOrientation,
+      sessionTime: this.sessionStartTime ? (this.pausedAt - this.sessionStartTime.getTime()) : 0
+    };
+    
+    this.isPaused = true;
+    
+    console.log('⏸️ [PAUSE] État sauvegardé:');
+    console.log(`  Position: x=${this.savedState.position.x.toFixed(2)}, y=${this.savedState.position.y.toFixed(2)}`);
+    console.log(`  Distance totale: ${this.savedState.totalDistance.toFixed(2)}m`);
+    console.log(`  Pas totaux: ${this.savedState.stepCount}`);
+    console.log(`  Orientation: ${this.savedState.lastOrientation?.toFixed(1)}°`);
+    console.log(`  Durée session: ${(this.savedState.sessionTime / 1000).toFixed(1)}s`);
+    console.log('✅ [PAUSE] Service mis en pause avec état sauvegardé');
+    
+    return true;
+  }
+
+  /**
+   * *** NOUVEAU: Reprendre le service en restaurant l'état précédent ***
+   */
+  resume() {
+    if (!this.isRunning || !this.isPaused) {
+      console.log('⚠️ [RESUME] Service non en pause ou arrêté');
+      return false;
+    }
+    
+    console.log('▶️ [RESUME] Reprise du service...');
+    
+    // Restaurer l'état sauvegardé
+    this.stepFiltering.lastValidPosition = { ...this.savedState.position };
+    this.metrics.totalDistance = this.savedState.totalDistance;
+    this.stepCount = this.savedState.stepCount;
+    this.currentSmoothedOrientation = this.savedState.lastOrientation;
+    
+    // Ajuster le temps de session
+    if (this.sessionStartTime && this.pausedAt) {
+      const pauseDuration = Date.now() - this.pausedAt;
+      this.sessionStartTime = new Date(this.sessionStartTime.getTime() + pauseDuration);
+      console.log(`⏱️ [RESUME] Temps de pause: ${(pauseDuration / 1000).toFixed(1)}s - session ajustée`);
+    }
+    
+    this.isPaused = false;
+    this.pausedAt = null;
+    
+    console.log('▶️ [RESUME] État restauré:');
+    console.log(`  Position: x=${this.stepFiltering.lastValidPosition.x.toFixed(2)}, y=${this.stepFiltering.lastValidPosition.y.toFixed(2)}`);
+    console.log(`  Distance totale: ${this.metrics.totalDistance.toFixed(2)}m`);
+    console.log(`  Pas totaux: ${this.stepCount}`);
+    console.log(`  Orientation: ${this.currentSmoothedOrientation?.toFixed(1)}°`);
+    console.log('✅ [RESUME] Service repris à la position exacte de la pause');
+    
+    return true;
+  }
+
+  /**
+   * *** NOUVEAU: Vérifier si le service est en pause ***
+   */
+  isPausedState() {
+    return this.isPaused;
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir l'état sauvegardé ***
+   */
+  getSavedState() {
+    return { ...this.savedState };
   }
 
   /**
@@ -362,6 +630,12 @@ export default class NativeEnhancedMotionService {
    * *** NOUVEAU: Traitement des événements de pas natifs avec système hybride et filtrage ***
    */
   _handleNativeStepEvent(stepData) {
+    // *** NOUVEAU: Vérifier si le service est en pause ***
+    if (this.isPaused) {
+      console.log('⏸️ [NATIVE-ENHANCED] Événement de pas ignoré - service en pause');
+      return;
+    }
+    
     try {
       console.log('🍎 [NATIVE-ENHANCED] Événement de pas natif reçu:', stepData);
       
@@ -579,6 +853,12 @@ export default class NativeEnhancedMotionService {
    * Gestion adaptative des pas avec calcul intelligent de longueur et filtrage
    */
   _handleAdaptiveStep(timestamp) {
+    // *** NOUVEAU: Vérifier si le service est en pause ***
+    if (this.isPaused) {
+      console.log('⏸️ [ADAPTIVE-STEP] Événement de pas adaptatif ignoré - service en pause');
+      return;
+    }
+    
     // Vérification de sécurité - ne pas traiter si en mode fallback constant
     if (this.USE_FALLBACK_ONLY) {
       console.log('🔧 [STEP-LENGTH-TRACE] Mode fallback constant actif - pas de traitement adaptatif');
@@ -777,11 +1057,17 @@ export default class NativeEnhancedMotionService {
     // Rejeter immédiatement les lectures de très mauvaise qualité
     if (accuracy > this.minAccuracyThreshold) {
       this.consecutiveBadReadings++;
-      console.log(`🧭 [FILTER] Lecture rejetée - accuracy trop faible: ${accuracy}° > ${this.minAccuracyThreshold}° (${this.consecutiveBadReadings}/${this.maxConsecutiveBadReadings})`);
+      
+      // *** OPTIMISATION MÉMOIRE: Log throttlé pour éviter le spam ***
+      this._throttledLog('heading-accuracy-rejected', 
+        `🧭 [FILTER] Lecture rejetée - accuracy trop faible: ${accuracy}° > ${this.minAccuracyThreshold}° (${this.consecutiveBadReadings}/${this.maxConsecutiveBadReadings})`
+      );
       
       // Si trop de mauvaises lectures consécutives, reset partiel
       if (this.consecutiveBadReadings >= this.maxConsecutiveBadReadings) {
-        console.log(`🧭 [FILTER] Reset partiel après ${this.maxConsecutiveBadReadings} mauvaises lectures consécutives`);
+        this._throttledLog('heading-reset', 
+          `🧭 [FILTER] Reset partiel après ${this.maxConsecutiveBadReadings} mauvaises lectures consécutives`
+        );
         this.consecutiveBadReadings = 0;
         // Garder l'orientation actuelle mais vider partiellement l'historique
         this.orientationHistory = this.orientationHistory.slice(-10);
@@ -805,82 +1091,98 @@ export default class NativeEnhancedMotionService {
       
       // Rejeter les sauts trop importants d'un coup
       if (Math.abs(angleDiff) > this.maxAngleJumpThreshold) {
-        console.log(`🧭 [FILTER] Saut erratique détecté et rejeté: ${angleDiff.toFixed(1)}° > ${this.maxAngleJumpThreshold}°`);
+        this._throttledLog('heading-jump-rejected', 
+          `🧭 [FILTER] Saut erratique détecté et rejeté: ${angleDiff.toFixed(1)}° > ${this.maxAngleJumpThreshold}°`
+        );
         return; // *** IMPORTANT: Rejeter cette lecture ***
       }
     }
 
     // *** AMÉLIORATION 3: Rolling median renforcé pour stabilité ***
     this.orientationHistory.push(normalizedHeading);
+    
+    // *** OPTIMISATION MÉMOIRE: Nettoyage automatique intégré ***
     if (this.orientationHistory.length > this.orientationHistoryMaxSize) {
-      this.orientationHistory.shift();
+      const excess = this.orientationHistory.length - this.orientationHistoryMaxSize;
+      this.orientationHistory.splice(0, excess);
     }
     
     // Calculer le médian des orientations récentes avec fenêtre adaptée
-    let medianYaw = normalizedHeading;
-    if (this.orientationHistory.length >= this.medianWindowSize) {
-      const recentHistory = this.orientationHistory.slice(-this.medianWindowSize);
-      const sortedHistory = [...recentHistory].sort((a, b) => a - b);
-      const middleIndex = Math.floor(sortedHistory.length / 2);
-      medianYaw = sortedHistory[middleIndex];
-    }
+    const medianWindowSize = Math.min(this.medianWindowSize, this.orientationHistory.length);
+    const recentOrientations = this.orientationHistory.slice(-medianWindowSize);
+    const sortedOrientations = [...recentOrientations].sort((a, b) => a - b);
+    const median = sortedOrientations[Math.floor(sortedOrientations.length / 2)];
     
     // *** AMÉLIORATION 4: Filtrage adaptatif basé sur la précision ***
-    // Plus la précision est mauvaise, plus le lissage est fort
-    const adaptiveAlpha = accuracy < 5 ? 0.08 :   // Très bonne précision: lissage léger
-                         accuracy < 10 ? 0.05 :   // Bonne précision: lissage modéré
-                         accuracy < 15 ? 0.02 :   // Précision acceptable: lissage fort
-                         0.01;                     // Précision limite: lissage très fort
+    let filteredHeading;
+    let appliedAlpha = 0.3; // *** CORRIGÉ: Initialiser appliedAlpha avec valeur par défaut ***
     
-    if (this.currentSmoothedOrientation == null) {
-      this.currentSmoothedOrientation = medianYaw;
-      this.lastGoodOrientation = normalizedHeading;
+    if (this.currentSmoothedOrientation !== null) {
+      // Alpha adaptatif basé sur la précision de la mesure
+      if (accuracy <= 5) {
+        appliedAlpha = 0.7; // Haute précision, plus de poids à la nouvelle valeur
+      } else if (accuracy <= 10) {
+        appliedAlpha = 0.5; // Précision moyenne
+      } else {
+        appliedAlpha = 0.2; // Faible précision, plus de lissage
+      }
+      
+      // Gestion de la discontinuité 0°/360°
+      let diff = median - this.currentSmoothedOrientation;
+      if (diff > 180) diff -= 360;
+      else if (diff < -180) diff += 360;
+      
+      filteredHeading = this.currentSmoothedOrientation + (appliedAlpha * diff);
+      
+      // Re-normalisation
+      while (filteredHeading >= 360) filteredHeading -= 360;
+      while (filteredHeading < 0) filteredHeading += 360;
     } else {
-      // Gestion du passage 0°/360°
-      let angleDiff = medianYaw - this.currentSmoothedOrientation;
-      if (angleDiff > 180) angleDiff -= 360;
-      else if (angleDiff < -180) angleDiff += 360;
+      filteredHeading = median;
+    }
+    
+    // *** AMÉLIORATION 5: Seuil minimal de variation adaptatif ***
+    const minVariation = accuracy <= 5 ? 0.5 : accuracy <= 10 ? 1.0 : 2.0;
+    
+    if (this.currentSmoothedOrientation !== null) {
+      let variation = Math.abs(filteredHeading - this.currentSmoothedOrientation);
+      if (variation > 180) variation = 360 - variation; // Prendre le chemin le plus court
       
-      // *** AMÉLIORATION 5: Seuil minimal de variation adaptatif ***
-      // Seuil plus élevé pour les mesures moins précises
-      const minChangeThreshold = accuracy < 10 ? 2 : accuracy < 15 ? 4 : 6;
-      
-      if (Math.abs(angleDiff) > minChangeThreshold) {
-        this.currentSmoothedOrientation += adaptiveAlpha * angleDiff;
-        
-        // Normalisation du résultat
-        while (this.currentSmoothedOrientation >= 360) this.currentSmoothedOrientation -= 360;
-        while (this.currentSmoothedOrientation < 0) this.currentSmoothedOrientation += 360;
-        
-        // Mettre à jour la dernière bonne orientation
-        this.lastGoodOrientation = normalizedHeading;
+      if (variation < minVariation) {
+        // Variation trop faible, garder l'orientation actuelle
+        return;
       }
     }
-
-    // *** AMÉLIORATION 6: Logs de debug détaillés ***
-    if (Math.random() < 0.1) { // Log 10% des mesures pour debug
-      console.log(`🧭 [FILTER] Raw: ${normalizedHeading.toFixed(1)}° | Median: ${medianYaw.toFixed(1)}° | Lissé: ${this.currentSmoothedOrientation.toFixed(1)}° | Accuracy: ${accuracy.toFixed(1)}° | Alpha: ${adaptiveAlpha.toFixed(3)}`);
-    }
-
-    // Vérification que le callback existe avant de l'appeler
+    
+    // Mise à jour si tout est OK
+    this.currentSmoothedOrientation = filteredHeading;
+    this.lastGoodOrientation = normalizedHeading;
+    this.lastOrientationUpdate = timestamp || Date.now();
+    
+    // Callback optimisé
     if (this.onHeading && typeof this.onHeading === 'function') {
-      this.onHeading({
-        yaw: this.currentSmoothedOrientation * Math.PI / 180,
-        accuracy,
-        timestamp,
+      // *** OPTIMISATION MÉMOIRE: Utiliser le pool d'objets ***
+      const headingData = this._getPooledObject('dataObjects', {
+        yaw: filteredHeading,
+        accuracy: accuracy,
+        timestamp: this.lastOrientationUpdate,
+        source: 'native_compass_filtered',
+        filteredHeading: filteredHeading,
         rawHeading: normalizedHeading,
-        filteredHeading: this.currentSmoothedOrientation,
-        medianHeading: medianYaw,
-        adaptiveAlpha,
-        source: 'compass',
-        activeOrientationSource: 'compass',
-        hybridConflict: false,
-        filterQuality: {
-          accuracyGood: accuracy <= this.minAccuracyThreshold,
-          historySize: this.orientationHistory.length,
-          consecutiveBadReadings: this.consecutiveBadReadings
-        }
+        median: median,
+        historySize: this.orientationHistory.length,
+        consecutiveBadReadings: this.consecutiveBadReadings,
+        appliedAlpha: appliedAlpha // *** CORRIGÉ: Utiliser appliedAlpha au lieu de alpha ***
       });
+      
+      try {
+        this.onHeading(headingData);
+      } catch (error) {
+        console.error('❌ [HEADING] Erreur callback:', error);
+      } finally {
+        // *** OPTIMISATION MÉMOIRE: Retourner l'objet au pool ***
+        this._returnToPool('dataObjects', headingData);
+      }
     }
   }
 
@@ -919,13 +1221,21 @@ export default class NativeEnhancedMotionService {
       isRunning: this.isRunning,
       platform: Platform.OS,
       stepHistory: this.stepHistory.slice(-5), // 5 derniers pas pour debug
+      // *** NOUVEAU: Informations de pause/reprise ***
+      pauseInfo: {
+        isPaused: this.isPaused,
+        pausedAt: this.pausedAt,
+        savedState: this.isPaused ? this.savedState : null
+      },
       // Ajout d'informations de debug pour le fallback
       fallbackInfo: {
         USE_FALLBACK_ONLY: this.USE_FALLBACK_ONLY,
         FALLBACK_STEP_LENGTH: this.FALLBACK_STEP_LENGTH,
         currentMode: this.metrics.usingNativeStepLength ? 'native' : 
                     this.USE_FALLBACK_ONLY ? 'fallback_constant' : 'adaptive'
-      }
+      },
+      // *** NOUVEAU: Statistiques de mémoire ***
+      memoryStats: this.getMemoryStats()
     };
     
     // Log périodique des stats importantes (toutes les 10 secondes)
@@ -940,11 +1250,76 @@ export default class NativeEnhancedMotionService {
       console.log(`  - totalSteps: ${stats.metrics.totalSteps}`);
       console.log(`  - totalDistance: ${stats.metrics.totalDistance.toFixed(2)}m`);
       console.log(`  - usingNativeStepLength: ${stats.metrics.usingNativeStepLength}`);
+      console.log(`  - isPaused: ${stats.pauseInfo.isPaused}`); // *** NOUVEAU ***
+      console.log(`🧹 [MEMORY] - Orientation history: ${stats.memoryStats.orientationHistorySize}/${this.orientationHistoryMaxSize}`);
+      console.log(`🧹 [MEMORY] - Step history: ${stats.memoryStats.stepHistorySize}/${this.maxHistorySize}`);
+      console.log(`🧹 [MEMORY] - Cleanups performed: ${stats.memoryStats.totalCleanupsPerformed}`);
       console.log('🔧 [STEP-LENGTH-TRACE] === FIN STATS ===');
       this.lastStatsLog = now;
     }
     
     return stats;
+  }
+
+  /**
+   * *** NOUVEAU: Obtenir les statistiques détaillées de mémoire ***
+   */
+  getMemoryStats() {
+    return {
+      orientationHistorySize: this.orientationHistory.length,
+      orientationHistoryMaxSize: this.orientationHistoryMaxSize,
+      stepHistorySize: this.stepHistory.length,
+      stepHistoryMaxSize: this.maxHistorySize,
+      validStepsHistorySize: this.validStepsHistory.length,
+      validStepsHistoryMaxSize: this.validStepsHistoryMaxSize,
+      objectPools: {
+        orientationObjects: this.memoryOptimization.objectPool.orientationObjects.length,
+        stepObjects: this.memoryOptimization.objectPool.stepObjects.length,
+        dataObjects: this.memoryOptimization.objectPool.dataObjects.length
+      },
+      throttledLogsCount: this.memoryOptimization.logThrottling.throttledLogs.size,
+      lastMemoryCleanup: this.metrics.memoryStats.lastMemoryCleanup,
+      totalCleanupsPerformed: this.metrics.memoryStats.totalCleanupsPerformed,
+      memoryOptimizationActive: this.memoryCleanupTimer !== null,
+      estimatedMemoryUsage: this._estimateMemoryUsage()
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Estimation approximative de l'utilisation mémoire ***
+   */
+  _estimateMemoryUsage() {
+    // Estimation grossière en bytes
+    const orientationMemory = this.orientationHistory.length * 8; // 8 bytes per number
+    const stepMemory = this.stepHistory.length * 64; // ~64 bytes per step object
+    const validStepsMemory = this.validStepsHistory.length * 48; // ~48 bytes per valid step
+    const poolMemory = (
+      this.memoryOptimization.objectPool.orientationObjects.length +
+      this.memoryOptimization.objectPool.stepObjects.length +
+      this.memoryOptimization.objectPool.dataObjects.length
+    ) * 32; // ~32 bytes per pooled object
+    
+    const totalBytes = orientationMemory + stepMemory + validStepsMemory + poolMemory;
+    
+    return {
+      totalBytes,
+      totalKB: (totalBytes / 1024).toFixed(2),
+      breakdown: {
+        orientationHistory: orientationMemory,
+        stepHistory: stepMemory,
+        validStepsHistory: validStepsMemory,
+        objectPools: poolMemory
+      }
+    };
+  }
+
+  /**
+   * *** NOUVEAU: Forcer un nettoyage manuel de la mémoire ***
+   */
+  forceMemoryCleanup() {
+    console.log('🧹 [MEMORY] Nettoyage manuel forcé');
+    this._performMemoryCleanup();
+    return this.getMemoryStats();
   }
 
   /**
@@ -978,7 +1353,21 @@ export default class NativeEnhancedMotionService {
     // *** NOUVEAU: Arrêt des capteurs ***
     this._stopSensors();
     
+    // *** NOUVEAU: Arrêt du nettoyage automatique de la mémoire ***
+    if (this.memoryCleanupTimer) {
+      clearInterval(this.memoryCleanupTimer);
+      this.memoryCleanupTimer = null;
+      console.log('🛑 [MEMORY] Timer de nettoyage arrêté');
+    }
+    
+    // *** NOUVEAU: Nettoyage final de la mémoire ***
+    this._performFinalMemoryCleanup();
+    
+    // *** NOUVEAU: Nettoyer l'exposition globale ***
+    this._cleanupGlobalExposure();
+    
     this.isRunning = false;
+    this.isPaused = false; // *** NOUVEAU: Réinitialiser l'état de pause ***
     
     const sessionDuration = this.sessionStartTime ? 
       (Date.now() - this.sessionStartTime.getTime()) / 1000 : 0;
@@ -987,6 +1376,56 @@ export default class NativeEnhancedMotionService {
     console.log(`📊 Session: ${this.stepCount} pas en ${sessionDuration.toFixed(1)}s`);
     console.log(`📏 Longueur de pas: ${this.metrics.averageStepLength.toFixed(3)}m`);
     console.log(`🎯 Mode utilisé: ${this.metrics.usingNativeStepLength ? 'CMPedometer NATIF' : this.USE_FALLBACK_ONLY ? 'FALLBACK CONSTANT' : 'Expo Pedometer ADAPTATIF'}`);
+    console.log(`🧹 [MEMORY] Nettoyages effectués: ${this.metrics.memoryStats.totalCleanupsPerformed}`);
+  }
+
+  /**
+   * *** NOUVEAU: Nettoyer l'exposition globale du service ***
+   */
+  _cleanupGlobalExposure() {
+    try {
+      if (typeof window !== 'undefined' && window.nativeEnhancedMotionService === this) {
+        delete window.nativeEnhancedMotionService;
+        console.log('🌐 [GLOBAL] Service retiré de window.nativeEnhancedMotionService');
+      }
+      if (typeof global !== 'undefined' && global.nativeEnhancedMotionService === this) {
+        delete global.nativeEnhancedMotionService;
+        console.log('🌐 [GLOBAL] Service retiré de global.nativeEnhancedMotionService');
+      }
+    } catch (error) {
+      console.warn('⚠️ [GLOBAL] Erreur nettoyage exposition globale:', error.message);
+    }
+  }
+
+  /**
+   * *** NOUVEAU: Nettoyage final et complet de la mémoire ***
+   */
+  _performFinalMemoryCleanup() {
+    console.log('🧹 [MEMORY] Nettoyage final en cours...');
+    
+    // Vider tous les historiques
+    this.orientationHistory.length = 0;
+    this.stepHistory.length = 0;
+    this.validStepsHistory.length = 0;
+    
+    // Vider les pools d'objets
+    this.memoryOptimization.objectPool.orientationObjects.length = 0;
+    this.memoryOptimization.objectPool.stepObjects.length = 0;
+    this.memoryOptimization.objectPool.dataObjects.length = 0;
+    
+    // Vider la map des logs throttlés
+    this.memoryOptimization.logThrottling.throttledLogs.clear();
+    
+    // Réinitialiser les métriques de mémoire
+    this.metrics.memoryStats = {
+      orientationHistorySize: 0,
+      stepHistorySize: 0,
+      validStepsHistorySize: 0,
+      lastMemoryCleanup: Date.now(),
+      totalCleanupsPerformed: 0
+    };
+    
+    console.log('🧹 [MEMORY] Nettoyage final terminé - toute la mémoire libérée');
   }
 
   /**

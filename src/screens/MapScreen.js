@@ -13,6 +13,7 @@ import {
   TouchableWithoutFeedback,
   Animated,
   Easing,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Defs, LinearGradient, Stop } from 'react-native-svg';
@@ -538,9 +539,6 @@ export default function MapScreen() {
     initializeSystem();
     initializeBattery();
     
-    // *** NOUVEAU: Initialiser la carte persistante ***
-    initializePersistentMap();
-    
     // *** NOUVEAU: Initialiser l'apparence ***
     initializeAppearance();
     
@@ -742,7 +740,23 @@ Exemples pour résoudre les problèmes courants:
   };
 
   /**
-   * Démarrage/arrêt du tracking avec sauvegarde automatique
+   * *** NOUVEAU: Initialisation de l'apparence ***
+   */
+  const initializeAppearance = async () => {
+    try {
+      await appearanceService.initialize();
+      const config = appearanceService.getConfiguration();
+      setAppearanceConfig(config);
+      console.log('✅ [INIT-APPEARANCE] Configuration d\'apparence initialisée');
+    } catch (error) {
+      console.error('❌ [INIT-APPEARANCE] Erreur initialisation configuration:', error);
+      // Ne pas bloquer l'initialisation si l'apparence échoue
+      setAppearanceConfig(null);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Démarrage du tracking avec sauvegarde automatique
    */
   const toggleTracking = async () => {
     if (state.isTracking) {
@@ -796,25 +810,40 @@ Exemples pour résoudre les problèmes courants:
   };
 
   /**
-   * *** NOUVEAU: Pause du tracking (garde la position) ***
+   * *** NOUVEAU: Mettre en pause le tracking (conserve la position) ***
    */
   const pauseTracking = async () => {
     try {
-      // Sauvegarder la position actuelle
-      setPausedPosition({
-        x: state.pose.x,
-        y: state.pose.y,
-        theta: state.pose.theta,
-        confidence: state.pose.confidence
-      });
+      console.log('⏸️ [TRACKING] Mise en pause du tracking...');
       
-      setTrackingMode('paused');
-      actions.setTracking(false);
-      hybridMotionService.stop();
+      // *** CORRIGÉ: Utiliser la nouvelle méthode pause() du service ***
+      const pauseSuccess = hybridMotionService.pause();
       
-      console.log(`⏸️ [TRACKING] Tracking mis en pause à la position (${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})`);
+      if (pauseSuccess) {
+        // Sauvegarder également la position dans le state local (pour compatibilité)
+        setPausedPosition({
+          x: state.pose.x,
+          y: state.pose.y,
+          theta: state.pose.theta,
+          confidence: state.pose.confidence
+        });
+        
+        setTrackingMode('paused');
+        actions.setTracking(false);
+        
+        const savedState = hybridMotionService.getSavedState();
+        console.log(`⏸️ [TRACKING] Tracking mis en pause avec état sauvegardé:`);
+        console.log(`  Position UI: (${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)})`);
+        console.log(`  Position Service: (${savedState.position.x.toFixed(2)}, ${savedState.position.y.toFixed(2)})`);
+        console.log(`  Distance totale: ${savedState.totalDistance.toFixed(2)}m`);
+        console.log(`  Pas totaux: ${savedState.stepCount}`);
+      } else {
+        throw new Error('Impossible de mettre en pause le service de motion');
+      }
+      
     } catch (error) {
       console.error('❌ [TRACKING] Erreur mise en pause:', error);
+      Alert.alert('Erreur', 'Impossible de mettre en pause le tracking: ' + error.message);
     }
   };
 
@@ -823,21 +852,36 @@ Exemples pour résoudre les problèmes courants:
    */
   const resumeTracking = async () => {
     try {
-      if (pausedPosition) {
-        // Restaurer la position de pause
-        actions.updatePose(pausedPosition);
-        console.log(`▶️ [TRACKING] Reprise du tracking depuis la position (${pausedPosition.x.toFixed(2)}, ${pausedPosition.y.toFixed(2)})`);
+      console.log('▶️ [TRACKING] Reprise du tracking...');
+      
+      // *** CORRIGÉ: Utiliser la nouvelle méthode resume() du service ***
+      const resumeSuccess = hybridMotionService.resume();
+      
+      if (resumeSuccess) {
+        const restoredState = hybridMotionService.getSavedState();
+        
+        // Restaurer la position dans le state local si on a une position de pause
+        if (pausedPosition) {
+          actions.updatePose(pausedPosition);
+          console.log(`▶️ [TRACKING] Position UI restaurée depuis pause: (${pausedPosition.x.toFixed(2)}, ${pausedPosition.y.toFixed(2)})`);
+        }
+        
+        setTrackingMode('running');
+        actions.setTracking(true);
+        
+        console.log(`▶️ [TRACKING] Tracking repris avec état restauré:`);
+        console.log(`  Position Service: (${restoredState.position.x.toFixed(2)}, ${restoredState.position.y.toFixed(2)})`);
+        console.log(`  Distance totale: ${restoredState.totalDistance.toFixed(2)}m`);
+        console.log(`  Pas totaux: ${restoredState.stepCount}`);
+        console.log('✅ [TRACKING] Reprise réussie - la position est conservée');
+      } else {
+        throw new Error('Impossible de reprendre le service de motion');
       }
       
-      setTrackingMode('running');
-      actions.setTracking(true);
-      await startMotionTracking();
-      
-      console.log('▶️ [TRACKING] Tracking repris');
     } catch (error) {
       console.error('❌ [TRACKING] Erreur reprise:', error);
       setTrackingMode('paused');
-      Alert.alert('Erreur', 'Impossible de reprendre le tracking');
+      Alert.alert('Erreur', 'Impossible de reprendre le tracking: ' + error.message);
     }
   };
 
@@ -886,1237 +930,6 @@ Exemples pour résoudre les problèmes courants:
       console.log('🛑 [TRACKING] Tracking arrêté définitivement');
     } catch (error) {
       console.error('❌ [TRACKING] Erreur arrêt:', error);
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Centrer la vue sur la position de l'utilisateur ***
-   * *** MODIFIÉ: Utilise le nouveau système de centrage intelligent ***
-   */
-  const centerOnUser = useCallback(() => {
-    if (mapControls.centerOnUser) {
-      mapControls.centerOnUser();
-    }
-  }, [mapControls.centerOnUser]);
-
-  /**
-   * *** ANCIEN: Centrer la vue sur la trajectoire (gardé pour référence) ***
-   */
-  const centerOnTrajectory = () => {
-    if (!state.trajectory || state.trajectory.length === 0) return;
-    
-    // Calculer les limites de la trajectoire
-    const xs = state.trajectory.map(p => p.x);
-    const ys = state.trajectory.map(p => p.y);
-    
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-    
-    // Centre de la trajectoire
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    
-    // Convertir en coordonnées écran
-    const centerScreen = scaleConverter.worldToScreen(centerX, centerY);
-    
-    // Calculer l'offset nécessaire pour centrer
-    const targetOffset = {
-      x: (svgWidth / 2) - centerScreen.x,
-      y: (svgHeight / 2) - centerScreen.y
-    };
-    
-    scaleConverter.setViewOffset(targetOffset);
-    
-    console.log(`[VIEW] Centré sur trajectoire: centre=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), offset=(${targetOffset.x.toFixed(1)}, ${targetOffset.y.toFixed(1)})`);
-  };
-
-  /**
-   * *** NOUVEAU: Sauvegarder le trajet actuel dans la carte persistante ***
-   */
-  const saveTrajectoryToPersistentMap = async () => {
-    try {
-      if (!state.trajectory || state.trajectory.length === 0) {
-        console.warn('⚠️ [MAP-SCREEN] Aucun trajet à sauvegarder');
-        return;
-      }
-      
-      console.log(`🗺️ [MAP-SCREEN] Sauvegarde du trajet actuel (${state.trajectory.length} points)`);
-      
-      const metadata = {
-        stepCount: state.stepCount || 0,
-        distance: state.distance || 0,
-        startTime: state.trajectory[0]?.timestamp,
-        endTime: state.trajectory[state.trajectory.length - 1]?.timestamp
-      };
-      
-      const trajectoryId = await persistentMapService.addTrajectory(state.trajectory, metadata);
-      
-      // Recharger la carte persistante
-      const svgContent = await persistentMapService.getSVGContent();
-      setPersistentMapSVG(svgContent);
-      
-      // Mettre à jour les statistiques
-      const stats = persistentMapService.getMapStats();
-      setMapStats(stats);
-      
-      console.log(`✅ [MAP-SCREEN] Trajet ${trajectoryId} sauvegardé dans la carte persistante`);
-      
-      return trajectoryId;
-      
-    } catch (error) {
-      console.error('❌ [MAP-SCREEN] Erreur sauvegarde trajet persistant:', error);
-      throw error;
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Confirmer la sauvegarde du trajet ***
-   */
-  const confirmSaveTrajectory = async () => {
-    if (!saveTrajectoryModal.trajectoryName.trim()) {
-      Alert.alert('Erreur', 'Veuillez donner un nom au trajet');
-      return;
-    }
-
-    setSaveTrajectoryModal(prev => ({ ...prev, isLoading: true }));
-
-    try {
-      // Générer le chemin SVG
-      const svgPath = generateSVGPath();
-      
-      // Préparer les données du trajet
-      const trajectoryData = {
-        name: saveTrajectoryModal.trajectoryName.trim(),
-        points: state.trajectory,
-        svgPath: svgPath,
-        stepCount: state.stepCount || 0,
-        distance: state.distance || 0,
-        duration: 0 // TODO: calculer la durée réelle
-      };
-
-      // Sauvegarder via le contexte d'authentification
-      const result = await authActions.saveTrajectory(trajectoryData);
-
-      if (result.success) {
-        setSaveTrajectoryModal({ visible: false, trajectoryName: '', isLoading: false });
-        Alert.alert('Succès', `Trajet "${trajectoryData.name}" sauvegardé !`);
-      } else {
-        throw new Error(result.error || 'Erreur de sauvegarde');
-      }
-    } catch (error) {
-      console.error('Erreur sauvegarde trajet:', error);
-      Alert.alert('Erreur', error.message || 'Impossible de sauvegarder le trajet');
-      setSaveTrajectoryModal(prev => ({ ...prev, isLoading: false }));
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Générer le chemin SVG de la trajectoire ***
-   */
-  const generateSVGPath = () => {
-    if (!state.trajectory || state.trajectory.length < 2) {
-      return '';
-    }
-
-    return state.trajectory.map((point, index) => {
-      const svgPos = worldToSVG({ x: point.x, y: point.y });
-      return `${index === 0 ? 'M' : 'L'} ${svgPos.x.toFixed(2)} ${svgPos.y.toFixed(2)}`;
-    }).join(' ');
-  };
-
-  /**
-   * *** NOUVEAU: Sauvegarder le trajet actuel ***
-   */
-  const handleSaveTrajectory = async () => {
-    try {
-      // Sauvegarder dans la carte persistante
-      const trajectoryId = await saveTrajectoryToPersistentMap();
-      
-      if (trajectoryId) {
-        Alert.alert(
-          'Succès', 
-          `Trajet sauvegardé dans la carte persistante !\n\nID: ${trajectoryId.substring(0, 12)}...`,
-          [
-            { text: 'OK' },
-            { 
-              text: 'Voir stats', 
-              onPress: () => showMapStats() 
-            }
-          ]
-        );
-        
-        // Optionnel : Réinitialiser le trajet actuel
-        actions.resetTrajectory();
-      }
-      
-    } catch (error) {
-      Alert.alert('Erreur', 'Impossible de sauvegarder le trajet: ' + error.message);
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Afficher les statistiques de la carte ***
-   */
-  const showMapStats = () => {
-    if (!mapStats) {
-      Alert.alert('Info', 'Aucune statistique disponible');
-      return;
-    }
-    
-    const message = `Carte persistante :
-    
-📊 Trajets enregistrés : ${mapStats.trajectoryCount}
-📏 Distance totale : ${mapStats.totalDistance.toFixed(1)} m
-🗺️ Dimensions : ${mapStats.mapDimensions.worldWidth.toFixed(0)}m × ${mapStats.mapDimensions.worldHeight.toFixed(0)}m
-📅 Dernière mise à jour : ${mapStats.lastUpdate ? new Date(mapStats.lastUpdate).toLocaleString() : 'Jamais'}`;
-    
-    Alert.alert('Statistiques de la carte', message);
-  };
-
-  /**
-   * Conversion des coordonnées monde vers l'écran SVG avec zoom intelligent
-   * *** NOUVEAU: Système de zoom et centrage intelligent ***
-   */
-  const worldToSVG = (worldPos) => {
-    // *** CORRECTION: Échelle exacte selon spécification utilisateur ***
-    const EXACT_SCALE = 3.72; // pixels par mètre (3.72 px = 1m)
-    
-    const pixelX = worldPos.x * EXACT_SCALE * currentZoom;
-    const pixelY = -worldPos.y * EXACT_SCALE * currentZoom; // Inversion Y pour SVG
-    
-    // Centre de l'écran comme origine avec offset
-    const centerX = svgWidth / 2 + viewOffset.x;
-    const centerY = svgHeight / 2 + viewOffset.y;
-    
-    return {
-      x: centerX + pixelX,
-      y: centerY + pixelY
-    };
-  };
-
-  /**
-   * Rendu de la grille noire
-   * CORRIGÉ: Grille de 14629px × 13764px avec échelle 3.72 px/m
-   */
-  const renderGrid = () => {
-    // *** CORRECTION: Grille selon spécifications utilisateur ***
-    const EXACT_SCALE = 3.72; // pixels par mètre (3.72 px = 1m)
-    const GRID_WIDTH = 14629; // pixels
-    const GRID_HEIGHT = 13764; // pixels
-    
-    // Espacement de grille en mètres (par exemple tous les 10m)
-    const gridSpacingMeters = 10; // mètres
-    const gridSpacing = gridSpacingMeters * EXACT_SCALE; // pixels (37.2px)
-    
-    const lines = [];
-    
-    // Centre de l'écran comme origine
-    const centerX = svgWidth / 2;
-    const centerY = svgHeight / 2;
-    
-    // Calculer les limites de la grille en coordonnées écran
-    const gridLeft = centerX - GRID_WIDTH / 2;
-    const gridRight = centerX + GRID_WIDTH / 2;
-    const gridTop = centerY - GRID_HEIGHT / 2;
-    const gridBottom = centerY + GRID_HEIGHT / 2;
-    
-    // Calculer le nombre de lignes nécessaires
-    const numVerticalLines = Math.ceil(GRID_WIDTH / gridSpacing);
-    const numHorizontalLines = Math.ceil(GRID_HEIGHT / gridSpacing);
-    
-    // Lignes verticales
-    for (let i = -Math.floor(numVerticalLines / 2); i <= Math.ceil(numVerticalLines / 2); i++) {
-      const x = centerX + (i * gridSpacing);
-      if (x >= gridLeft && x <= gridRight) {
-        lines.push(
-          <Line
-            key={`v-${i}`}
-            x1={x}
-            y1={Math.max(0, gridTop)}
-            x2={x}
-            y2={Math.min(svgHeight, gridBottom)}
-            stroke="#333333"
-            strokeWidth="1"
-            opacity="0.3"
-          />
-        );
-      }
-    }
-    
-    // Lignes horizontales
-    for (let i = -Math.floor(numHorizontalLines / 2); i <= Math.ceil(numHorizontalLines / 2); i++) {
-      const y = centerY + (i * gridSpacing);
-      if (y >= gridTop && y <= gridBottom) {
-        lines.push(
-          <Line
-            key={`h-${i}`}
-            x1={Math.max(0, gridLeft)}
-            y1={y}
-            x2={Math.min(svgWidth, gridRight)}
-            y2={y}
-            stroke="#333333"
-            strokeWidth="1"
-            opacity="0.3"
-          />
-        );
-      }
-    }
-    
-    // *** NOUVEAU: Bordure de la grille pour visualiser les limites ***
-    lines.push(
-      <Line
-        key="border-top"
-        x1={Math.max(0, gridLeft)}
-        y1={Math.max(0, gridTop)}
-        x2={Math.min(svgWidth, gridRight)}
-        y2={Math.max(0, gridTop)}
-        stroke="#666666"
-        strokeWidth="2"
-        opacity="0.8"
-      />,
-      <Line
-        key="border-bottom"
-        x1={Math.max(0, gridLeft)}
-        y1={Math.min(svgHeight, gridBottom)}
-        x2={Math.min(svgWidth, gridRight)}
-        y2={Math.min(svgHeight, gridBottom)}
-        stroke="#666666"
-        strokeWidth="2"
-        opacity="0.8"
-      />,
-      <Line
-        key="border-left"
-        x1={Math.max(0, gridLeft)}
-        y1={Math.max(0, gridTop)}
-        x2={Math.max(0, gridLeft)}
-        y2={Math.min(svgHeight, gridBottom)}
-        stroke="#666666"
-        strokeWidth="2"
-        opacity="0.8"
-      />,
-      <Line
-        key="border-right"
-        x1={Math.min(svgWidth, gridRight)}
-        y1={Math.max(0, gridTop)}
-        x2={Math.min(svgWidth, gridRight)}
-        y2={Math.min(svgHeight, gridBottom)}
-        stroke="#666666"
-        strokeWidth="2"
-        opacity="0.8"
-      />
-    );
-    
-    return <G>{lines}</G>;
-  };
-
-  /**
-   * Rendu de la trajectoire avec trait affiné
-   */
-  const renderTrajectory = () => {
-    if (!state.trajectory || state.trajectory.length < 1) {
-      return null;
-    }
-    
-    // *** FIX: Chemin simple et visible ***
-    const generateSimplePath = () => {
-      const points = state.trajectory.map(point => worldToSVG({ x: point.x, y: point.y }));
-      
-      if (points.length === 1) {
-        // Un seul point - afficher un cercle
-        const point = points[0];
-        return `M ${point.x} ${point.y} L ${point.x + 1} ${point.y}`;
-      }
-      
-      // Chemin simple ligne par ligne
-      return points.map((point, index) => 
-        `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`
-      ).join(' ');
-    };
-
-    const simplePath = generateSimplePath();
-    
-    return (
-      <G>
-        {/* *** FIX: Définition des gradients simplifiée *** */}
-        <Defs>
-          <LinearGradient id="trajectoryGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <Stop offset="0%" stopColor="#00ff88" stopOpacity="1" />
-            <Stop offset="100%" stopColor="#88ff00" stopOpacity="1" />
-          </LinearGradient>
-        </Defs>
-
-        {/* *** FIX: Ligne principale visible *** */}
-        <Path
-          d={simplePath}
-          stroke="#00ff00"
-          strokeWidth="3"
-          fill="none"
-          opacity="1.0"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        
-        {/* *** FIX: Points de trajectoire visibles *** */}
-        {state.trajectory.map((point, index) => {
-          const svgPos = worldToSVG({ x: point.x, y: point.y });
-          const isStartPoint = index === 0;
-          const isEndPoint = index === state.trajectory.length - 1;
-          
-          return (
-            <G key={`trajectory-point-${index}`}>
-              {/* Point principal */}
-              <Circle
-                cx={svgPos.x}
-                cy={svgPos.y}
-                r={isStartPoint || isEndPoint ? "4" : "3"}
-                fill={isStartPoint ? "#00ff88" : isEndPoint ? "#ff4400" : "#00ff00"}
-                stroke="#ffffff"
-                strokeWidth="1"
-                opacity="1.0"
-              />
-              
-              {/* Indicateur spécial pour début */}
-              {isStartPoint && (
-                <Circle
-                  cx={svgPos.x}
-                  cy={svgPos.y}
-                  r="8"
-                  fill="none"
-                  stroke="#00ff88"
-                  strokeWidth="2"
-                  strokeDasharray="4,4"
-                  opacity="0.8"
-                />
-              )}
-              
-              {/* Indicateur spécial pour fin */}
-              {isEndPoint && (
-                <Circle
-                  cx={svgPos.x}
-                  cy={svgPos.y}
-                  r="8"
-                  fill="none"
-                  stroke="#ff4400"
-                  strokeWidth="2"
-                  strokeDasharray="4,4"
-                  opacity="0.8"
-                />
-              )}
-            </G>
-          );
-        })}
-      </G>
-    );
-  };
-
-  /**
-   * Rendu de la position actuelle avec orientation permanente et taille fixe
-   * SIMPLIFIÉ: Taille constante sans calculs de zoom complexes
-   * *** FIX: 0° = Nord (haut), angles 0-360° ***
-   */
-  const renderCurrentPosition = () => {
-    const svgPos = worldToSVG({ x: state.pose.x, y: state.pose.y });
-    
-    // *** FIX: Utiliser l'orientation correcte avec fallback ***
-    let currentOrientation = 0;
-    if (isOrientationActive && continuousOrientation !== null) {
-      currentOrientation = continuousOrientation;
-    } else if (state.pose.theta !== undefined) {
-      currentOrientation = state.pose.theta;
-    }
-    
-    // *** FIX: Normaliser l'angle entre 0 et 2π (0-360°) ***
-    let normalizedOrientation = currentOrientation;
-    while (normalizedOrientation < 0) normalizedOrientation += 2 * Math.PI;
-    while (normalizedOrientation >= 2 * Math.PI) normalizedOrientation -= 2 * Math.PI;
-    
-    // *** FIX: 0° = Nord (axe Y positif vers le haut) ***
-    // En SVG, Y positif va vers le bas, donc on inverse
-    // La boussole donne 0° = Nord, on garde cette convention
-    // Mais on ajuste pour l'affichage SVG où Y+ = bas
-    
-    // *** SIMPLIFIÉ: Taille fixe pour éviter les problèmes de zoom ***
-    const radius = 6; // Augmenté pour meilleure visibilité
-    const headingLength = 25; // Augmenté pour meilleure visibilité
-    const strokeWidth = 2;
-    const confidenceRadius = 15;
-    
-    // *** FIX: Calcul correct pour 0° = Nord (haut) ***
-    // En SVG: 0° = droite, 90° = bas, 180° = gauche, 270° = haut
-    // On veut: 0° = haut (nord), 90° = droite (est), 180° = bas (sud), 270° = gauche (ouest)
-    // Donc on soustrait 90° pour décaler et on inverse Y
-    const svgOrientation = normalizedOrientation - Math.PI / 2;
-    
-    const headingX = svgPos.x + Math.cos(svgOrientation) * headingLength;
-    const headingY = svgPos.y + Math.sin(svgOrientation) * headingLength; // Pas d'inversion Y ici car déjà géré
-    
-    // Couleur selon l'état du tracking
-    const positionColor = state.isTracking ? "#00ff00" : "#ffaa00";
-    const orientationColor = "#ff0088"; // Couleur vive pour l'orientation
-    
-    return (
-      <G>
-        {/* *** FIX: Ligne de direction TOUJOURS visible *** */}
-        <Line
-          x1={svgPos.x}
-          y1={svgPos.y}
-          x2={headingX}
-          y2={headingY}
-          stroke={orientationColor}
-          strokeWidth={strokeWidth}
-          opacity="1.0"
-        />
-        
-        {/* *** FIX: Flèche directionnelle pour meilleure visibilité *** */}
-        <G transform={`translate(${headingX}, ${headingY}) rotate(${svgOrientation * 180 / Math.PI + 90})`}>
-          <Path
-            d="M -4 -8 L 0 0 L 4 -8 Z"
-            fill={orientationColor}
-            stroke="#ffffff"
-            strokeWidth="1"
-            opacity="1.0"
-          />
-        </G>
-        
-        {/* Position actuelle */}
-        <Circle
-          cx={svgPos.x}
-          cy={svgPos.y}
-          r={radius}
-          fill={positionColor}
-          stroke="#ffffff"
-          strokeWidth={strokeWidth}
-          opacity="1.0"
-        />
-        
-        {/* *** FIX: Point central pour meilleure visibilité *** */}
-        <Circle
-          cx={svgPos.x}
-          cy={svgPos.y}
-          r={2}
-          fill="#ffffff"
-          opacity="1.0"
-        />
-        
-        {/* Niveau de confiance - seulement en tracking */}
-        {state.isTracking && (
-          <Circle
-            cx={svgPos.x}
-            cy={svgPos.y}
-            r={radius + (1 - state.pose.confidence) * confidenceRadius}
-            fill="none"
-            stroke="rgba(0, 255, 0, 0.3)"
-            strokeWidth={1}
-          />
-        )}
-        
-        {/* *** FIX: Indicateur d'orientation active *** */}
-        {isOrientationActive && (
-          <Circle
-            cx={svgPos.x}
-            cy={svgPos.y}
-            r={radius + 5}
-            fill="none"
-            stroke="#ff0088"
-            strokeWidth={1}
-            strokeDasharray="4,4"
-            opacity="0.8"
-          />
-        )}
-      </G>
-    );
-  };
-
-  /**
-   * Rendu des métriques en temps réel
-   */
-  const renderMetrics = () => {
-    if (!isMetricsPanelVisible) return null;
-
-    const getBatteryIcon = () => {
-      if (batteryLevel > 0.75) return 'battery-full';
-      if (batteryLevel > 0.5) return 'battery-half';
-      if (batteryLevel > 0.25) return 'battery-dead';
-      return 'battery-dead';
-    };
-
-    const getBatteryColor = () => {
-      if (batteryLevel > 0.5) return '#00ff88';
-      if (batteryLevel > 0.25) return '#ffaa00';
-      return '#ff4444';
-    };
-
-    // Détection d'alertes
-    const getConfidenceColor = () => {
-      if (state.pose.confidence > 0.5) return '#00ff88';
-      if (state.pose.confidence > 0.2) return '#ffaa00';
-      return '#ff4444';
-    };
-
-    const shouldShowStepAlert = () => {
-      // Alerte si pas de pas détectés après 10 secondes de marche
-      return state.isTracking && state.currentMode === 'walking' && 
-             (state.stepCount || 0) === 0 && Date.now() - (state.lastModeChange || 0) > 10000;
-    };
-
-    const shouldShowConfidenceAlert = () => {
-      // Alerte si confiance très faible trop longtemps
-      return state.pose.confidence < 0.05 && state.isTracking;
-    };
-
-    return (
-      <View style={styles.metricsPanel}>
-        {/* *** NOUVEAU: En-tête avec bouton de fermeture *** */}
-        <View style={styles.metricsPanelHeader}>
-          <Text style={styles.metricsPanelTitle}>Métriques Temps Réel</Text>
-          <TouchableOpacity onPress={toggleMetricsPanel} style={styles.closeButton}>
-            <Ionicons name="eye-off" size={20} color="#00ff88" />
-          </TouchableOpacity>
-        </View>
-        
-        {/* Métriques principales */}
-        <View style={styles.metricsRow}>
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Position</Text>
-            <Text style={styles.metricValue}>
-              ({state.pose.x.toFixed(1)}, {state.pose.y.toFixed(1)})
-            </Text>
-          </View>
-          
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Orientation:</Text>
-            <Text style={[styles.metricValue, { color: isOrientationActive ? '#00ff88' : '#666666' }]}>
-              {(isOrientationActive ? (continuousOrientation * 180 / Math.PI).toFixed(1) : (state.pose.theta * 180 / Math.PI).toFixed(1)) + '°'}
-            </Text>
-          </View>
-        </View>
-
-        {/* *** NOUVEAU: Affichage confiance et source orientation *** */}
-        {isOrientationActive && (
-          <>
-            <View style={styles.metricItem}>
-              <Text style={styles.metricLabel}>Confiance:</Text>
-              <Text style={[styles.metricValue, { 
-                color: orientationConfidence > 0.7 ? '#00ff88' : 
-                       orientationConfidence > 0.4 ? '#ffaa00' : '#ff4444' 
-              }]}>
-                {(orientationConfidence * 100).toFixed(0)}%
-              </Text>
-            </View>
-            
-            <View style={styles.metricItem}>
-              <Text style={styles.metricLabel}>Source:</Text>
-              <Text style={[styles.metricValue, { 
-                color: orientationSource === 'native_compass' ? '#00ff88' : '#ffaa00' 
-              }]}>
-                {orientationSource === 'native_compass' ? 'Boussole' : 
-                 orientationSource === 'pdr_fallback' ? 'PDR' : 'Gyro'}
-              </Text>
-            </View>
-            
-            {/* *** NOUVEAU: Statut boussole native *** */}
-            <View style={styles.metricItem}>
-              <Text style={styles.metricLabel}>Boussole Native:</Text>
-              <Text style={[styles.metricValue, { 
-                color: isNativeCompassActive ? '#00ff88' : '#ff4444' 
-              }]}>
-                {isNativeCompassActive ? 'Active' : 'Inactive'}
-              </Text>
-            </View>
-          </>
-        )}
-
-        {/* Métriques PDR avec indicateur mode */}
-        <View style={styles.metricsRow}>
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Mode</Text>
-            <Text style={[styles.metricValue, { color: getModeColor() }]}>
-              {getModeLabel()}
-            </Text>
-          </View>
-          
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Pas</Text>
-            <Text style={styles.metricValue}>{state.stepCount || 0}</Text>
-            {shouldShowStepAlert() && (
-              <Ionicons name="warning" size={12} color="#ff4444" />
-            )}
-          </View>
-        </View>
-
-        {/* Métriques techniques */}
-        <View style={styles.metricsRow}>
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Confiance</Text>
-            <Text style={[styles.metricValue, { color: getConfidenceColor() }]}>
-              {(state.pose.confidence * 100).toFixed(0)}%
-            </Text>
-            {shouldShowConfidenceAlert() && (
-              <Ionicons name="warning" size={12} color="#ff4444" />
-            )}
-          </View>
-          
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Distance</Text>
-            <Text style={styles.metricValue}>
-              {(state.distance || 0).toFixed(1)} m
-            </Text>
-          </View>
-        </View>
-
-        {/* Batterie */}
-        <View style={styles.metricsRow}>
-          <View style={styles.metricItem}>
-            <Ionicons 
-              name={getBatteryIcon()} 
-              size={20} 
-              color={getBatteryColor()} 
-            />
-            <Text style={[styles.metricValue, { color: getBatteryColor() }]}>
-              {(batteryLevel * 100).toFixed(0)}%
-            </Text>
-          </View>
-          
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Zoom</Text>
-            <Text style={styles.metricValue}>x{viewportInfo.zoom.toFixed(2)}</Text>
-          </View>
-        </View>
-
-        {/* *** NOUVEAU: Informations du système de tuiles *** */}
-        <View style={styles.metricsRow}>
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Tuiles</Text>
-            <Text style={styles.metricValue}>{viewportInfo.visibleTiles}</Text>
-          </View>
-          
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>Carte</Text>
-            <Text style={styles.metricValue}>{mapStats ? mapStats.trajectoryCount : 0} trajets</Text>
-          </View>
-        </View>
-      </View>
-    );
-  };
-
-  /**
-   * *** NOUVEAU: Basculement visibilité panneau de métriques ***
-   */
-  const toggleMetricsPanel = () => {
-    setIsMetricsPanelVisible(!isMetricsPanelVisible);
-  };
-
-  /**
-   * *** NOUVEAU: Couleur et label du mode (SIMPLIFIÉ) ***
-   */
-  const getModeColor = () => {
-    return '#00ff88'; // Toujours vert pour walking
-  };
-
-  const getModeLabel = () => {
-    return 'WALKING'; // Mode fixe
-  };
-
-  /**
-   * *** NOUVEAU: Stabilisation de l'orientation avec filtrage ***
-   */
-  const stabilizeOrientation = (newTheta) => {
-    const now = Date.now();
-    
-    // Normaliser l'angle entre -π et π
-    const normalizeAngle = (angle) => {
-      while (angle > Math.PI) angle -= 2 * Math.PI;
-      while (angle < -Math.PI) angle += 2 * Math.PI;
-      return angle;
-    };
-    
-    const normalizedTheta = normalizeAngle(newTheta);
-    
-    // Filtrage simple pour stabiliser l'orientation
-    const alpha = 0.1; // Facteur de lissage
-    const currentOrientation = continuousOrientation;
-    
-    // Gérer le passage par ±π
-    let angleDiff = normalizedTheta - currentOrientation;
-    if (Math.abs(angleDiff) > Math.PI) {
-      if (angleDiff > 0) {
-        angleDiff -= 2 * Math.PI;
-      } else {
-        angleDiff += 2 * Math.PI;
-      }
-    }
-    
-    const newOrientation = currentOrientation + alpha * angleDiff;
-    
-    // Normaliser entre 0 et 2π
-    const normalizedOrientation = ((newOrientation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-    
-    setContinuousOrientation(normalizedOrientation);
-  };
-
-  /**
-   * *** NOUVEAU: Callback pour le changement de zoom ***
-   */
-  const handleZoomChange = (newZoom) => {
-    setCurrentZoom(newZoom);
-  };
-
-  /**
-   * *** NOUVEAU: Démarrer l'orientation continue via la boussole native ***
-   */
-  const startContinuousOrientation = async () => {
-    console.log('🧭 [ORIENTATION] Démarrage orientation via boussole native indépendante');
-    setIsOrientationActive(true);
-    
-    // Démarrer la boussole native si pas déjà active
-    if (!isNativeCompassActive) {
-      await startNativeCompass();
-    }
-  };
-
-  /**
-   * *** SUPPRIMÉ: Arrêter l'orientation continue - plus nécessaire ***
-   */
-  const stopContinuousOrientation = () => {
-    // *** MODIFICATION: Ne plus arrêter l'orientation ***
-    console.log('🧭 [ORIENTATION] Orientation maintenue active en permanence');
-  };
-
-  /**
-   * *** SUPPRIMÉ: Basculer l'orientation continue - plus nécessaire ***
-   */
-  const toggleContinuousOrientation = () => {
-    // *** MODIFICATION: Orientation toujours active ***
-    console.log('🧭 [ORIENTATION] Orientation toujours active - basculement désactivé');
-  };
-
-  // *** FIX: Effet pour démarrer l'orientation continue automatiquement ***
-  useEffect(() => {
-    if (isMapLoaded) {
-      console.log('🧭 [ORIENTATION] Démarrage automatique de l\'orientation...');
-      setIsOrientationActive(true);
-      // *** MODIFICATION: Utiliser la boussole native indépendante ***
-      if (!isNativeCompassActive) {
-        startNativeCompass();
-      }
-    }
-  }, [isMapLoaded, isNativeCompassActive]);
-
-  const startMotionTracking = async () => {
-    try {
-      console.log('🚀 [MOTION-TRACKING] ========================================');
-      console.log('🚀 [MOTION-TRACKING] Démarrage suivi mouvement...');
-      console.log('🚀 [MOTION-TRACKING] ========================================');
-      
-      // *** FIX: Vérifier que le service existe ***
-      if (!hybridMotionService) {
-        throw new Error('Service NativeEnhancedMotionService non initialisé');
-      }
-      
-      console.log('✅ [MOTION-TRACKING] Service trouvé, démarrage...');
-      
-      // *** NOUVEAU: Réinitialiser le service avant de démarrer ***
-      console.log('🔄 [MOTION-TRACKING] Réinitialisation du service...');
-      await hybridMotionService.reset();
-      
-      await hybridMotionService.start();
-      
-      console.log('✅ [MOTION-TRACKING] Service démarré avec succès');
-      console.log('🚀 [MOTION-TRACKING] ========================================');
-      
-      // *** FIX: Vérifier les stats du service ***
-      setTimeout(() => {
-        const stats = hybridMotionService.getStats();
-        console.log('📊 [MOTION-TRACKING] Stats du service:', stats);
-      }, 2000);
-      
-    } catch (error) {
-      console.error('❌ [MOTION-TRACKING] Erreur démarrage suivi mouvement:', error);
-      Alert.alert('Erreur', 'Impossible de démarrer le suivi de mouvement: ' + error.message);
-    }
-  };
-
-  const stopMotionTracking = async () => {
-    try {
-      hybridMotionService.stop();
-      
-      // ✅ SIMPLIFIÉ: Plus de configuration à refaire
-      
-      await hybridMotionService.start();
-      
-      console.log('🔄 Suivi mouvement redémarré');
-    } catch (error) {
-      console.error('❌ Erreur redémarrage suivi mouvement:', error);
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Démarrer la boussole native indépendante ***
-   */
-  const startNativeCompass = async () => {
-    try {
-      //console.log('🧭 [NATIVE-COMPASS] Démarrage de la boussole native indépendante...');
-      
-      // Demander les permissions de localisation
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        console.warn('🧭 [NATIVE-COMPASS] Permission localisation refusée');
-        return false;
-      }
-      
-      // Arrêter l'ancienne subscription si elle existe
-      if (nativeCompassSubscription) {
-        nativeCompassSubscription.remove();
-      }
-      
-      // Démarrer le suivi de l'orientation
-      const subscription = await Location.watchHeadingAsync(
-        (headingData) => {
-          handleNativeCompassUpdate(headingData);
-        },
-        {
-          accuracy: Location.LocationAccuracy.High,
-          timeInterval: 100,  // Mise à jour toutes les 100ms
-          distanceInterval: 0
-        }
-      );
-      
-      setNativeCompassSubscription(subscription);
-      setIsNativeCompassActive(true);
-      
-      //console.log('✅ [NATIVE-COMPASS] Boussole native démarrée avec succès');
-      return true;
-      
-    } catch (error) {
-      console.error('❌ [NATIVE-COMPASS] Erreur démarrage boussole native:', error);
-      return false;
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Arrêter la boussole native indépendante ***
-   */
-  const stopNativeCompass = () => {
-    try {
-      if (nativeCompassSubscription) {
-        nativeCompassSubscription.remove();
-        setNativeCompassSubscription(null);
-      }
-      
-      setIsNativeCompassActive(false);
-      console.log('🛑 [NATIVE-COMPASS] Boussole native arrêtée');
-      
-    } catch (error) {
-      console.error('❌ [NATIVE-COMPASS] Erreur arrêt boussole native:', error);
-    }
-  };
-
-  /**
-   * *** NOUVEAU: Gérer les mises à jour de la boussole native ***
-   */
-  const handleNativeCompassUpdate = (headingData) => {
-    const { trueHeading, accuracy, timestamp } = headingData;
-    
-    // Normaliser l'angle
-    let normalizedHeading = trueHeading;
-    while (normalizedHeading >= 360) normalizedHeading -= 360;
-    while (normalizedHeading < 0) normalizedHeading += 360;
-    
-    // Convertir en radians
-    const headingRadians = (normalizedHeading * Math.PI) / 180;
-    
-    // *** AMÉLIORATION: Filtrage côté UI similaire à handleHeading ***
-    const currentOrientation = continuousOrientationRef.current;
-    
-    // Filtrage préliminaire basé sur la précision (similaire au service)
-    const minAccuracyThreshold = 15;
-    if (accuracy > minAccuracyThreshold) {
-      console.log(`🧭 [UI-NATIVE] Lecture rejetée - accuracy trop faible: ${accuracy}° > ${minAccuracyThreshold}°`);
-      return; // Rejeter cette lecture
-    }
-    
-    if (currentOrientation === null || currentOrientation === undefined) {
-      // Première orientation, l'accepter directement
-      setContinuousOrientation(headingRadians);
-      continuousOrientationRef.current = headingRadians;
-    } else {
-      // Calculer la différence d'angle en gérant le passage 0°/2π
-      let angleDiff = headingRadians - currentOrientation;
-      if (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
-      else if (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
-      
-      // Rejet des sauts trop importants côté UI
-      const maxUIJumpThreshold = Math.PI / 6; // 30° maximum d'un coup
-      
-      if (Math.abs(angleDiff) > maxUIJumpThreshold) {
-        console.log(`🎯 [UI-NATIVE] Saut UI rejeté: ${(angleDiff * 180 / Math.PI).toFixed(1)}° > ${(maxUIJumpThreshold * 180 / Math.PI).toFixed(1)}°`);
-        return; // Rejeter cette mise à jour UI
-      }
-      
-      // Lissage UI adaptatif basé sur la précision
-      const uiSmoothingAlpha = accuracy < 10 ? 0.3 : 0.1; // Plus réactif si bonne précision
-      
-      // Appliquer le lissage UI
-      const newOrientation = currentOrientation + uiSmoothingAlpha * angleDiff;
-      
-      setContinuousOrientation(newOrientation);
-      continuousOrientationRef.current = newOrientation;
-    }
-    
-    // Mettre à jour les autres états d'orientation
-    setOrientationConfidence(accuracy ? Math.max(0, Math.min(1, (100 - accuracy) / 100)) : 0.8);
-    setOrientationSource('native_compass');
-    setIsOrientationActive(true);
-    
-    // Mettre à jour la pose dans le contexte
-    const currentState = stateRef.current;
-    const currentActions = actionsRef.current;
-    
-    currentActions.updatePose({
-      x: currentState.pose.x,
-      y: currentState.pose.y,
-      theta: continuousOrientationRef.current, // Utiliser l'orientation lissée UI
-      confidence: currentState.pose.confidence
-    });
-  };
-
-  // *** NOUVEAU: Initialisation de la carte persistante ***
-  const initializePersistentMap = async () => {
-    try {
-      console.log('🗺️ [MAP-SCREEN] Initialisation de la carte persistante...');
-      
-      await persistentMapService.initialize();
-      
-      // Charger le SVG de la carte persistante
-      const svgContent = await persistentMapService.getSVGContent();
-      setPersistentMapSVG(svgContent);
-      
-      // Charger les statistiques
-      const stats = persistentMapService.getMapStats();
-      setMapStats(stats);
-      
-      console.log('✅ [MAP-SCREEN] Carte persistante initialisée:', stats);
-      
-      // *** NOUVEAU: Centrer et zoomer sur "Entrée Fifi" après initialisation ***
-      setTimeout(() => {
-        centerOnDefaultPointWithCustomZoom();
-      }, 1000); // Délai pour s'assurer que la carte est prête
-      
-    } catch (error) {
-      console.error('❌ [MAP-SCREEN] Erreur initialisation carte persistante:', error);
-      // Continuer sans la carte persistante
-    }
-  };
-
-  // *** NOUVEAU: Initialisation de l'apparence ***
-  const initializeAppearance = async () => {
-    try {
-      //console.log('🎨 [MAP-SCREEN] Initialisation de l\'apparence...');
-      
-      await appearanceService.initialize();
-      const config = appearanceService.getConfiguration();
-      setAppearanceConfig(config);
-      
-      // Écouter les changements de configuration
-      const unsubscribe = appearanceService.addListener((newConfig) => {
-        //console.log('🎨 [MAP-SCREEN] Configuration couleurs mise à jour:', newConfig);
-        setAppearanceConfig(newConfig);
-      });
-      
-      console.log('✅ [MAP-SCREEN] Apparence initialisée:', config);
-      
-      // Retourner la fonction de nettoyage sera gérée par le composant parent
-      
-    } catch (error) {
-      console.error('❌ [MAP-SCREEN] Erreur initialisation apparence:', error);
-      // Continuer avec les couleurs par défaut
-    }
-  };
-
-  // *** NOUVEAU: Gestionnaire de changement de viewport ***
-  const handleViewportChange = useCallback((info) => {
-    setViewportInfo({
-      zoom: info.zoom,
-      panX: info.panX,
-      panY: info.panY,
-      visibleTiles: info.visibleTiles || 0
-    });
-    
-    // Sauvegarder les contrôles de la carte
-    if (info.centerOnUser && info.viewFullMap && info.centerOnPoint && info.setCustomZoom) {
-      setMapControls({
-        centerOnUser: info.centerOnUser,
-        viewFullMap: info.viewFullMap,
-        centerOnPoint: info.centerOnPoint,
-        setCustomZoom: info.setCustomZoom,
-        pointsOfInterest: info.pointsOfInterest || []
-      });
-    }
-  }, []);
-
-  // *** SIMPLIFIÉ: Centrer sur le point par défaut avec zoom personnalisé ***
-  const centerOnDefaultPointWithCustomZoom = useCallback(() => {
-    if (mapControls.centerOnPoint && mapControls.setCustomZoom) {
-      // Centrer sur "Entrée Fifi"
-      mapControls.centerOnPoint(defaultPoint);
-      
-      // Définir le zoom pour afficher 530x1000 pixels
-      mapControls.setCustomZoom(initialZoom);
-      
-      console.log(`🎯 [MAP-SCREEN] Vue centrée sur ${defaultPoint.name} avec zoom ${initialZoom.toFixed(3)}x`);
-    } else {
-      console.warn('⚠️ [MAP-SCREEN] Contrôles de carte non disponibles pour le centrage');
-    }
-  }, [mapControls.centerOnPoint, mapControls.setCustomZoom, defaultPoint, initialZoom]);
-
-  // *** NOUVEAU: Voir la carte entière ***
-  const viewFullMap = useCallback(() => {
-    if (mapControls.viewFullMap) {
-      mapControls.viewFullMap();
-    }
-  }, [mapControls.viewFullMap]);
-
-  // *** NOUVEAU: Confirmer le point de départ ***
-  const confirmStartingPoint = async () => {
-    setStartingPointModal(prev => ({ ...prev, isLoading: true }));
-
-    try {
-      let startX = 0;
-      let startY = 0;
-
-      if (startingPointModal.selectedPoint) {
-        // Point prédéfini sélectionné
-        startX = startingPointModal.selectedPoint.worldX;
-        startY = startingPointModal.selectedPoint.worldY;
-        console.log(`🎯 [STARTING-POINT] Point prédéfini: ${startingPointModal.selectedPoint.name} (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
-      } else if (startingPointModal.customX && startingPointModal.customY) {
-        // Coordonnées personnalisées
-        startX = parseFloat(startingPointModal.customX);
-        startY = parseFloat(startingPointModal.customY);
-        
-        if (isNaN(startX) || isNaN(startY)) {
-          throw new Error('Coordonnées invalides');
-        }
-        
-        // *** NOUVEAU: Validation des limites de la carte ***
-        const SCALE = 3.72;
-        const centerX = MAP_TOTAL_WIDTH / 2;
-        const centerY = MAP_TOTAL_HEIGHT / 2;
-        
-        const minWorldX = (0 - centerX) / SCALE;           // ~-1966
-        const maxWorldX = (MAP_TOTAL_WIDTH - centerX) / SCALE;  // ~+1966
-        const minWorldY = -(MAP_TOTAL_HEIGHT - centerY) / SCALE; // ~-1850
-        const maxWorldY = -(0 - centerY) / SCALE;              // ~+1850
-        
-        if (startX < minWorldX || startX > maxWorldX || startY < minWorldY || startY > maxWorldY) {
-          throw new Error(`Coordonnées hors limites de la carte.\nLimites valides:\nX: ${minWorldX.toFixed(0)} à ${maxWorldX.toFixed(0)}\nY: ${minWorldY.toFixed(0)} à ${maxWorldY.toFixed(0)}\nVous avez saisi: (${startX}, ${startY})`);
-        }
-        
-        console.log(`🎯 [STARTING-POINT] Coordonnées personnalisées: (${startX.toFixed(2)}, ${startY.toFixed(2)}) - Validées dans les limites`);
-      } else {
-        // Point par défaut "Entrée Fifi"
-        const defaultPoint = getDefaultStartingPoint();
-        startX = defaultPoint.worldX;
-        startY = defaultPoint.worldY;
-        console.log(`🎯 [STARTING-POINT] Point par défaut: ${defaultPoint.name} (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
-      }
-
-      // Définir la position de départ
-      const initialPose = { 
-        x: startX, 
-        y: startY, 
-        theta: 0,
-        confidence: 0.8
-      };
-      
-      actions.resetPose(initialPose);
-      actions.resetTrajectory();
-      
-      // Centrer la carte sur le point de départ si possible
-      if (mapControls.centerOnPoint && startingPointModal.selectedPoint) {
-        setTimeout(() => {
-          mapControls.centerOnPoint(startingPointModal.selectedPoint);
-        }, 500);
-      }
-
-      setStartingPointModal({ 
-        visible: false, 
-        selectedPoint: null, 
-        customX: '', 
-        customY: '', 
-        isLoading: false 
-      });
-
-      console.log(`✅ [STARTING-POINT] Point de départ défini: (${startX.toFixed(2)}, ${startY.toFixed(2)})`);
-
-      // *** MODIFIÉ: Utiliser la nouvelle fonction startTracking ***
-      await startTracking();
-
-    } catch (error) {
-      console.error('❌ [STARTING-POINT] Erreur définition point de départ:', error);
-      Alert.alert('Erreur', error.message || 'Impossible de définir le point de départ');
-      setStartingPointModal(prev => ({ ...prev, isLoading: false }));
-    }
-  };
-
-  // *** NOUVEAU: Sélectionner un point prédéfini ***
-  const selectPredefinedPoint = (point) => {
-    setStartingPointModal(prev => ({
-      ...prev,
-      selectedPoint: point,
-      customX: '',
-      customY: ''
-    }));
-  };
-
-  // *** NOUVEAU: Utiliser coordonnées personnalisées ***
-  const useCustomCoordinates = () => {
-    setStartingPointModal(prev => ({
-      ...prev,
-      selectedPoint: null
-    }));
-  };
-
-  /**
-   * *** NOUVEAU: Sauvegarde automatique du trajet ***
-   */
-  const saveTrajectoryAutomatically = async () => {
-    try {
-      // Sauvegarder dans la carte persistante
-      const trajectoryId = await saveTrajectoryToPersistentMap();
-      
-      // Générer le chemin SVG
-      const svgPath = generateSVGPath();
-      
-      // Préparer les données du trajet avec un nom automatique
-      const timestamp = new Date().toLocaleString('fr-FR');
-      const trajectoryData = {
-        name: `Trajet ${timestamp}`,
-        points: state.trajectory,
-        svgPath: svgPath,
-        stepCount: state.stepCount || 0,
-        distance: state.distance || 0,
-        duration: 0 // TODO: calculer la durée réelle
-      };
-
-      // Sauvegarder via le contexte d'authentification
-      const result = await authActions.saveTrajectory(trajectoryData);
-
-      if (!result.success) {
-        throw new Error(result.error || 'Erreur de sauvegarde');
-      }
-
-      console.log(`✅ [AUTO-SAVE] Trajet sauvegardé automatiquement: ${trajectoryData.name}`);
-      
-      // Réinitialiser le trajet actuel
-      actions.resetTrajectory();
-      
-      return result;
-    } catch (error) {
-      console.error('❌ [AUTO-SAVE] Erreur sauvegarde automatique:', error);
-      throw error;
     }
   };
 
@@ -2217,25 +1030,83 @@ Exemples pour résoudre les problèmes courants:
   };
 
   /**
-   * *** NOUVEAU: Confirmer la sauvegarde locale à la fin du trajet ***
+   * *** MODIFIÉ: Confirmer sauvegarde avec options locale et cloud ***
    */
   const confirmLocalSave = async () => {
     setEndTrajectoryModal(prev => ({ ...prev, isLoading: true }));
 
     try {
-      // Sauvegarder localement dans la carte persistante
-      await saveTrajectoryToPersistentMap();
+      const trajectoryData = endTrajectoryModal.trajectoryData;
+      let saveResults = { local: false, cloud: false };
+      
+      // 1. Toujours sauvegarder localement
+      try {
+        await saveTrajectoryToPersistentMap();
+        saveResults.local = true;
+        console.log('✅ [SAVE] Sauvegarde locale réussie');
+      } catch (localError) {
+        console.error('❌ [LOCAL-SAVE] Erreur sauvegarde locale:', localError);
+      }
+      
+      // 2. Essayer de sauvegarder dans le cloud si utilisateur connecté
+      try {
+        // Vérifier si Supabase est disponible et utilisateur connecté
+        const { supabaseService } = await import('../services/SupabaseService');
+        
+        if (supabaseService.isAuthenticated()) {
+          console.log('☁️ [SAVE] Sauvegarde cloud en cours...');
+          
+          const cloudTrajectory = {
+            name: `Trajet ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`,
+            description: `Trajet enregistré depuis l'application PDR Navigation`,
+            trajectory: trajectoryData.trajectory,
+            stepCount: trajectoryData.stepCount,
+            distance: trajectoryData.distance,
+            duration: trajectoryData.endTime - trajectoryData.startTime,
+            startTime: new Date(trajectoryData.startTime).toISOString(),
+            endTime: new Date(trajectoryData.endTime).toISOString(),
+            algorithmVersion: '2.0',
+            deviceInfo: {
+              platform: Platform.OS,
+              timestamp: Date.now()
+            },
+            accuracyStats: {
+              totalSteps: trajectoryData.stepCount,
+              avgStepLength: trajectoryData.distance / Math.max(trajectoryData.stepCount, 1)
+            }
+          };
+          
+          await supabaseService.saveTrajectory(cloudTrajectory);
+          saveResults.cloud = true;
+          console.log('✅ [SAVE] Sauvegarde cloud réussie');
+        } else {
+          console.log('ℹ️ [SAVE] Utilisateur non connecté - pas de sauvegarde cloud');
+        }
+      } catch (cloudError) {
+        console.warn('⚠️ [CLOUD-SAVE] Erreur sauvegarde cloud:', cloudError.message);
+        // Ne pas bloquer si la sauvegarde cloud échoue
+      }
       
       setEndTrajectoryModal({ visible: false, trajectoryData: null, isLoading: false });
       
-      Alert.alert('✅ Trajet sauvegardé', 'Votre trajet a été sauvegardé localement sur cet appareil.');
+      // Message de confirmation adapté selon les résultats
+      let message = '';
+      if (saveResults.local && saveResults.cloud) {
+        message = 'Trajet sauvegardé localement et synchronisé avec le cloud ☁️';
+      } else if (saveResults.local) {
+        message = 'Trajet sauvegardé localement. Connectez-vous pour synchroniser avec le cloud.';
+      } else {
+        message = 'Erreur lors de la sauvegarde. Veuillez réessayer.';
+      }
+      
+      Alert.alert('💾 Trajet sauvegardé', message);
       
       // Réinitialiser le trajet actuel
       actions.resetTrajectory();
 
     } catch (error) {
-      console.error('❌ [LOCAL-SAVE] Erreur sauvegarde locale:', error);
-      Alert.alert('Erreur', 'Impossible de sauvegarder le trajet localement');
+      console.error('❌ [SAVE] Erreur sauvegarde générale:', error);
+      Alert.alert('Erreur', 'Impossible de sauvegarder le trajet');
       setEndTrajectoryModal(prev => ({ ...prev, isLoading: false }));
     }
   };
@@ -2286,6 +1157,294 @@ Exemples pour résoudre les problèmes courants:
         isLoading: false
       });
     }
+  };
+
+  /**
+   * *** NOUVEAU: Démarrage du tracking de movement ***
+   */
+  const startMotionTracking = async () => {
+    try {
+      console.log('🚀 [MOTION] Démarrage du tracking de movement...');
+      
+      if (!hybridMotionService) {
+        throw new Error('Service de motion non disponible');
+      }
+      
+      await hybridMotionService.start();
+      console.log('✅ [MOTION] Tracking de movement démarré');
+    } catch (error) {
+      console.error('❌ [MOTION] Erreur démarrage tracking:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Sauvegarde automatique du trajet ***
+   */
+  const saveTrajectoryAutomatically = async () => {
+    try {
+      console.log('💾 [AUTO-SAVE] Sauvegarde automatique du trajet...');
+      
+      if (!state.trajectory || state.trajectory.length === 0) {
+        throw new Error('Aucune trajectoire à sauvegarder');
+      }
+      
+      // Import dynamic pour éviter les dépendances circulaires
+      const { supabaseService } = await import('../services/SupabaseService');
+      
+      const trajectoryData = {
+        name: `Trajet ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`,
+        description: `Trajet enregistré automatiquement depuis l'application PDR Navigation`,
+        trajectory: state.trajectory,
+        stepCount: state.stepCount || 0,
+        distance: state.distance || 0,
+        duration: state.trajectory.length > 0 ? 
+          (state.trajectory[state.trajectory.length - 1].timestamp - state.trajectory[0].timestamp) : 0,
+        startTime: state.trajectory[0]?.timestamp ? new Date(state.trajectory[0].timestamp).toISOString() : new Date().toISOString(),
+        endTime: state.trajectory[state.trajectory.length - 1]?.timestamp ? 
+          new Date(state.trajectory[state.trajectory.length - 1].timestamp).toISOString() : new Date().toISOString(),
+        algorithmVersion: '2.0',
+        deviceInfo: {
+          platform: Platform.OS,
+          timestamp: Date.now()
+        },
+        accuracyStats: {
+          totalSteps: state.stepCount || 0,
+          avgStepLength: (state.distance || 0) / Math.max(state.stepCount || 1, 1)
+        }
+      };
+      
+      await supabaseService.saveTrajectory(trajectoryData);
+      console.log('✅ [AUTO-SAVE] Trajet sauvegardé automatiquement');
+    } catch (error) {
+      console.error('❌ [AUTO-SAVE] Erreur sauvegarde automatique:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Sauvegarde locale dans la carte persistante ***
+   */
+  const saveTrajectoryToPersistentMap = async () => {
+    try {
+      console.log('💾 [LOCAL-SAVE] Sauvegarde locale dans la carte persistante...');
+      
+      if (!state.trajectory || state.trajectory.length === 0) {
+        throw new Error('Aucune trajectoire à sauvegarder');
+      }
+      
+      if (!persistentMapService) {
+        throw new Error('Service de carte persistante non disponible');
+      }
+      
+      // Sauvegarder la trajectoire dans le service de carte persistante
+      const trajectoryName = `Trajet_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      await persistentMapService.saveTrajectory(trajectoryName, state.trajectory);
+      
+      console.log('✅ [LOCAL-SAVE] Trajet sauvegardé localement');
+    } catch (error) {
+      console.error('❌ [LOCAL-SAVE] Erreur sauvegarde locale:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Gestion des changements de viewport ***
+   */
+  const handleViewportChange = useCallback((viewport) => {
+    setViewportInfo(viewport);
+  }, []);
+
+  /**
+   * *** NOUVEAU: Sélectionner un point prédéfini ***
+   */
+  const selectPredefinedPoint = (point) => {
+    setStartingPointModal(prev => ({
+      ...prev,
+      selectedPoint: point,
+      customX: '',
+      customY: ''
+    }));
+  };
+
+  /**
+   * *** NOUVEAU: Utiliser des coordonnées personnalisées ***
+   */
+  const useCustomCoordinates = () => {
+    setStartingPointModal(prev => ({
+      ...prev,
+      selectedPoint: null
+    }));
+  };
+
+  /**
+   * *** NOUVEAU: Confirmer le point de départ ***
+   */
+  const confirmStartingPoint = async () => {
+    setStartingPointModal(prev => ({ ...prev, isLoading: true }));
+
+    try {
+      let targetPosition;
+
+      if (startingPointModal.selectedPoint) {
+        // Utiliser un point prédéfini
+        targetPosition = {
+          x: startingPointModal.selectedPoint.worldX,
+          y: startingPointModal.selectedPoint.worldY,
+          theta: 0,
+          confidence: 0.8
+        };
+      } else {
+        // Utiliser des coordonnées personnalisées
+        const customX = parseFloat(startingPointModal.customX);
+        const customY = parseFloat(startingPointModal.customY);
+
+        if (isNaN(customX) || isNaN(customY)) {
+          Alert.alert('Erreur', 'Veuillez entrer des coordonnées valides');
+          return;
+        }
+
+        targetPosition = {
+          x: customX,
+          y: customY,
+          theta: 0,
+          confidence: 0.8
+        };
+      }
+
+      // Mettre à jour la position dans le contexte
+      actions.updatePose(targetPosition);
+      actions.resetTrajectory();
+
+      // Fermer le modal
+      setStartingPointModal({
+        visible: false,
+        selectedPoint: null,
+        customX: '',
+        customY: '',
+        isLoading: false
+      });
+
+      // Démarrer le tracking
+      await startTracking();
+
+    } catch (error) {
+      console.error('❌ [STARTING-POINT] Erreur confirmation point de départ:', error);
+      Alert.alert('Erreur', 'Impossible de définir le point de départ');
+      setStartingPointModal(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Basculer l'affichage du panneau de métriques ***
+   */
+  const toggleMetricsPanel = () => {
+    setIsMetricsPanelVisible(!isMetricsPanelVisible);
+  };
+
+  /**
+   * *** NOUVEAU: Démarrer la boussole native ***
+   */
+  const startNativeCompass = async () => {
+    try {
+      console.log('🧭 [NATIVE-COMPASS] Démarrage de la boussole native...');
+      setIsNativeCompassActive(true);
+    } catch (error) {
+      console.error('❌ [NATIVE-COMPASS] Erreur démarrage boussole native:', error);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Arrêter la boussole native ***
+   */
+  const stopNativeCompass = () => {
+    try {
+      console.log('🧭 [NATIVE-COMPASS] Arrêt de la boussole native...');
+      if (nativeCompassSubscription) {
+        nativeCompassSubscription.remove();
+        setNativeCompassSubscription(null);
+      }
+      setIsNativeCompassActive(false);
+    } catch (error) {
+      console.error('❌ [NATIVE-COMPASS] Erreur arrêt boussole native:', error);
+    }
+  };
+
+  /**
+   * *** NOUVEAU: Rendu du panneau de métriques ***
+   */
+  const renderMetrics = () => {
+    if (!isMetricsPanelVisible) return null;
+
+    return (
+      <View style={styles.metricsPanel}>
+        <View style={styles.metricsPanelHeader}>
+          <Text style={styles.metricsPanelTitle}>Métriques en temps réel</Text>
+          <TouchableOpacity
+            style={styles.closeButton}
+            onPress={toggleMetricsPanel}
+          >
+            <Ionicons name="eye-off" size={16} color="#00ff88" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.metricsRow}>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Position</Text>
+            <Text style={styles.metricValue}>
+              {state.pose.x.toFixed(1)}, {state.pose.y.toFixed(1)}
+            </Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Orientation</Text>
+            <Text style={styles.metricValue}>
+              {((continuousOrientation * 180) / Math.PI).toFixed(0)}°
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.metricsRow}>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Pas</Text>
+            <Text style={styles.metricValue}>{state.stepCount || 0}</Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Distance</Text>
+            <Text style={styles.metricValue}>
+              {(state.distance || 0).toFixed(1)}m
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.metricsRow}>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Confiance</Text>
+            <Text style={styles.metricValue}>
+              {(orientationConfidence * 100).toFixed(0)}%
+            </Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Batterie</Text>
+            <Text style={styles.metricValue}>
+              {(batteryLevel * 100).toFixed(0)}%
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.metricsRow}>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Trajectoire</Text>
+            <Text style={styles.metricValue}>
+              {state.trajectory?.length || 0} pts
+            </Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>Source</Text>
+            <Text style={styles.metricValue}>{orientationSource}</Text>
+          </View>
+        </View>
+      </View>
+    );
   };
 
   if (!isMapLoaded) {

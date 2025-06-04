@@ -52,6 +52,10 @@ export default function ConfigurationScreen() {
     currentColor: '#ffffff' 
   });
 
+  // *** NOUVEAU: États pour le diagnostic mémoire ***
+  const [memoryStats, setMemoryStats] = useState(null);
+  const [showMemoryModal, setShowMemoryModal] = useState(false);
+
   useEffect(() => {
     initializeConfiguration();
     initializeUserProfile();
@@ -209,6 +213,116 @@ export default function ConfigurationScreen() {
     } catch (error) {
       console.error('❌ [DIAGNOSTIC] Erreur:', error);
       Alert.alert('Erreur', 'Impossible de générer le diagnostic: ' + error.message);
+    }
+  };
+
+  // *** NOUVEAU: Diagnostic mémoire ***
+  const handleMemoryDiagnostic = async () => {
+    try {
+      console.log('🧹 [MEMORY-DIAGNOSTIC] Analyse de la mémoire...');
+      
+      // *** CORRIGÉ: Accéder au service via l'exposition globale améliorée ***
+      let motionService = null;
+      
+      // Essayer d'abord via window (React Native/Expo)
+      if (typeof window !== 'undefined' && window.nativeEnhancedMotionService) {
+        motionService = window.nativeEnhancedMotionService;
+        console.log('🌐 [MEMORY-DIAGNOSTIC] Service trouvé via window');
+      }
+      // Puis via global (Node.js/fallback)
+      else if (typeof global !== 'undefined' && global.nativeEnhancedMotionService) {
+        motionService = global.nativeEnhancedMotionService;
+        console.log('🌐 [MEMORY-DIAGNOSTIC] Service trouvé via global');
+      }
+      
+      if (!motionService) {
+        Alert.alert(
+          'Service Non Disponible',
+          'Le service de motion n\'est pas en cours d\'exécution ou n\'est pas exposé globalement.\n\nDémarrez l\'application de localisation et réessayez.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      
+      // Vérifier que le service est bien actif
+      if (!motionService.isRunning) {
+        Alert.alert(
+          'Service Inactif',
+          'Le service de motion est arrêté.\n\nDémarrez le tracking depuis l\'écran principal pour obtenir les statistiques mémoire.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      
+      // Obtenir les statistiques mémoire
+      const stats = motionService.getMemoryStats();
+      if (!stats) {
+        throw new Error('Impossible d\'obtenir les statistiques mémoire');
+      }
+      
+      setMemoryStats(stats);
+      setShowMemoryModal(true);
+      
+      console.log('✅ [MEMORY-DIAGNOSTIC] Statistiques mémoire récupérées:', stats);
+      
+    } catch (error) {
+      console.error('❌ [MEMORY-DIAGNOSTIC] Erreur:', error);
+      Alert.alert(
+        'Erreur Diagnostic Mémoire', 
+        `Impossible d'analyser la mémoire:\n\n${error.message}\n\nAssurez-vous que le service de tracking est démarré.`,
+        [{ text: 'OK' }]
+      );
+    }
+  };
+
+  // *** NOUVEAU: Nettoyage manuel de la mémoire ***
+  const handleMemoryCleanup = async () => {
+    try {
+      // *** CORRIGÉ: Accéder au service via l'exposition globale améliorée ***
+      let motionService = null;
+      
+      if (typeof window !== 'undefined' && window.nativeEnhancedMotionService) {
+        motionService = window.nativeEnhancedMotionService;
+      } else if (typeof global !== 'undefined' && global.nativeEnhancedMotionService) {
+        motionService = global.nativeEnhancedMotionService;
+      }
+      
+      if (!motionService) {
+        Alert.alert('Service Non Disponible', 'Le service de motion n\'est pas en cours d\'exécution.');
+        return;
+      }
+      
+      if (!motionService.isRunning) {
+        Alert.alert('Service Inactif', 'Le service de motion est arrêté.');
+        return;
+      }
+      
+      const beforeStats = motionService.getMemoryStats();
+      
+      // Effectuer le nettoyage forcé
+      const afterStats = motionService.forceMemoryCleanup();
+      
+      const memoryFreed = beforeStats.estimatedMemoryUsage.totalBytes - afterStats.estimatedMemoryUsage.totalBytes;
+      
+      Alert.alert(
+        'Nettoyage Terminé',
+        `Mémoire libérée: ${(memoryFreed / 1024).toFixed(2)} KB\n\n` +
+        `Avant: ${beforeStats.estimatedMemoryUsage.totalKB} KB\n` +
+        `Après: ${afterStats.estimatedMemoryUsage.totalKB} KB\n\n` +
+        `Historiques nettoyés:\n` +
+        `• Orientation: ${beforeStats.orientationHistorySize} → ${afterStats.orientationHistorySize}\n` +
+        `• Pas: ${beforeStats.stepHistorySize} → ${afterStats.stepHistorySize}`,
+        [{ text: 'OK' }]
+      );
+      
+      // Mettre à jour les stats affichées si le modal est ouvert
+      if (showMemoryModal) {
+        setMemoryStats(afterStats);
+      }
+      
+    } catch (error) {
+      console.error('❌ [MEMORY-CLEANUP] Erreur:', error);
+      Alert.alert('Erreur', 'Impossible de nettoyer la mémoire: ' + error.message);
     }
   };
 
@@ -373,6 +487,24 @@ export default function ConfigurationScreen() {
       color: '#00ff88',
       hasArrow: true,
       onPress: handlePedometerDiagnostic,
+    },
+    {
+      id: 2,
+      title: 'Diagnostic Mémoire',
+      subtitle: 'Analyser l\'utilisation de la mémoire',
+      icon: 'hardware-chip',
+      color: '#74c0fc',
+      hasArrow: true,
+      onPress: handleMemoryDiagnostic,
+    },
+    {
+      id: 3,
+      title: 'Nettoyage Mémoire',
+      subtitle: 'Libérer la mémoire utilisée par les historiques',
+      icon: 'trash',
+      color: '#ff8cc8',
+      hasArrow: true,
+      onPress: handleMemoryCleanup,
     },
   ];
 
@@ -929,6 +1061,163 @@ export default function ConfigurationScreen() {
                   </View>
                 ))}
               </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* *** NOUVEAU: Modal de diagnostic mémoire *** */}
+      <Modal
+        visible={showMemoryModal}
+        transparent={true}
+        animationType="slide"
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.memoryModalContent}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="analytics" size={32} color="#74c0fc" />
+              <Text style={styles.modalTitle}>Diagnostic Mémoire</Text>
+              <TouchableOpacity 
+                onPress={() => setShowMemoryModal(false)}
+                style={styles.modalClose}
+              >
+                <Ionicons name="close" size={24} color="#888888" />
+              </TouchableOpacity>
+            </View>
+            
+            {memoryStats && (
+              <ScrollView style={styles.memoryStatsContainer}>
+                {/* Utilisation totale */}
+                <View style={styles.memorySection}>
+                  <Text style={styles.memorySectionTitle}>🧮 Utilisation Totale</Text>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Mémoire estimée:</Text>
+                    <Text style={styles.memoryValue}>{memoryStats.estimatedMemoryUsage.totalKB} KB</Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Dernière optimisation:</Text>
+                    <Text style={styles.memoryValue}>
+                      {new Date(memoryStats.lastMemoryCleanup).toLocaleTimeString()}
+                    </Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Nettoyages effectués:</Text>
+                    <Text style={styles.memoryValue}>{memoryStats.totalCleanupsPerformed}</Text>
+                  </View>
+                </View>
+
+                {/* Historiques */}
+                <View style={styles.memorySection}>
+                  <Text style={styles.memorySectionTitle}>📊 Historiques</Text>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Orientation:</Text>
+                    <Text style={[styles.memoryValue, 
+                      memoryStats.orientationHistorySize > memoryStats.orientationHistoryMaxSize * 0.8 ? 
+                      styles.memoryWarning : styles.memoryGood
+                    ]}>
+                      {memoryStats.orientationHistorySize}/{memoryStats.orientationHistoryMaxSize}
+                    </Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Pas détectés:</Text>
+                    <Text style={[styles.memoryValue, 
+                      memoryStats.stepHistorySize > memoryStats.stepHistoryMaxSize * 0.8 ? 
+                      styles.memoryWarning : styles.memoryGood
+                    ]}>
+                      {memoryStats.stepHistorySize}/{memoryStats.stepHistoryMaxSize}
+                    </Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Pas valides:</Text>
+                    <Text style={[styles.memoryValue, 
+                      memoryStats.validStepsHistorySize > memoryStats.validStepsHistoryMaxSize * 0.8 ? 
+                      styles.memoryWarning : styles.memoryGood
+                    ]}>
+                      {memoryStats.validStepsHistorySize}/{memoryStats.validStepsHistoryMaxSize}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Pools d'objets */}
+                <View style={styles.memorySection}>
+                  <Text style={styles.memorySectionTitle}>🔄 Pools d'Objets Réutilisés</Text>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Objets d'orientation:</Text>
+                    <Text style={styles.memoryValue}>{memoryStats.objectPools.orientationObjects}</Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Objets de pas:</Text>
+                    <Text style={styles.memoryValue}>{memoryStats.objectPools.stepObjects}</Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Objets de données:</Text>
+                    <Text style={styles.memoryValue}>{memoryStats.objectPools.dataObjects}</Text>
+                  </View>
+                </View>
+
+                {/* Détails utilisation */}
+                <View style={styles.memorySection}>
+                  <Text style={styles.memorySectionTitle}>🔍 Détail par Composant</Text>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Historique orientation:</Text>
+                    <Text style={styles.memoryValue}>
+                      {(memoryStats.estimatedMemoryUsage.breakdown.orientationHistory / 1024).toFixed(2)} KB
+                    </Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Historique pas:</Text>
+                    <Text style={styles.memoryValue}>
+                      {(memoryStats.estimatedMemoryUsage.breakdown.stepHistory / 1024).toFixed(2)} KB
+                    </Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Pas valides:</Text>
+                    <Text style={styles.memoryValue}>
+                      {(memoryStats.estimatedMemoryUsage.breakdown.validStepsHistory / 1024).toFixed(2)} KB
+                    </Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Pools d'objets:</Text>
+                    <Text style={styles.memoryValue}>
+                      {(memoryStats.estimatedMemoryUsage.breakdown.objectPools / 1024).toFixed(2)} KB
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Status */}
+                <View style={styles.memorySection}>
+                  <Text style={styles.memorySectionTitle}>⚡ Statut Optimisation</Text>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Auto-nettoyage:</Text>
+                    <Text style={[styles.memoryValue, 
+                      memoryStats.memoryOptimizationActive ? styles.memoryGood : styles.memoryWarning
+                    ]}>
+                      {memoryStats.memoryOptimizationActive ? 'Actif' : 'Inactif'}
+                    </Text>
+                  </View>
+                  <View style={styles.memoryRow}>
+                    <Text style={styles.memoryLabel}>Logs throttlés:</Text>
+                    <Text style={styles.memoryValue}>{memoryStats.throttledLogsCount}</Text>
+                  </View>
+                </View>
+              </ScrollView>
+            )}
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity 
+                style={styles.memoryRefreshButton}
+                onPress={handleMemoryDiagnostic}
+              >
+                <Ionicons name="refresh" size={20} color="#74c0fc" />
+                <Text style={styles.memoryRefreshButtonText}>Actualiser</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.memoryCleanupButton}
+                onPress={handleMemoryCleanup}
+              >
+                <Ionicons name="trash" size={20} color="#ff8cc8" />
+                <Text style={styles.memoryCleanupButtonText}>Nettoyer</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1574,5 +1863,77 @@ const styles = StyleSheet.create({
     borderColor: '#333333',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  memoryModalContent: {
+    backgroundColor: '#1a1a1a',
+    padding: 20,
+    borderRadius: 12,
+    width: '80%',
+    maxHeight: '80%',
+  },
+  memorySection: {
+    marginBottom: 20,
+  },
+  memorySectionTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  memoryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  memoryLabel: {
+    color: '#888888',
+    fontSize: 14,
+  },
+  memoryValue: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  memoryWarning: {
+    color: '#ffaa00',
+  },
+  memoryGood: {
+    color: '#00ff88',
+  },
+  memoryRefreshButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 15,
+    borderRadius: 8,
+    backgroundColor: '#2a2a2a',
+    borderWidth: 1,
+    borderColor: '#74c0fc',
+    marginRight: 10,
+  },
+  memoryRefreshButtonText: {
+    color: '#74c0fc',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginLeft: 8,
+  },
+  memoryCleanupButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 15,
+    borderRadius: 8,
+    backgroundColor: '#2a2a2a',
+    borderWidth: 1,
+    borderColor: '#ff8cc8',
+  },
+  memoryCleanupButtonText: {
+    color: '#ff8cc8',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginLeft: 8,
+  },
+  memoryStatsContainer: {
+    flex: 1,
   },
 }); 
