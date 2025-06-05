@@ -24,9 +24,6 @@ export default function AuthScreen({ onAuthSuccess }) {
     password: '',
     confirmPassword: '',
     height: '',
-    weight: '',
-    age: '',
-    gender: 'unspecified'
   });
 
   // Vérifier si l'utilisateur est déjà connecté
@@ -69,19 +66,18 @@ export default function AuthScreen({ onAuthSuccess }) {
         return false;
       }
 
-      if (!formData.height || !formData.weight) {
-        Alert.alert('Erreur', 'Taille et poids requis pour calculer la longueur de pas');
+      if (!formData.height) {
+        Alert.alert('Erreur', 'Taille requise pour calculer la longueur de pas');
         return false;
       }
 
       const height = parseInt(formData.height);
-      const weight = parseInt(formData.weight);
-      if (height < 120 || height > 250 || weight < 30 || weight > 300) {
-        Alert.alert('Erreur', 'Valeurs de taille ou poids invalides');
+      if (height < 120 || height > 250) {
+        Alert.alert('Erreur', 'Taille invalide (entre 120 et 250 cm)');
         return false;
       }
 
-      // Validation de l'email si fourni
+      // NOUVEAU: Validation de l'email uniquement s'il est fourni (optionnel)
       if (formData.email.trim() && !formData.email.includes('@')) {
         Alert.alert('Erreur', 'Format d\'email invalide');
         return false;
@@ -133,70 +129,37 @@ export default function AuthScreen({ onAuthSuccess }) {
   const handleSignUp = async () => {
     if (!validateForm()) return;
 
-    // Avertissement si pas d'email
-    if (!formData.email.trim()) {
-      Alert.alert(
-        '⚠️ Pas d\'email fourni',
-        'ATTENTION : Vous n\'avez pas fourni d\'email.\n\n' +
-        '🔒 Vos données ne seront JAMAIS récupérables en cas de perte de mot de passe.\n\n' +
-        '💡 Recommandation : Ajoutez un email pour sécuriser votre compte.\n\n' +
-        'Voulez-vous continuer sans email ?',
-        [
-          { text: 'Annuler', style: 'cancel' },
-          { text: 'Ajouter un email', onPress: () => {
-            // Focus sur le champ email (ou juste retourner)
-            return;
-          }},
-          { text: 'Continuer sans email', style: 'destructive', onPress: proceedWithSignUp }
-        ]
-      );
-      return;
-    }
-
-    proceedWithSignUp();
-  };
-
-  const proceedWithSignUp = async () => {
     setIsLoading(true);
     try {
-      // Si pas d'email fourni, utiliser un email temporaire valide pour Supabase Auth
-      // mais on marquera l'email comme NULL dans notre profil
+      // NOUVEAU: Flux simplifié - plus de faux emails
       const hasRealEmail = !!formData.email.trim();
-      
-      // Essayer différents domaines si example.com ne fonctionne pas
-      let emailForSupabase;
-      if (hasRealEmail) {
-        emailForSupabase = formData.email.trim();
-      } else {
-        const cleanUsername = formData.username.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const timestamp = Date.now();
-        
-        // Essayer avec un service d'email temporaire reconnu
-        emailForSupabase = `${cleanUsername}${timestamp}@10minutemail.com`;
-      }
-      
-      console.log('📧 [AUTH] Email utilisé pour Supabase:', emailForSupabase);
       
       const userData = {
         username: formData.username.trim(),
         height: parseInt(formData.height),
-        weight: parseInt(formData.weight),
-        age: formData.age ? parseInt(formData.age) : undefined,
-        gender: formData.gender,
         hasRealEmail: hasRealEmail,
-        actualEmail: hasRealEmail ? formData.email.trim() : null // Email réel ou NULL
+        actualEmail: hasRealEmail ? formData.email.trim() : null
       };
 
-      const result = await supabaseService.signUp(emailForSupabase, formData.password, userData);
+      // NOUVEAU: Appel direct de signUp qui gère automatiquement anonyme vs email
+      const result = await supabaseService.signUp(
+        hasRealEmail ? formData.email.trim() : '', // Email vide = mode anonyme
+        formData.password, 
+        userData
+      );
+      
+      // NOUVEAU: Appeler onAuthSuccess immédiatement après inscription réussie
+      console.log('✅ [AUTH] Inscription réussie, user:', result.user);
+      onAuthSuccess?.(result.user);
       
       Alert.alert(
         'Inscription réussie !',
         `Votre compte "${formData.username}" a été créé.\n\n` +
         (hasRealEmail ? 
           'Vous pouvez maintenant commencer à enregistrer vos trajets.' :
-          '⚠️ N\'oubliez pas : sans email, vos données ne sont pas récupérables.\n💡 Vous pourrez ajouter un email plus tard dans les paramètres.'
+          '👤 Compte anonyme créé. Vous pourrez ajouter un email plus tard dans les paramètres pour sécuriser votre compte.'
         ),
-        [{ text: 'OK', onPress: () => onAuthSuccess?.(result.user) }]
+        [{ text: 'OK' }] // Plus besoin d'appeler onAuthSuccess ici
       );
     } catch (error) {
       console.error('❌ [AUTH] Erreur inscription:', error);
@@ -211,8 +174,6 @@ export default function AuthScreen({ onAuthSuccess }) {
         errorMessage = 'Ce nom d\'utilisateur ou email est déjà utilisé';
       } else if (error.message.includes('Invalid input')) {
         errorMessage = 'Données invalides. Vérifiez vos informations.';
-      } else if (error.message.includes('Email address') && error.message.includes('invalid')) {
-        errorMessage = 'Problème de configuration email temporaire.\nEssayez avec un vrai email ou contactez le support.';
       } else {
         errorMessage = error.message;
       }
@@ -315,7 +276,7 @@ export default function AuthScreen({ onAuthSuccess }) {
         <Ionicons name="mail" size={20} color="#ffaa00" style={styles.inputIcon} />
         <TextInput
           style={styles.input}
-          placeholder="Email (OPTIONNEL - recommandé)"
+          placeholder="Email (OPTIONNEL - pour sécuriser le compte)"
           placeholderTextColor="#ffaa00"
           value={formData.email}
           onChangeText={(text) => updateFormData('email', text)}
@@ -326,7 +287,7 @@ export default function AuthScreen({ onAuthSuccess }) {
       </View>
 
       <Text style={styles.emailWarning}>
-        ⚠️ Sans email, vos données ne sont PAS récupérables en cas de perte de mot de passe
+        💡 Sans email : compte anonyme (vous pourrez en ajouter un plus tard)
       </Text>
 
       <View style={styles.inputContainer}>
@@ -355,57 +316,19 @@ export default function AuthScreen({ onAuthSuccess }) {
 
       <Text style={styles.sectionTitle}>Informations personnelles</Text>
       <Text style={styles.sectionSubtitle}>
-        Nécessaires pour calculer précisément votre longueur de pas
+        Votre taille est nécessaire pour calculer précisément votre longueur de pas
       </Text>
 
-      <View style={styles.rowContainer}>
-        <View style={[styles.inputContainer, styles.halfWidth]}>
-          <Ionicons name="resize" size={20} color="#888888" style={styles.inputIcon} />
-          <TextInput
-            style={styles.input}
-            placeholder="Taille (cm)"
-            placeholderTextColor="#888888"
-            value={formData.height}
-            onChangeText={(text) => updateFormData('height', text)}
-            keyboardType="numeric"
-          />
-        </View>
-
-        <View style={[styles.inputContainer, styles.halfWidth]}>
-          <Ionicons name="fitness" size={20} color="#888888" style={styles.inputIcon} />
-          <TextInput
-            style={styles.input}
-            placeholder="Poids (kg)"
-            placeholderTextColor="#888888"
-            value={formData.weight}
-            onChangeText={(text) => updateFormData('weight', text)}
-            keyboardType="numeric"
-          />
-        </View>
-      </View>
-
-      <View style={styles.rowContainer}>
-        <View style={[styles.inputContainer, styles.halfWidth]}>
-          <Ionicons name="calendar" size={20} color="#888888" style={styles.inputIcon} />
-          <TextInput
-            style={styles.input}
-            placeholder="Âge (optionnel)"
-            placeholderTextColor="#888888"
-            value={formData.age}
-            onChangeText={(text) => updateFormData('age', text)}
-            keyboardType="numeric"
-          />
-        </View>
-
-        <View style={[styles.inputContainer, styles.halfWidth]}>
-          <Ionicons name="person" size={20} color="#888888" style={styles.inputIcon} />
-          <TouchableOpacity style={styles.pickerButton}>
-            <Text style={styles.pickerText}>
-              {formData.gender === 'male' ? 'Homme' :
-               formData.gender === 'female' ? 'Femme' : 'Non spécifié'}
-            </Text>
-          </TouchableOpacity>
-        </View>
+      <View style={styles.inputContainer}>
+        <Ionicons name="resize" size={20} color="#888888" style={styles.inputIcon} />
+        <TextInput
+          style={styles.input}
+          placeholder="Taille en cm (ex: 175)"
+          placeholderTextColor="#888888"
+          value={formData.height}
+          onChangeText={(text) => updateFormData('height', text)}
+          keyboardType="numeric"
+        />
       </View>
 
       <TouchableOpacity 

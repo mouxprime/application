@@ -1,16 +1,58 @@
 import React, { useState } from 'react';
 import { View, ScrollView, TouchableOpacity, Text, StyleSheet, Dimensions } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createStackNavigator } from '@react-navigation/stack';
 import { Ionicons } from '@expo/vector-icons';
 
 import MapScreen from '../screens/MapScreen';
-import SensorsScreen from '../screens/SensorsScreen';
 import AnalyticsScreen from '../screens/AnalyticsScreen';
 import ConfigurationScreen from '../screens/ConfigurationScreen';
 import AccountScreen from '../screens/AccountScreen';
+import TrajectoryHistoryScreen from '../screens/TrajectoryHistoryScreen';
+import FriendsScreen from '../screens/FriendsScreen';
 
 const Tab = createBottomTabNavigator();
+const Stack = createStackNavigator();
 const { width: screenWidth } = Dimensions.get('window');
+
+// Stack Navigator pour l'écran Account (pour permettre la navigation vers TrajectoryHistory et Friends)
+function AccountStack() {
+  return (
+    <Stack.Navigator
+      screenOptions={{
+        headerStyle: {
+          backgroundColor: '#1a1a1a',
+        },
+        headerTintColor: '#ffffff',
+        headerTitleStyle: {
+          fontWeight: 'bold',
+        },
+      }}
+    >
+      <Stack.Screen 
+        name="AccountMain" 
+        component={AccountScreen} 
+        options={{ headerShown: false }}
+      />
+      <Stack.Screen 
+        name="TrajectoryHistory" 
+        component={TrajectoryHistoryScreen} 
+        options={{ 
+          title: 'Historique des Trajets',
+          headerShown: false // Le composant gère son propre header
+        }}
+      />
+      <Stack.Screen 
+        name="Friends" 
+        component={FriendsScreen} 
+        options={{ 
+          title: 'Mes Amis',
+          headerShown: false // Le composant gère son propre header
+        }}
+      />
+    </Stack.Navigator>
+  );
+}
 
 // Configuration des onglets avec leurs informations
 const tabsConfig = [
@@ -21,16 +63,9 @@ const tabsConfig = [
     iconUnfocused: 'map-outline',
   },
   {
-    name: 'Capteurs',
-    component: SensorsScreen,
-    headerTitle: 'Données Capteurs',
-    iconFocused: 'hardware-chip',
-    iconUnfocused: 'hardware-chip-outline',
-  },
-  {
     name: 'Analytique',
     component: AnalyticsScreen,
-    headerTitle: 'Analyse Performance',
+    headerTitle: 'Analyse & Capteurs',
     iconFocused: 'analytics',
     iconUnfocused: 'analytics-outline',
   },
@@ -43,7 +78,7 @@ const tabsConfig = [
   },
   {
     name: 'Mon Compte',
-    component: AccountScreen,
+    component: AccountStack, // Utiliser le Stack au lieu du composant direct
     headerTitle: 'Mon Compte',
     iconFocused: 'person',
     iconUnfocused: 'person-outline',

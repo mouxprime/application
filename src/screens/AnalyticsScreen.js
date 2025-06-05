@@ -6,17 +6,22 @@ import {
   ScrollView,
   TouchableOpacity,
   Dimensions,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Path, Circle, Line, Text as SvgText, G, Rect } from 'react-native-svg';
 
 import { useLocalization } from '../context/LocalizationContext';
+import SensorsScreen from './SensorsScreen';
 
 const { width: screenWidth } = Dimensions.get('window');
 
 export default function AnalyticsScreen() {
   const { state } = useLocalization();
+  
+  const [activeTab, setActiveTab] = useState('analytics');
+  
   const [analyticsData, setAnalyticsData] = useState({
     totalDistance: 0,
     averageSpeed: 0,
@@ -31,21 +36,18 @@ export default function AnalyticsScreen() {
 
   const [selectedMetric, setSelectedMetric] = useState('confidence');
 
-  // *** CORRECTION: Calcul des métriques avec throttling pour éviter les boucles infinies ***
   useEffect(() => {
     if (state.trajectory.length > 1) {
-      // Throttling: recalculer seulement si assez de temps s'est écoulé
       const now = Date.now();
       if (!analyticsData.lastCalculation || now - analyticsData.lastCalculation > 1000) {
         calculateAnalytics();
       }
     }
-  }, [state.trajectory.length, state.stepCount]); // Dépendances plus spécifiques
+  }, [state.trajectory.length, state.stepCount]);
 
   const calculateAnalytics = () => {
     const trajectory = state.trajectory;
     
-    // Calcul de la distance totale
     let totalDistance = 0;
     const speeds = [];
     const confidences = [];
@@ -54,49 +56,41 @@ export default function AnalyticsScreen() {
       const prev = trajectory[i - 1];
       const curr = trajectory[i];
       
-      // Distance euclidienne
       const distance = Math.sqrt(
         Math.pow(curr.x - prev.x, 2) + Math.pow(curr.y - prev.y, 2)
       );
       totalDistance += distance;
       
-      // Vitesse instantanée
-      const timeDiff = (curr.timestamp - prev.timestamp) / 1000; // en secondes
+      const timeDiff = (curr.timestamp - prev.timestamp) / 1000;
       if (timeDiff > 0) {
         const speed = distance / timeDiff;
         speeds.push(speed);
       }
       
-      // Niveau de confiance
       if (curr.confidence !== undefined) {
         confidences.push(curr.confidence);
       }
     }
 
-    // Statistiques de vitesse
     const averageSpeed = speeds.length > 0 
       ? speeds.reduce((a, b) => a + b, 0) / speeds.length 
       : 0;
     const maxSpeed = speeds.length > 0 ? Math.max(...speeds) : 0;
     
-    // Statistiques de confiance
     const averageAccuracy = confidences.length > 0
       ? confidences.reduce((a, b) => a + b, 0) / confidences.length
       : 0;
 
-    // Distribution de précision
     const accuracyDistribution = {
       high: confidences.filter(c => c > 0.8).length,
       medium: confidences.filter(c => c > 0.5 && c <= 0.8).length,
       low: confidences.filter(c => c <= 0.5).length
     };
 
-    // Durée de session
     const sessionDuration = trajectory.length > 0 
       ? (trajectory[trajectory.length - 1].timestamp - trajectory[0].timestamp) / 1000 
       : 0;
 
-    // *** NOUVEAU: Métriques de détection verticale ***
     const verticalMetrics = state.pdrMetrics?.verticalDetection || null;
 
     setAnalyticsData({
@@ -105,17 +99,14 @@ export default function AnalyticsScreen() {
       maxSpeed,
       averageAccuracy,
       sessionDuration,
-      confidenceHistory: confidences.slice(-50), // 50 derniers points
+      confidenceHistory: confidences.slice(-50),
       speedHistory: speeds.slice(-50),
       accuracyDistribution,
-      verticalDetection: verticalMetrics, // Ajout des métriques verticales
-      lastCalculation: Date.now() // *** NOUVEAU: Timestamp pour throttling ***
+      verticalDetection: verticalMetrics,
+      lastCalculation: Date.now()
     });
   };
 
-  /**
-   * Rendu des métriques principales
-   */
   const renderMainMetrics = () => {
     const metrics = [
       {
@@ -142,7 +133,6 @@ export default function AnalyticsScreen() {
         icon: 'time',
         color: '#ffa726'
       },
-      // *** NOUVEAU: Métriques de crawling ***
       {
         title: 'Distance crawling',
         value: `${(state.crawlDistance || 0).toFixed(1)} m`,
@@ -173,9 +163,6 @@ export default function AnalyticsScreen() {
     );
   };
 
-  /**
-   * Graphique de confiance au fil du temps
-   */
   const renderConfidenceChart = () => {
     const data = analyticsData.confidenceHistory;
     if (!data || data.length < 2) {
@@ -203,7 +190,6 @@ export default function AnalyticsScreen() {
       <View style={styles.chartContainer}>
         <Text style={styles.chartTitle}>Évolution de la confiance</Text>
         <Svg width={chartWidth} height={chartHeight} style={styles.chart}>
-          {/* Zones de qualité */}
           <Rect
             x={padding}
             y={padding}
@@ -226,7 +212,6 @@ export default function AnalyticsScreen() {
             fill="rgba(255, 68, 68, 0.1)"
           />
           
-          {/* Ligne de données */}
           <Path
             d={pathData}
             stroke="#00ff88"
@@ -234,7 +219,6 @@ export default function AnalyticsScreen() {
             fill="none"
           />
           
-          {/* Points de données */}
           {data.slice(-10).map((value, index) => {
             const actualIndex = data.length - 10 + index;
             const x = padding + (actualIndex / (data.length - 1)) * (chartWidth - 2 * padding);
@@ -269,9 +253,6 @@ export default function AnalyticsScreen() {
     );
   };
 
-  /**
-   * Distribution de la précision
-   */
   const renderAccuracyDistribution = () => {
     const { high, medium, low } = analyticsData.accuracyDistribution;
     const total = high + medium + low;
@@ -328,9 +309,6 @@ export default function AnalyticsScreen() {
     );
   };
 
-  /**
-   * *** NOUVEAU: Métriques de détection verticale ***
-   */
   const renderVerticalDetectionMetrics = () => {
     const verticalData = analyticsData.verticalDetection;
     
@@ -369,7 +347,6 @@ export default function AnalyticsScreen() {
       <View style={styles.verticalContainer}>
         <Text style={styles.sectionTitle}>🔄 Détection Verticale</Text>
         
-        {/* État actuel */}
         <View style={styles.verticalStatusRow}>
           <Text style={styles.verticalLabel}>Méthode:</Text>
           <View style={[styles.methodBadge, { backgroundColor: getMethodColor(verticalData.method) }]}>
@@ -379,7 +356,6 @@ export default function AnalyticsScreen() {
           </View>
         </View>
 
-        {/* Confiance d'orientation */}
         <View style={styles.verticalStatusRow}>
           <Text style={styles.verticalLabel}>Confiance Orientation:</Text>
           <Text style={[styles.verticalValue, { 
@@ -389,7 +365,6 @@ export default function AnalyticsScreen() {
           </Text>
         </View>
 
-        {/* Dernier pic vertical */}
         {verticalData.lastVerticalPeak > 0 && (
           <View style={styles.verticalStatusRow}>
             <Text style={styles.verticalLabel}>Dernier Pic Vertical:</Text>
@@ -399,7 +374,6 @@ export default function AnalyticsScreen() {
           </View>
         )}
 
-        {/* État fallback */}
         {verticalData.fallbackActive && (
           <View style={styles.verticalStatusRow}>
             <Text style={styles.verticalLabel}>⚠️ Fallback Actif</Text>
@@ -412,9 +386,6 @@ export default function AnalyticsScreen() {
     );
   };
 
-  /**
-   * Informations système avancées
-   */
   const renderSystemInfo = () => {
     return (
       <View style={styles.systemContainer}>
@@ -459,9 +430,6 @@ export default function AnalyticsScreen() {
     );
   };
 
-  /**
-   * Exportation des données
-   */
   const exportData = () => {
     const exportData = {
       timestamp: new Date().toISOString(),
@@ -471,14 +439,10 @@ export default function AnalyticsScreen() {
       pose: state.pose
     };
 
-    // TODO: Implémenter l'exportation réelle
     console.log('Données exportées:', exportData);
     alert('Fonctionnalité d\'exportation à implémenter');
   };
 
-  /**
-   * Formatage de la durée
-   */
   const formatDuration = (seconds) => {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
@@ -493,9 +457,6 @@ export default function AnalyticsScreen() {
     }
   };
 
-  /**
-   * *** NOUVEAU: Rendu des métriques physiologiques ***
-   */
   const renderPhysiologicalMetrics = () => {
     const pdrState = state.pdr;
     if (!pdrState?.physiologicalMetrics) {
@@ -506,9 +467,9 @@ export default function AnalyticsScreen() {
     
     const getFrequencyColor = () => {
       const ratio = metrics.currentStepFrequency / metrics.maxAllowedFrequency;
-      if (ratio > 0.8) return '#ff4444'; // Rouge si proche du max
-      if (ratio > 0.6) return '#ffaa00'; // Orange si élevé
-      return '#00ff88'; // Vert si normal
+      if (ratio > 0.8) return '#ff4444';
+      if (ratio > 0.6) return '#ffaa00';
+      return '#00ff88';
     };
 
     const getGyroColor = () => {
@@ -523,7 +484,6 @@ export default function AnalyticsScreen() {
         <Text style={styles.sectionTitle}>🧬 Garde-fous Physiologiques</Text>
         
         <View style={styles.metricsGrid}>
-          {/* Fréquence de pas */}
           <View style={styles.metricCard}>
             <Ionicons name="pulse" size={24} color={getFrequencyColor()} />
             <Text style={styles.metricTitle}>Fréquence Pas</Text>
@@ -535,7 +495,6 @@ export default function AnalyticsScreen() {
             </Text>
           </View>
 
-          {/* Historique des pas */}
           <View style={styles.metricCard}>
             <Ionicons name="time" size={24} color="#4ecdc4" />
             <Text style={styles.metricTitle}>Historique</Text>
@@ -545,7 +504,6 @@ export default function AnalyticsScreen() {
             <Text style={styles.metricSubtitle}>pas récents</Text>
           </View>
 
-          {/* Confirmation gyroscopique */}
           <View style={styles.metricCard}>
             <Ionicons 
               name={metrics.gyroConfirmationEnabled ? "checkmark-circle" : "close-circle"} 
@@ -564,7 +522,6 @@ export default function AnalyticsScreen() {
           </View>
         </View>
 
-        {/* Indicateurs d'état */}
         <View style={styles.statusIndicators}>
           <View style={[
             styles.statusIndicator,
@@ -601,28 +558,63 @@ export default function AnalyticsScreen() {
     );
   };
 
-  return (
-    <SafeAreaView style={styles.container}>
+  const renderTabHeader = () => (
+    <View style={styles.tabHeader}>
+      <TouchableOpacity
+        style={[styles.tabButton, activeTab === 'analytics' && styles.tabButtonActive]}
+        onPress={() => setActiveTab('analytics')}
+      >
+        <Ionicons 
+          name="analytics" 
+          size={20} 
+          color={activeTab === 'analytics' ? '#000000' : '#ffffff'} 
+        />
+        <Text style={[
+          styles.tabButtonText, 
+          activeTab === 'analytics' && styles.tabButtonTextActive
+        ]}>
+          Analytique
+        </Text>
+      </TouchableOpacity>
+      
+      <TouchableOpacity
+        style={[styles.tabButton, activeTab === 'sensors' && styles.tabButtonActive]}
+        onPress={() => setActiveTab('sensors')}
+      >
+        <Ionicons 
+          name="hardware-chip" 
+          size={20} 
+          color={activeTab === 'sensors' ? '#000000' : '#ffffff'} 
+        />
+        <Text style={[
+          styles.tabButtonText, 
+          activeTab === 'sensors' && styles.tabButtonTextActive
+        ]}>
+          Capteurs
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
+
+  const renderContent = () => {
+    if (activeTab === 'sensors') {
+      return <SensorsScreen />;
+    }
+    
+    return (
       <ScrollView showsVerticalScrollIndicator={false}>
-        {/* Métriques principales */}
         {renderMainMetrics()}
         
-        {/* Graphique de confiance */}
         {renderConfidenceChart()}
         
-        {/* Distribution de précision */}
         {renderAccuracyDistribution()}
         
-        {/* Métriques de détection verticale */}
         {renderVerticalDetectionMetrics()}
         
-        {/* Informations système */}
         {renderSystemInfo()}
         
-        {/* Métriques physiologiques */}
         {renderPhysiologicalMetrics()}
         
-        {/* Boutons d'action */}
         <View style={styles.actionsContainer}>
           <TouchableOpacity style={styles.exportButton} onPress={exportData}>
             <Ionicons name="download" size={20} color="#ffffff" />
@@ -632,6 +624,14 @@ export default function AnalyticsScreen() {
         
         <View style={styles.spacer} />
       </ScrollView>
+    );
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      {renderTabHeader()}
+      
+      {renderContent()}
     </SafeAreaView>
   );
 }
@@ -849,6 +849,41 @@ const styles = StyleSheet.create({
   statusText: {
     color: '#ffffff',
     fontSize: 14,
+    fontWeight: 'bold',
+  },
+  tabHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#333333',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#666666',
+  },
+  tabButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginHorizontal: 5,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#666666',
+  },
+  tabButtonActive: {
+    backgroundColor: '#00ff88',
+    borderColor: '#00ff88',
+  },
+  tabButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  tabButtonTextActive: {
+    color: '#000000',
     fontWeight: 'bold',
   },
 }); 
